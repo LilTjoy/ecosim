@@ -406,6 +406,8 @@ export class PlanetView {
       seasonAmp: this.params.moon > 0.3 ? 0.16 : 0.26,
       landLife: s.stage >= 5,
       starTint: [1, 0.82 + t * 0.18, 0.62 + t * 0.38],
+      volcanism: d.tectonics ? 1 : 0.3,
+      lifeStage: s.stage,
     };
   }
 
