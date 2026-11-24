@@ -1,5 +1,6 @@
 // Балансный стенд: node-прогон мира без браузера.
-// npm run bench -- <seed> <ticks> [rules|neural] [--soil=0|1] [--disease=0|1] [--rescue=0|1] [--rng=k] [--UN=..]
+// npm run bench -- <seed> <ticks> [rules|neural] [--soil=0|1] [--disease=0|1] [--rescue=0|1] [--rng=k] [--UN=..] [--BETA=..]
+// --tool=1 — инструмент «эпидемия» на такте 10000 (или --toolAt=N), отчёт через 3000 тактов
 import * as WM from '../src/sim/world';
 const { World } = WM;
 import { BIOMES } from '../src/sim/terrain';
@@ -20,9 +21,10 @@ const W = w as any;
 // флаги пишем в settings, только если такое поле уже есть
 for (const k in flags) if (k in w.settings) W.settings[k] = typeof W.settings[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
 // ручки баланса почвы: --UN=0.15 --DUNG=0.5 --TAU=1500 --clampL=0.75,1.2 --clampW=0.7,1.25
-const SO = (WM as any).SOIL, NC = (WM as any).NUT_CLAMP;
+const SO = (WM as any).SOIL, NC = (WM as any).NUT_CLAMP, DI = (WM as any).DIS;
 for (const k in flags) {
   if (SO && k in SO) SO[k] = Number(flags[k]);
+  if (DI && k in DI) DI[k] = Number(flags[k]);
   if (NC && k === 'clampL') NC.land = flags[k].split(',').map(Number);
   if (NC && k === 'clampW') NC.water = flags[k].split(',').map(Number);
   if (NC && k === 'clampC') NC.corpse = flags[k].split(',').map(Number);
@@ -48,19 +50,57 @@ const lastZero: Record<string, number> = {};
 // средняя «жизнь» туши: ловим исчезнувшие из списка
 let prevC = new Set<any>(); let cLife = 0, cN = 0;
 let t0 = performance.now(); let soil0 = 0; const lines: string[] = [];
+// резкие падения: вид (≥50 особей) потерял больше половины за 1000 тактов; отдельно — те, где шла вспышка болезни
+const hist = new Map<number, Map<number, number>>(); let drops = 0, dropsDis = 0; const dropList: string[] = [];
+const pathOn = (sp: number, a: number, b: number) => (W.pathogens?.has(sp) && W.pathogens.get(sp).born <= b) || (W.outbreaks ?? []).some((P: any) => P.host === sp && P.born <= b && (P.ended ?? 1e9) >= a);
+// инструмент «эпидемия»
+const toolAt = flags.tool && flags.tool !== '0' ? Number(flags.toolAt ?? 10000) : -1;
+let tool: any = null; let toolRep = '';
+const pDeaths = (sp: number) => { let d = W.pathogens?.get(sp)?.deaths ?? 0; for (const P of W.outbreaks ?? []) if (P.host === sp) d += P.deaths; return d; };
+const pdHist = new Map<string, number>();
 const f2 = (v: number | undefined, d = 2) => v === undefined || Number.isNaN(v) ? '-' : v.toFixed(d);
 const t1 = W.terrain;
 const t1b = t1.biome as Uint8Array;
 const tLand = () => { let n = 0; for (let i = 0; i < t1.biome.length; i++) if (!BIOMES[t1.biome[i]].water) n++; return n; };
 const landN = tLand();
+// бюджет тесноты: ожидаемые смерти Σ n·crowding (по тактам) — с ним сверяем смерти «болезнь»
+let budget = 0;
 for (let t = 1; t <= T; t++) {
   w.step();
+  for (const sp of w.species.all.values()) if (sp.extinct === null && sp.count > 400) budget += sp.count * w.crowding(sp.id);
   if (t % 10 === 0) {
     const cur = new Set<any>(w.corpses);
     for (const k of prevC) if (!cur.has(k)) { cLife += k.age; cN++; }
     prevC = cur;
   }
+  if (t === toolAt) {
+    const top = w.species.living()[0];
+    const before = new Set(W.pathogens ? W.pathogens.values() : []);
+    w.epidemic();
+    const P = W.pathogens?.get(top.id);
+    tool = { sp: top, n0: top.count, P: P && !before.has(P) ? P : null, inf0: P?.cases ?? 0, minN: top.count, dis0: [...w.deaths].filter(([k]) => k === `${top.name}:болезнь`).reduce((a, [, v]) => a + v, 0) };
+  }
+  if (tool && t > toolAt && t <= toolAt + 3000) {
+    if (t % 20 === 0) tool.minN = Math.min(tool.minN, tool.sp.count);
+    if (t === toolAt + 3000) {
+      const P = tool.P; const dis = [...w.deaths].filter(([k]) => k === `${tool.sp.name}:болезнь`).reduce((a, [, v]) => a + v, 0) - tool.dis0;
+      const vEnd = P ? (P.ended === null ? P.virMean : P.virCurve[P.virCurve.length - 1]) : NaN;
+      toolRep = `\n tool@${toolAt}: «${tool.sp.name}» n0=${tool.n0} infected0=${tool.inf0} pathDeaths=${P?.deaths} kill%=${P ? (100 * P.deaths / tool.n0).toFixed(1) : '-'} disDeathsSp=${dis} (${(100 * dis / tool.n0).toFixed(1)}%) cases=${P?.cases} recovered=${P?.recovered} peak=${P?.peak} ended=${P?.ended ?? 'active'} vir0=${P?.vir0} vir+3000=${f2(vEnd)} virCurve=${P ? [0, 0.1, 0.25, 0.5, 0.75, 1].map((q) => f2(P.virCurve[Math.min(P.virCurve.length - 1, Math.floor(q * (P.virCurve.length - 1)))])).join('/') : '-'} n+3000=${tool.sp.count} min=${tool.minN} alive+3000=${tool.sp.extinct === null}`;
+    }
+  }
   if (t % 500 === 0) {
+    for (const sp of w.species.all.values()) if (sp.extinct === null) pdHist.set(`${sp.id}:${t}`, pDeaths(sp.id));
+    for (const sp of w.species.all.values()) {
+      let h = hist.get(sp.id); if (!h) hist.set(sp.id, (h = new Map()));
+      h.set(t, sp.extinct === null ? sp.count : 0);
+      const old = h.get(t - 1000); h.delete(t - 1500);
+      if (old !== undefined && old >= 50 && h.get(t)! < old * 0.5 && !(toolAt > 0 && t - 1000 <= toolAt + 3000 && t >= toolAt && sp.id === tool?.sp.id)) {
+        // «из-за болезни» — шла вспышка и смерти от неё дали ≥ половины потерь
+        drops++; const pd = pathOn(sp.id, t - 1000, t); const dd = pd ? pDeaths(sp.id) - (pdHist.get(`${sp.id}:${t - 1000}`) ?? 0) : 0;
+        if (pd && dd >= 0.5 * (old - h.get(t)!)) dropsDis++;
+        if (dropList.length < 12 || pd) dropList.push(`${t}:${sp.name}${old}→${h.get(t)}${pd ? `🦠${dd}` : ''}`);
+      }
+    }
     const g: Record<string, number> = { herb: 0, omni: 0, carn: 0, swim: 0 };
     for (const c of w.creatures) g[guild(c)]++;
     for (const k in g) if (g[k] === 0) { if (extinct[k] === undefined) extinct[k] = t; zero[k]++; lastZero[k] = t; }
@@ -94,10 +134,11 @@ for (let t = 1; t <= T; t++) {
     // болезни (если уже есть)
     let disD = 0;
     for (const [k, v] of w.deaths) if (k.endsWith(':болезнь')) disD += v;
-    extra += ` | disDeaths=${disD}`;
+    extra += ` | disDeaths=${disD} budget=${budget.toFixed(0)}`;
     if (W.micro?.sick !== undefined) {
       const act = W.pathogens ? [...W.pathogens.values()] : [];
-      extra += ` sick=${W.micro.sick} outbreaks=${W.micro.outbreaksTotal ?? '-'} vir=${act.length ? f2(act.reduce((s: number, p: any) => s + p.virMean, 0) / act.length) : '-'}`;
+      let pd = 0; for (const P of [...act, ...(W.outbreaks ?? [])]) pd += P.deaths;
+      extra += ` sick=${W.micro.sick} outbreaks=${W.micro.outbreaksTotal ?? '-'} spills=${(W.nextPath ?? 1) - 1} pathD=${pd} active=${act.length} vir=${act.length ? f2(act.reduce((s: number, p: any) => s + p.virMean, 0) / act.length) : '-'}`;
     }
     lines.push(`t=${t} n=${w.creatures.length} H${g.herb} O${g.omni} C${g.carn} S${g.swim} | herbSize p10/50/90=${q(herbs, .1)}/${q(herbs, .5)}/${q(herbs, .9)} carnSize=${q(carn, .1)}/${q(carn, .5)}/${q(carn, .9)} | sp=${w.species.living().length}/${w.species.all.size} ms=${ms.toFixed(2)}${sp0 ? ` soilMs=${((soilMs - soil0) / EV).toFixed(3)}` : ''}${extra}`);
     t0 = performance.now(); soil0 = soilMs; gN = gW = gNw = gWw = clSum = clN = rawSum = 0;
@@ -105,5 +146,8 @@ for (let t = 1; t <= T; t++) {
 }
 const rivers = t1.river ? (() => { let r2 = 0, r1 = 0; for (let i = 0; i < t1.river.length; i++) { if (t1.river[i] >= 2) r2++; else if (t1.river[i] === 1) r1++; } return ` rivers: ${t1.rivers?.length} named, river>=2 ${(100 * r2 / landN).toFixed(2)}% land, stream ${(100 * r1 / landN).toFixed(2)}%`; })() : '';
 console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n') +
+  `\n drops50%/1000t: ${drops} (disease-driven ${dropsDis}) ${dropList.join(' ')}` +
+  (W.outbreaks ? `\n outbreaks: ` + [...W.outbreaks, ...W.pathogens.values()].filter((P: any) => P.announced).slice(-10).map((P: any) => `${P.born}-${P.ended ?? '…'} «${P.name}»@${w.species.all.get(P.host)?.name} cases${P.cases} d${P.deaths} pk${P.peak} v${P.vir0.toFixed(2)}→${P.virMean.toFixed(2)}`).join(' | ') : '') + toolRep +
+  (tool ? `\n toolSpecies at end: n=${tool.sp.count} extinct=${tool.sp.extinct}` : '') +
   `\n extinct(guild first hit 0): ${JSON.stringify(extinct)} zeroSamples(of ${T / 500}): ${JSON.stringify(zero)} lastZero: ${JSON.stringify(lastZero)}${rivers}\n top: ` +
   w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | '));

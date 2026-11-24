@@ -3,6 +3,7 @@ import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKe
 import { clamp } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
 import { B, BIOMES, Terrain } from './terrain';
+import { pathogenName, type Pathogen } from './microbes';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -23,6 +24,20 @@ for (let k = 0; k < 128; k++) {
 export const SOIL = { KD: 4.6e-4, KR: 1 / 6000, KL: 2e-5, UN: 0.15, KS: 2e-4, CN: 9e-4, DUNG: 0.8, SMAX: 2.5, LMAX: 6, TAU: 3000, SG: 0 };
 /** Границы множителя роста от плодородия (суша, вода; суженные — запасная ручка №1) и множителя скорости разложения туш. */
 export const NUT_CLAMP: { land: [number, number]; water: [number, number]; corpse: [number, number] } = { land: [0.75, 1.2], water: [0.7, 1.25], corpse: [0.5, 1.8] };
+
+/**
+ * Болезни: заражение β·(сумма β больных соседей), иммунитет после болезни, перелив в новый вид, лихорадка,
+ * материнские антитела, мутация вирулентности при передаче; инструмент «эпидемия» (доля, вирулентность,
+ * повышенный риск на время волны); потолок риска для больного.
+ * SPILL = 2e-6 (а не 5e-7): иначе за 30 тыс. тактов объявлялось всего 1–2 вспышки (многие глохнут, R < 1).
+ * BOOST_RISK = 0.003 (а не 0.0012): самый многочисленный вид обычно всеядный и живёт врозь (≈1 сородич рядом),
+ * волна почти не идёт дальше заражённых инструментом — при 0.0012 погибало лишь 4–7% вида.
+ */
+export const DIS = { BETA: 0.0035, IMM: 3000, IMM_VAR: 2000, SPILL: 2e-6, SPILL_MIN_N: 40, COOLDOWN: 1500,
+  FEVER: 0.04, MAT_IMM: 600, MUT: 0.08 /* ×(r1+r2+r3−1.5) → σ≈0.04 */, TOOL_SHARE: 0.12, TOOL_VIR: 0.85,
+  BOOST_RISK: 0.003, BOOST_T: 1500, RISK_CAP: 0.01 };
+/** Длительность болезни: мягкие штаммы болеют дольше (компромисс «заразность — вирулентность»). */
+const DUR = (v: number) => Math.round(220 + 160 * (1 - v));
 
 export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest';
 
@@ -65,6 +80,11 @@ export interface Creature {
   cause: string | null;
   /** Навоз в кишечнике — выпадает раз в 32 такта. */
   dung: number;
+  /** Тактов болезни осталось (0 — здоров), тактов иммунитета, вирулентность штамма и заразность. */
+  sick: number;
+  immune: number;
+  vir: number;
+  beta: number;
 }
 
 export interface Corpse {
@@ -94,14 +114,14 @@ export interface Ancestor {
 export interface WorldEvent {
   tick: number;
   text: string;
-  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player' | 'micro';
+  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player' | 'micro' | 'disease';
   x?: number;
   y?: number;
 }
 
 /** Мгновенные события для визуальных эффектов (сердечки, вспышки и т.п.). */
 export interface Fx {
-  kind: 'birth' | 'mate' | 'kill' | 'meteor' | 'newSpecies';
+  kind: 'birth' | 'mate' | 'kill' | 'meteor' | 'newSpecies' | 'outbreak';
   x: number;
   y: number;
   hue: number;
@@ -119,6 +139,9 @@ export interface Sample {
   fix: number;
   myc: number;
   plankton: number;
+  /** Больных во всём мире; индекс CO₂ (зарезервировано, пока 0). */
+  sick: number;
+  co2: number;
 }
 
 export type BrainMode = 'rules' | 'neural';
@@ -153,6 +176,10 @@ export interface Settings {
   seasons: boolean;
   /** Почва и микробы: круговорот питательных веществ. */
   soil: boolean;
+  /** Болезни: внутривидовые эпидемии вместо безликого «риска тесноты». */
+  disease: boolean;
+  /** Хищники чаще ловят больных (отложено, пока не используется). */
+  healthyHerd: boolean;
 }
 
 export const DAY = 150;
@@ -196,7 +223,7 @@ export class World {
   history: Sample[] = [];
   events: WorldEvent[] = [];
   fx: Fx[] = [];
-  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true, soil: true };
+  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true, soil: true, disease: true, healthyHerd: false };
   brainMode: BrainMode = 'rules';
   env: SurfaceEnv = EARTH_ENV;
   drought = 0;
@@ -241,9 +268,22 @@ export class World {
   /** Потоки за окно в 20 тактов и их сглаженные значения (для схемы круговорота). */
   flux = { decomp: 0, gpp: 0, uptake: 0, litterIn: 0, dungIn: 0, carrionIn: 0, runoff: 0, corpseDecay: 0, resp: 0 };
   fluxEma = { decomp: 0, gpp: 0, uptake: 0, litterIn: 0, dungIn: 0, carrionIn: 0, runoff: 0, corpseDecay: 0, resp: 0 };
-  micro = { corpsesRecycled: 0, lastGiantLog: -1e9, lastMeteor: null as null | { x: number; y: number; tick: number } };
+  micro = { corpsesRecycled: 0, lastGiantLog: -1e9, sick: 0, outbreaksTotal: 0, lastMeteor: null as null | { x: number; y: number; tick: number } };
   /** Кости на месте разложившихся туш (только для вида, не более 400). */
   boneMarks: { x: number; y: number; size: number; t: number }[] = [];
+  // ---- болезни ----
+  /** Активные вспышки (по виду-хозяину) и архив закончившихся (не более 30). */
+  pathogens = new Map<number, Pathogen>();
+  outbreaks: Pathogen[] = [];
+  /** Бюджет смертности тесноты, разделённый между больными и здоровыми (раз в 20 тактов). */
+  private sickRisk = new Map<number, number>();
+  private healthyRisk = new Map<number, number>();
+  /** Средний квадрат вирулентности больных вида; до какого такта действует усиленный риск (инструмент). */
+  private meanV2 = new Map<number, number>();
+  private boost = new Map<number, number>();
+  private nextPath = 1;
+  /** Уже рассказывали, что вспышка может заглохнуть сама. */
+  private fizzleLogged = false;
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -340,8 +380,16 @@ export class World {
       this.flux[k as keyof World['flux']] = 0;
       this.fluxEma[k as keyof World['flux']] = 0;
     }
-    this.micro = { corpsesRecycled: 0, lastGiantLog: -1e9, lastMeteor: null };
+    this.micro = { corpsesRecycled: 0, lastGiantLog: -1e9, sick: 0, outbreaksTotal: 0, lastMeteor: null };
     this.boneMarks = [];
+    this.pathogens.clear();
+    this.outbreaks = [];
+    this.sickRisk.clear();
+    this.healthyRisk.clear();
+    this.meanV2.clear();
+    this.boost.clear();
+    this.nextPath = 1;
+    this.fizzleLogged = false;
   }
 
   /**
@@ -564,6 +612,10 @@ export class World {
       player: false,
       cause: null,
       dung: 0,
+      sick: 0,
+      immune: 0,
+      vir: 0,
+      beta: 0,
     };
     this.creatures.push(c);
     this.ancestors.set(c.id, { id: c.id, mother: null, sp, g, generation: 0, born: this.tick, died: null });
@@ -741,6 +793,9 @@ export class World {
     let hy = 0;
     let n = 0;
     let alarm = null as Creature | null;
+    // больные сородичи рядом: сумма их заразности и вирулентность штамма (без отдельного поиска)
+    let sickB = 0;
+    let srcV = 0;
     const wantMate = this.ready(c);
     const hungry = c.energy < this.maxEnergy(c.g) * 0.85;
     this.forNear(c.x, c.y, range, (o, d2) => {
@@ -753,6 +808,10 @@ export class World {
           hx += Math.cos(o.heading);
           hy += Math.sin(o.heading);
           if (o.alarm > 0 && !alarm) alarm = o;
+          if (o.sick > 0) {
+            sickB += o.beta;
+            srcV = o.vir;
+          }
         }
         if (wantMate && d2 < mateD && this.ready(o) && this.compatible(c, o)) {
           mateD = d2;
@@ -780,7 +839,7 @@ export class World {
       }
     });
     c.pack = n;
-    return { threat, threatD, prey, preyD, mate, mateD, n, fx, fy, hx, hy, alarm: alarm as Creature | null };
+    return { threat, threatD, prey, preyD, mate, mateD, n, fx, fy, hx, hy, alarm: alarm as Creature | null, sickB, srcV };
   }
 
   private senseRange(c: Creature, idx: number): number {
@@ -803,6 +862,7 @@ export class World {
 
     const born: Creature[] = [];
     const soilOn = this.settings.soil;
+    const disOn = this.settings.disease;
     for (const c of this.creatures) {
       if (!c.alive) continue;
       const idx = this.terrain.index(c.x, c.y);
@@ -840,8 +900,30 @@ export class World {
 
       const max = this.maxEnergy(c.g);
       if (c.energy > max) c.energy = max;
-      const risk = this.crowdRisk.get(c.sp) ?? 0;
-      if (c.energy <= 0) this.die(c, 'голод');
+      let risk = 0;
+      const wasSick = c.sick > 0;
+      if (!disOn) risk = this.crowdRisk.get(c.sp) ?? 0;
+      else if (wasSick) {
+        // лихорадка ≈ 0.02·m при v = 0.5 (40% основного обмена); смерть — из бюджета тесноты, вес ∝ v²
+        c.energy -= DIS.FEVER * c.vir * c.g.size * Math.sqrt(c.g.size) * 0.5;
+        const w2 = (c.vir * c.vir) / (this.meanV2.get(c.sp) ?? 0.25);
+        risk = (this.sickRisk.get(c.sp) ?? 0) * (w2 < 0.25 ? 0.25 : w2 > 3 ? 3 : w2);
+        if (--c.sick === 0) {
+          c.immune = DIS.IMM + ((Math.random() * DIS.IMM_VAR) | 0);
+          const P = this.pathogens.get(c.sp);
+          if (P) {
+            P.recovered++;
+            P.outW++;
+          }
+        }
+      } else {
+        risk = this.healthyRisk.get(c.sp) ?? 0; // == crowding(), пока в виде никто не болеет
+        if (c.immune > 0) c.immune--;
+        else if (p.sickB > 0) {
+          if (Math.random() < DIS.BETA * p.sickB) this.infect(c, p.srcV + (Math.random() + Math.random() + Math.random() - 1.5) * DIS.MUT);
+        } else if (p.n >= 6 && !this.pathogens.has(c.sp)) this.trySpill(c, p.n);
+      }
+      if (c.energy <= 0) this.die(c, disOn && wasSick ? 'болезнь' : 'голод');
       else if (risk && Math.random() < risk) this.die(c, 'болезнь');
       else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
       else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5) this.die(c, 'утонул');
@@ -869,7 +951,18 @@ export class World {
     const idx = this.terrain.index(c.x, c.y);
     if (corpse) {
       const e = this.maxEnergy(c.g) * 0.35 + Math.max(0, c.energy);
-      this.corpses.push({ x: c.x, y: c.y, energy: e, size: c.g.size, hue: c.g.hue, age: 0, idx, e0: e, sp: c.sp, sick: false });
+      this.corpses.push({ x: c.x, y: c.y, energy: e, size: c.g.size, hue: c.g.hue, age: 0, idx, e0: e, sp: c.sp, sick: c.sick > 0 });
+    }
+    if (c.sick > 0) {
+      const P = this.pathogens.get(c.sp);
+      if (P) {
+        // смерть больного от болезни — в счёт вспышки; съеденный или утонувший больной просто выбывает
+        if (cause === 'болезнь') {
+          P.deaths++;
+          this.bump(-6, c.sp, 1);
+        }
+        P.outW++;
+      }
     }
     if (c.dung > 0 && this.settings.soil) {
       if (this.isWater[idx] === 1) this.soil[idx] = Math.min(SOIL.SMAX, this.soil[idx] + c.dung);
@@ -1350,6 +1443,86 @@ export class World {
     this.web.set(key, (this.web.get(key) ?? 0) + v);
   }
 
+  // ---------------- болезни ----------------
+
+  /** Раз в 20 тактов: кривая вспышки, эффективное R, объявление и конец. */
+  private trackPathogens(sickN: Map<number, number>, sickV: Map<number, number>): void {
+    for (const P of [...this.pathogens.values()]) {
+      const ns = sickN.get(P.host) ?? 0;
+      if (ns === 0) {
+        this.endPathogen(P);
+        continue;
+      }
+      P.virMean = sickV.get(P.host)! / ns;
+      P.curve.push(ns);
+      P.virCurve.push(P.virMean);
+      if (P.curve.length > 300) {
+        P.curve.shift();
+        P.virCurve.shift();
+      }
+      if (ns > P.peak) P.peak = ns;
+      if (this.tick % 200 === 0) {
+        P.rEff = 0.5 * P.rEff + (0.5 * P.newW) / Math.max(1, P.outW);
+        P.newW = P.outW = 0;
+      }
+      if (!P.announced && P.cases >= 8) this.announcePathogen(P, true);
+    }
+  }
+
+  private announcePathogen(P: Pathogen, log: boolean): void {
+    P.announced = true;
+    this.micro.outbreaksTotal++;
+    const sp = this.species.all.get(P.host);
+    if (log) this.log(`🦠 Среди «${sp?.name ?? '?'}» вспышка: «${P.name}» (${P.kind})`, 'disease', P.x, P.y);
+    this.fx.push({ kind: 'outbreak', x: P.x, y: P.y, hue: sp?.hue ?? 100 });
+  }
+
+  /** Заразить особь штаммом вирулентности v: мягкие болеют дольше, злые — заразнее. */
+  private infect(o: Creature, v: number): void {
+    v = v < 0.05 ? 0.05 : v > 0.95 ? 0.95 : v;
+    o.sick = DUR(v);
+    o.vir = v;
+    o.beta = 0.4 + 0.6 * Math.sqrt(v);
+    const P = this.pathogens.get(o.sp);
+    if (P) {
+      P.cases++;
+      P.newW++;
+    }
+  }
+
+  /** Новая болезнь в тесном стаде: «перелив» от безымянного резервуара (чаще, когда вид расплодился). */
+  private trySpill(c: Creature, n: number): void {
+    const sp = this.species.all.get(c.sp);
+    if (!sp || sp.count < DIS.SPILL_MIN_N || this.tick - sp.lastOutbreak <= DIS.COOLDOWN) return;
+    if (Math.random() >= DIS.SPILL * (n - 5) * (this.crowding(c.sp) > 0 ? 20 : 1)) return;
+    const P = this.newPathogen(c.sp, c.x, c.y, 0.35 + 0.3 * Math.random());
+    this.infect(c, P.vir0);
+  }
+
+  private newPathogen(host: number, x: number, y: number, vir0: number): Pathogen {
+    const region = this.terrain.regionAt(x, y)?.name ?? 'море';
+    const { name, kind } = pathogenName(region);
+    const P: Pathogen = { id: this.nextPath++, host, name, kind, region, born: this.tick, ended: null, cases: 0, deaths: 0, recovered: 0, peak: 0,
+      curve: [], virCurve: [], vir0, virMean: vir0, newW: 0, outW: 0, rEff: 1, announced: false, x, y };
+    this.pathogens.set(host, P);
+    return P;
+  }
+
+  /** Вспышка закончилась: в архив, виду — передышка. */
+  private endPathogen(P: Pathogen): void {
+    P.ended = this.tick;
+    const sp = this.species.all.get(P.host);
+    if (sp) sp.lastOutbreak = this.tick;
+    this.pathogens.delete(P.host);
+    this.outbreaks.push(P);
+    if (this.outbreaks.length > 30) this.outbreaks.shift();
+    if (P.announced) this.log(`✔ «${P.name}» отступила: переболели ${P.recovered}, погибли ${P.deaths}`, 'disease');
+    else if (!this.fizzleLogged && sp) {
+      this.fizzleLogged = true;
+      this.log(`🦠 Вспышка среди «${sp.name}» заглохла сама — каждый больной заражал меньше одного (R < 1)`, 'disease');
+    }
+  }
+
   private breed(a: Creature, b: Creature | null): Creature {
     let g = b ? crossover(a.g, b.g) : { ...a.g };
     g = mutate(g, this.settings.mutationRate);
@@ -1380,6 +1553,8 @@ export class World {
     if (b) b.cooldown = 220;
     a.lonely = 0;
     if (b) b.lonely = 0;
+    // материнские антитела: детёныш переболевшей матери первое время не заражается
+    child.immune = a.immune > 0 ? DIS.MAT_IMM : 0;
 
     this.fx.push({ kind: b ? 'mate' : 'birth', x: a.x, y: a.y, hue: a.g.hue });
     if (isNew) {
@@ -1459,6 +1634,29 @@ export class World {
   epidemic(): void {
     const top = this.species.living()[0];
     if (!top) return;
+    if (this.settings.disease) {
+      // новая болезнь: заражаем долю вида злым штаммом — дальше волна идёт сама
+      const hosts = this.creatures.filter((c) => c.alive && c.sp === top.id);
+      if (!hosts.length) return;
+      const old = this.pathogens.get(top.id);
+      if (old) this.endPathogen(old);
+      const first = hosts[Math.floor(Math.random() * hosts.length)];
+      const P = this.newPathogen(top.id, first.x, first.y, DIS.TOOL_VIR);
+      const k = Math.min(hosts.length, Math.max(5, Math.round(DIS.TOOL_SHARE * hosts.length)));
+      for (let i = 0; i < k; i++) {
+        // частичная перетасовка Фишера — Йетса: k разных особей
+        const j = i + Math.floor(Math.random() * (hosts.length - i));
+        const c = hosts[j];
+        hosts[j] = hosts[i];
+        hosts[i] = c;
+        c.immune = 0; // против нового штамма иммунитета нет
+        this.infect(c, DIS.TOOL_VIR);
+      }
+      this.boost.set(top.id, this.tick + DIS.BOOST_T);
+      this.announcePathogen(P, false); // запись в летопись — ниже, своя
+      this.log(`🦠 Новая болезнь «${P.name}» среди «${top.name}» — против неё ни у кого нет иммунитета`, 'disaster', P.x, P.y);
+      return;
+    }
     let killed = 0;
     for (const c of this.creatures) {
       if (c.sp === top.id && Math.random() < 0.6) {
@@ -1552,10 +1750,22 @@ export class World {
   }
 
   private record(): void {
+    const disOn = this.settings.disease;
     const counts = new Map<number, number>();
     const sums = new Map<number, Record<GeneKey, number>>();
+    // больные по видам: число, сумма v и v²
+    const sickN = new Map<number, number>();
+    const sickV = new Map<number, number>();
+    const sickV2 = new Map<number, number>();
+    let sickAll = 0;
     for (const c of this.creatures) {
       counts.set(c.sp, (counts.get(c.sp) ?? 0) + 1);
+      if (c.sick > 0) {
+        sickAll++;
+        sickN.set(c.sp, (sickN.get(c.sp) ?? 0) + 1);
+        sickV.set(c.sp, (sickV.get(c.sp) ?? 0) + c.vir);
+        sickV2.set(c.sp, (sickV2.get(c.sp) ?? 0) + c.vir * c.vir);
+      }
       let s = sums.get(c.sp);
       if (!s) sums.set(c.sp, (s = Object.fromEntries(GENE_KEYS.map((k) => [k, 0])) as Record<GeneKey, number>));
       for (const k of GENE_KEYS) s[k] += c.g[k];
@@ -1586,8 +1796,27 @@ export class World {
       sp.count = n;
       sp.peak = Math.max(sp.peak, n);
       const risk = this.crowding(sp.id);
-      if (risk > 0) this.crowdRisk.set(sp.id, risk);
-      else this.crowdRisk.delete(sp.id);
+      if (!disOn) {
+        if (risk > 0) this.crowdRisk.set(sp.id, risk);
+        else this.crowdRisk.delete(sp.id);
+      } else {
+        // бюджет тесноты (n·crowding) целиком тратится на больных, остаток — на здоровых: смертей не больше, чем было
+        const ns = sickN.get(sp.id) ?? 0;
+        const want = risk * n;
+        if (ns > 0) {
+          let sr = Math.min(DIS.RISK_CAP, want / ns);
+          if ((this.boost.get(sp.id) ?? 0) > this.tick) sr = Math.max(sr, DIS.BOOST_RISK); // только инструмент «эпидемия»
+          this.sickRisk.set(sp.id, sr);
+          this.meanV2.set(sp.id, sickV2.get(sp.id)! / ns);
+          const rest = n > ns ? Math.max(0, want - sr * ns) / (n - ns) : 0;
+          if (rest > 0) this.healthyRisk.set(sp.id, rest);
+          else this.healthyRisk.delete(sp.id);
+        } else {
+          this.sickRisk.delete(sp.id);
+          if (risk > 0) this.healthyRisk.set(sp.id, risk);
+          else this.healthyRisk.delete(sp.id);
+        }
+      }
       if (n > 600 && !sp.crowded) {
         sp.crowded = true;
         this.log(`🦠 «${sp.name}» слишком расплодились — среди них гуляют болезни`, 'disaster');
@@ -1607,6 +1836,8 @@ export class World {
         if (sp.peak >= 10) this.log(`💀 Вид «${sp.name}» вымер (на пике было ${sp.peak})`, 'extinct');
       }
     }
+    this.micro.sick = sickAll;
+    if (disOn) this.trackPathogens(sickN, sickV);
     // связи затухают — пищевая сеть показывает «что происходит сейчас»
     for (const [k, v] of this.web) {
       const nv = v * 0.97;
@@ -1638,6 +1869,11 @@ export class World {
       }
     }
     const nl1 = Math.max(1, nl);
+    // пищевая сеть: разложители едят падаль и опад, опад кормит траву
+    const fl0 = this.flux;
+    if (fl0.corpseDecay > 0) this.bump(-4, -1, fl0.corpseDecay * 0.002);
+    if (fl0.decomp > 0) this.bump(-4, -5, fl0.decomp * 40);
+    if (fl0.litterIn > 0) this.bump(-5, 0, fl0.litterIn * 40);
     // потоки круговорота: сглаживаем окно в 20 тактов
     const fe = this.fluxEma;
     for (const k in this.flux) {
@@ -1656,6 +1892,8 @@ export class World {
       fix: fl / nl1,
       myc: nm ? my / nm : 0,
       plankton: nw ? pl / nw : 0,
+      sick: sickAll,
+      co2: 0,
     });
     if (this.history.length > 900) this.history.shift();
   }

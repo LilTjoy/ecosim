@@ -23,6 +23,8 @@ export interface Species {
   announced: boolean;
   /** Сейчас идёт эпидемия из-за тесноты. */
   crowded: boolean;
+  /** Когда закончилась последняя вспышка болезни (передышка перед новой). */
+  lastOutbreak: number;
   x: number;
   y: number;
 }
@@ -103,6 +105,7 @@ export class SpeciesRegistry {
       depth: parent ? (this.all.get(parent)?.depth ?? 0) + 1 : 0,
       announced: false,
       crowded: false,
+      lastOutbreak: -1e9,
       x: 0,
       y: 0,
     };
