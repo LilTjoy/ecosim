@@ -49,6 +49,7 @@ const TEMPLATE = /* html */ `
       <button data-act="earth">🌍 Земля</button>
       <button data-act="random">🎲 Случайный мир</button>
       <button data-act="replay" title="Те же условия, другой ход случайностей">🔁 Переиграть историю</button>
+      <button data-act="compare" title="Показать этот мир рядом с Землёй, Марсом и Венерой">🌍 Сравнить с соседями</button>
     </div>
     <details class="p-params" open>
       <summary>Параметры мира <span class="p-seed"></span></summary>
@@ -97,8 +98,10 @@ export class PlanetView {
   private panelTick = 0;
   private shownFacts = new Set<string>();
   private explain = true;
+  private massSynced = '';
   active = true;
   onDescend: ((env: SurfaceEnv, seed: number) => void) | null = null;
+  onCompare: ((p: PlanetParams) => void) | null = null;
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -106,6 +109,11 @@ export class PlanetView {
     this.bind();
     this.load(EARTH);
     requestAnimationFrame(() => this.loop());
+  }
+
+  /** Копия параметров открытого мира. */
+  get current(): PlanetParams {
+    return { ...this.params };
   }
 
   get assumptions(): Assumptions {
@@ -145,6 +153,7 @@ export class PlanetView {
         if (act === 'earth') this.load(EARTH);
         if (act === 'random') this.load(randomPlanet((Math.random() * 1e9) | 0));
         if (act === 'replay') this.load({ ...this.params, seed: (Math.random() * 1e9) | 0 });
+        if (act === 'compare') this.onCompare?.({ ...this.params });
       };
     });
     $(r, '.p-descend').onclick = () => this.onDescend?.(this.surfaceEnv(), this.params.seed);
@@ -226,7 +235,12 @@ export class PlanetView {
     p.starMass = Number(v('starMass').value);
     const flux = Number(v('flux').value);
     p.orbit = Math.sqrt(luminosity0(p.starMass) / 0.72 / flux);
-    p.mass = Number(v('mass').value);
+    // массу меняем, только если двигали её ползунок (у Марса 0,107 — точнее шага ползунка);
+    // реальная длительность динамо (Марс) не годится для планеты другой массы
+    if (v('mass').value !== this.massSynced) {
+      delete p.dynamoGyr;
+      p.mass = Number(v('mass').value);
+    }
     p.water = Math.pow(10, Number(v('water').value));
     p.moon = Number(v('moon').value);
     p.giant = v('giant').checked;
@@ -241,6 +255,7 @@ export class PlanetView {
     v('starMass').value = String(p.starMass);
     v('flux').value = String(this.flux(p));
     v('mass').value = String(p.mass);
+    this.massSynced = v('mass').value;
     v('water').value = String(Math.log10(p.water));
     v('moon').value = String(p.moon);
     v('giant').checked = p.giant;
@@ -268,6 +283,8 @@ export class PlanetView {
       ['🏝', `Суша: ${Math.round(d.land * 100)}% поверхности`],
     ];
     if (d.tidalLock) facts.push(['🔒', 'Приливный захват: одна сторона вечно к звезде']);
+    else if (d.slowRotation) facts.push(['🐢', `Медленное вращение (сутки — ${Math.round(p.rotation ?? 1)} земных) — слабое магнитное динамо`, 'dynamo']);
+    if (p.dynamoGyr !== undefined) facts.push(['📌', 'Магнитное поле задано по реальным данным, а не по формуле']);
     if (p.moon > 0.3) facts.push(['🌙', 'Крупный спутник стабилизирует наклон оси', 'axis']);
     else facts.push(['🌀', 'Нет крупного спутника — ось и климат «гуляют»', 'axis']);
     if (p.starMass < 0.6) facts.push(['⚡', 'Красный карлик: мощные вспышки в молодости', 'flare']);

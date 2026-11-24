@@ -4,6 +4,8 @@ import { clamp, mulberry32 } from '../lib/random';
 import type { Derived, PlanetParams, Sample } from './model';
 
 const TW = 512;
+/** Широта, выше которой у разреженного мира лежат полярные шапки (~66°, как сезонные шапки Марса). */
+const POLAR_CAP = 1.15;
 const TH = 256;
 
 /** 3D value noise — чтобы на сфере не было шва. */
@@ -128,11 +130,26 @@ function starColorFor(teff: number): THREE.Color {
   return c;
 }
 
+export interface GlobeOptions {
+  /** full — вращение и зум; rotate — только вращение (колесо прокручивает страницу); none — без управления. */
+  controls?: 'full' | 'rotate' | 'none';
+  stars?: boolean;
+  maxDpr?: number;
+  /** Настоящий размер планеты (без ограничения 0,7…1,6). */
+  trueScale?: boolean;
+  camDist?: number;
+  /** Высота камеры над экватором, радианы (по умолчанию ≈9°). */
+  camElev?: number;
+  moonDist?: number;
+  /** В узком окне не обрезать планету по бокам. */
+  fit?: boolean;
+}
+
 export class Globe {
   readonly renderer: THREE.WebGLRenderer;
   private scene = new THREE.Scene();
   private camera: THREE.PerspectiveCamera;
-  private controls: OrbitControls;
+  private controls: OrbitControls | null = null;
   private planet: THREE.Mesh;
   private clouds: THREE.Mesh;
   private atmo: THREE.Mesh;
@@ -159,22 +176,38 @@ export class Globe {
   private derived: Derived | null = null;
   private locked = false;
   private spin = 0.12;
+  private cloudSpin = 0;
+  private time = 0;
   private lastKey = '';
+  private bakedSeed: number | null = null;
+  private rock: [number, number, number] | null = null;
+  private wet = true;
+  private resizeObserver: ResizeObserver;
 
-  constructor(private container: HTMLElement) {
+  constructor(
+    private container: HTMLElement,
+    private opts: GlobeOptions = {},
+  ) {
     this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     this.renderer.outputColorSpace = THREE.LinearSRGBColorSpace;
-    this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+    this.renderer.setPixelRatio(Math.min(opts.maxDpr ?? 2, window.devicePixelRatio || 1));
     this.renderer.setClearColor(0x05060a);
     container.appendChild(this.renderer.domElement);
 
     this.camera = new THREE.PerspectiveCamera(38, 1, 0.1, 1000);
-    this.camera.position.set(0, 0.7, 4.4);
-    this.controls = new OrbitControls(this.camera, this.renderer.domElement);
-    this.controls.enableDamping = true;
-    this.controls.enablePan = false;
-    this.controls.minDistance = 1.7;
-    this.controls.maxDistance = 14;
+    const elev = opts.camElev ?? Math.atan2(0.7, 4.4);
+    this.camera.position.set(0, Math.sin(elev), Math.cos(elev)).multiplyScalar(opts.camDist ?? Math.hypot(0.7, 4.4));
+    this.camera.lookAt(0, 0, 0);
+    const mode = opts.controls ?? 'full';
+    if (mode !== 'none') {
+      this.controls = new OrbitControls(this.camera, this.renderer.domElement);
+      this.controls.enableDamping = true;
+      this.controls.enablePan = false;
+      this.controls.minDistance = 1.7;
+      this.controls.maxDistance = 14;
+      // без зума колесо мыши прокручивает страницу, а не планету
+      if (mode === 'rotate') this.controls.enableZoom = false;
+    }
 
     const mk = (data: Uint8Array) => {
       const t = new THREE.DataTexture(data as Uint8Array<ArrayBuffer>, TW, TH, THREE.RGBAFormat);
@@ -228,7 +261,7 @@ export class Globe {
 
     // спутник
     this.moon = new THREE.Mesh(new THREE.SphereGeometry(0.27, 48, 24), new THREE.MeshStandardMaterial({ map: this.moonTexture(), roughness: 1 }));
-    this.moon.position.set(3.4, 0, 0);
+    this.moon.position.set(opts.moonDist ?? 3.4, 0, 0);
     this.moonPivot.rotation.z = 0.09;
     this.moonPivot.add(this.moon);
     this.scene.add(this.moonPivot);
@@ -238,9 +271,10 @@ export class Globe {
     this.scene.add(this.star);
     this.sun.position.copy(this.lightDir).multiplyScalar(10);
     this.scene.add(this.sun, new THREE.AmbientLight(0xffffff, 0.04));
-    this.scene.add(this.starfield());
+    if (opts.stars !== false) this.scene.add(this.starfield());
 
-    new ResizeObserver(() => this.resize()).observe(container);
+    this.resizeObserver = new ResizeObserver(() => this.resize());
+    this.resizeObserver.observe(container);
     this.resize();
   }
 
@@ -308,17 +342,47 @@ export class Globe {
     this.renderer.domElement.style.width = '100%';
     this.renderer.domElement.style.height = '100%';
     this.camera.aspect = w / h;
+    // узкое окно: расширяем вертикальный угол обзора, чтобы по горизонтали влезало столько же
+    if (this.opts.fit) this.camera.fov = w < h ? (2 * Math.atan(Math.tan((19 * Math.PI) / 180) / (w / h)) * 180) / Math.PI : 38;
     this.camera.updateProjectionMatrix();
   }
 
-  /** Новая планета: рельеф, спутник, звезда. */
-  setPlanet(p: PlanetParams, d: Derived): void {
+  /** Новая планета: рельеф, спутник, звезда. Рельеф пересчитывается, только если сменился seed. */
+  setPlanet(p: PlanetParams, d: Derived, look?: { rock?: [number, number, number] }): void {
     this.derived = d;
     this.lastKey = '';
-    const n = new Noise3(p.seed);
-    const nm = new Noise3(p.seed + 1);
-    const nc = new Noise3(p.seed + 2);
-    const r = mulberry32(p.seed + 3);
+    if (p.seed !== this.bakedSeed) this.bake(p.seed);
+    this.rock = look?.rock ?? null;
+    this.wet = p.water > 0.01;
+
+    this.planet.scale.setScalar(this.opts.trueScale ? d.radius : clamp(d.radius, 0.7, 1.6));
+    this.clouds.scale.copy(this.planet.scale);
+    this.atmo.scale.copy(this.planet.scale);
+    this.moon.visible = p.moon > 0;
+    this.moon.scale.setScalar(Math.cbrt(Math.max(p.moon, 0.05)));
+    this.locked = d.tidalLock;
+    // медленное вращение (Венера) — планета почти стоит, а облака обгоняют её (суперротация)
+    const rot = p.rotation ?? 1;
+    this.spin = 0.12 / clamp(rot, 1, 60);
+    this.cloudSpin = rot > 20 ? 0.25 : 0;
+
+    const sc = starColorFor(d.teff);
+    (this.planet.material as THREE.ShaderMaterial).uniforms.starColor.value = sc;
+    this.star.material.color = sc;
+    const starR = Math.pow(p.starMass, 0.8);
+    const s = clamp((6 * starR) / p.orbit, 1.5, 24);
+    this.star.scale.setScalar(s);
+    this.star.position.copy(this.lightDir).multiplyScalar(60);
+    this.sun.color = sc;
+  }
+
+  /** Тяжёлая часть: рельеф, влажность и облака из шума (~131 тыс. пикселей). */
+  private bake(seed: number): void {
+    this.bakedSeed = seed;
+    const n = new Noise3(seed);
+    const nm = new Noise3(seed + 1);
+    const nc = new Noise3(seed + 2);
+    const r = mulberry32(seed + 3);
     for (let y = 0; y < TH; y++) {
       const lat = Math.PI / 2 - ((y + 0.5) / TH) * Math.PI;
       this.lat[y] = lat;
@@ -352,29 +416,18 @@ export class Globe {
     this.sorted.set(this.height);
     this.sorted.sort();
     this.cloudTex.needsUpdate = true;
-
-    this.planet.scale.setScalar(clamp(d.radius, 0.7, 1.6));
-    this.clouds.scale.copy(this.planet.scale);
-    this.atmo.scale.copy(this.planet.scale);
-    this.moon.visible = p.moon > 0;
-    this.moon.scale.setScalar(Math.cbrt(Math.max(p.moon, 0.05)));
-    this.locked = d.tidalLock;
-
-    const sc = starColorFor(d.teff);
-    (this.planet.material as THREE.ShaderMaterial).uniforms.starColor.value = sc;
-    this.star.material.color = sc;
-    const starR = Math.pow(p.starMass, 0.8);
-    const s = clamp((6 * starR) / p.orbit, 1.5, 24);
-    this.star.scale.setScalar(s);
-    this.star.position.copy(this.lightDir).multiplyScalar(60);
-    this.sun.color = sc;
   }
 
   /** Перекрасить планету под состояние на данный момент истории. */
   setState(s: Sample, tech: boolean): void {
     const d = this.derived;
     if (!d) return;
-    const key = [Math.round(s.T / 2), Math.round(s.ocean * 40), Math.round(s.ice * 20), s.stage, Math.round(Math.log10(s.co2 + 1e-7) * 3), Math.round(s.o2 * 40), tech].join(',');
+    const P = s.pressure + s.co2;
+    // почти без воздуха: нет снегопадов и открытой воды
+    const thin = P < 0.03;
+    // океан горячее кипения — планета укутана паром
+    const steam = s.ocean > 0.01 && s.T > 373;
+    const key = [Math.round(s.T / 2), Math.round(s.ocean * 40), Math.round(s.ice * 20), s.stage, Math.round(Math.log10(s.co2 + 1e-7) * 3), Math.round(s.o2 * 40), tech, thin, steam, Math.round(Math.log10(P + 1e-4) * 4)].join(',');
     if (key === this.lastKey) return;
     this.lastKey = key;
 
@@ -382,7 +435,8 @@ export class Globe {
     const land = s.ocean <= 0.005 ? 1 : clamp(1 - (1 - d.land) * Math.pow(s.ocean, 0.6), 0, 1);
     const sea = land >= 1 ? -1 : this.sorted[Math.floor(clamp(1 - land, 0, 0.999) * N)];
     const top = this.sorted[N - 1];
-    const snowball = s.ice > 0.9;
+    // сухой холодный мир — не снежок: льду просто неоткуда взяться
+    const snowball = s.ice > 0.9 && !thin && s.ocean > 0.01;
     const life = s.stage;
     const venus = s.ocean <= 0.005 && s.T > 340;
     const T = s.T;
@@ -399,7 +453,15 @@ export class Globe {
         let b: number;
         let water = 0;
         let city = 0;
-        if (h < sea) {
+        if (h < sea && thin) {
+          // высохшие котловины бывших морей: тёмная низменность, лёд — только в полярных шапках
+          const base = this.rockColor(0, thin, venus, T);
+          const polar = Math.abs(lat) > POLAR_CAP;
+          const sh = this.shade[i];
+          r = polar ? 232 : base[0] * 0.8 * sh;
+          g = polar ? 238 : base[1] * 0.8 * sh;
+          b = polar ? 244 : base[2] * 0.8 * sh;
+        } else if (h < sea) {
           const depth = clamp((sea - h) * 6, 0, 1);
           if (latT < 271 || snowball) {
             r = 220;
@@ -419,19 +481,7 @@ export class Globe {
           const lt = latT - e * 40;
           const m = this.moist[i];
           // голые породы
-          if (venus) {
-            r = 170 + e * 30;
-            g = 135 + e * 20;
-            b = 85;
-          } else if (T > 330) {
-            r = 150;
-            g = 95;
-            b = 65;
-          } else {
-            r = 118 + e * 30;
-            g = 104 + e * 26;
-            b = 90 + e * 24;
-          }
+          [r, g, b] = this.rockColor(e, thin, venus, T);
           if (life >= 5 && lt > 262 && lt < 318) {
             // растительность: лес / степь / пустыня / тундра
             const warm = clamp((lt - 262) / 40, 0, 1);
@@ -455,7 +505,7 @@ export class Globe {
             g = g * 0.85 + 30;
             b = b * 0.8;
           }
-          if (snowball || lt < 266 || (e > 0.7 && lt < 285)) {
+          if (thin ? Math.abs(lat) > POLAR_CAP && this.wet : snowball || lt < 266 || (e > 0.7 && lt < 285)) {
             r = 232;
             g = 238;
             b = 244;
@@ -483,25 +533,60 @@ export class Globe {
     pm.cityAmt.value = tech ? 1.4 : 0;
     // атмосфера: голубая от кислорода, оранжевая от метановой дымки, жёлтая у «Венеры»
     const glow = pm.glowColor.value as THREE.Color;
-    if (venus || s.co2 > 1) glow.setRGB(1, 0.82, 0.5);
+    if (steam) glow.setRGB(0.9, 0.9, 0.85);
+    else if (venus || s.co2 > 1) glow.setRGB(1, 0.82, 0.5);
     else if (life >= 1 && s.o2 < 0.002) glow.setRGB(1, 0.62, 0.32);
     else if (s.o2 > 0.02) glow.setRGB(0.32, 0.58, 1);
     else glow.setRGB(0.55, 0.68, 0.85);
     pm.glowStrength.value = clamp(Math.sqrt(s.pressure + s.co2) * 0.9, 0, 1.6);
     const cm = (this.clouds.material as THREE.ShaderMaterial).uniforms;
-    let cover = s.pressure < 0.03 ? 0 : clamp(0.2 + s.ocean * 0.12 + (T - 288) / 120, 0.05, 0.7);
-    if (venus && s.pressure + s.co2 > 3) cover = 1;
+    let cover = thin ? 0 : clamp(0.2 + s.ocean * 0.12 + (T - 288) / 120, 0.05, 0.7);
+    if (venus && P > 3) cover = 1;
+    if (steam) cover = 1;
     cm.cover.value = cover;
-    (cm.cloudColor.value as THREE.Color).setRGB(1, venus ? 0.88 : 1, venus ? 0.62 : 1);
+    const cc = cm.cloudColor.value as THREE.Color;
+    if (steam) cc.setRGB(0.92, 0.92, 0.9);
+    else cc.setRGB(1, venus ? 0.88 : 1, venus ? 0.62 : 1);
+  }
+
+  /** Цвет голых пород: e — высота 0…1. */
+  private rockColor(e: number, thin: boolean, venus: boolean, T: number): [number, number, number] {
+    // ржавчина: железо окислилось, пока была вода (Марс); сухие безвоздушные миры — серые, как Луна
+    const rock = this.rock ?? (thin && this.wet && !venus ? ([176, 96, 60] as [number, number, number]) : null);
+    if (rock) return [rock[0] * (0.85 + e * 0.3), rock[1] * (0.85 + e * 0.3), rock[2] * (0.85 + e * 0.3)];
+    if (venus) return [170 + e * 30, 135 + e * 20, 85];
+    if (T > 330) return [150, 95, 65];
+    return [118 + e * 30, 104 + e * 26, 90 + e * 24];
   }
 
   frame(dt: number): void {
+    this.time += dt;
     if (!this.locked) this.planet.rotation.y += dt * this.spin;
-    this.clouds.rotation.y = this.planet.rotation.y + performance.now() / 40000;
+    this.clouds.rotation.y = this.planet.rotation.y + performance.now() / 40000 + this.time * this.cloudSpin;
     this.atmo.rotation.y = this.planet.rotation.y;
     this.moonPivot.rotation.y += dt * 0.08;
     this.moon.rotation.y += dt * 0.08;
-    this.controls.update();
+    this.controls?.update();
     this.renderer.render(this.scene, this.camera);
+  }
+
+  /** Освободить WebGL-контекст и всю память видеокарты. */
+  dispose(): void {
+    this.controls?.dispose();
+    this.resizeObserver.disconnect();
+    this.scene.traverse((o) => {
+      const m = o as THREE.Mesh;
+      m.geometry?.dispose();
+      const mats = m.material ? (Array.isArray(m.material) ? m.material : [m.material]) : [];
+      for (const mat of mats) {
+        for (const v of Object.values(mat)) if (v instanceof THREE.Texture) v.dispose();
+        const u = (mat as THREE.ShaderMaterial).uniforms;
+        if (u) for (const k in u) if (u[k].value instanceof THREE.Texture) u[k].value.dispose();
+        mat.dispose();
+      }
+    });
+    this.renderer.dispose();
+    this.renderer.forceContextLoss();
+    this.renderer.domElement.remove();
   }
 }

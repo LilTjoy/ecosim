@@ -72,6 +72,10 @@ export interface PlanetParams {
   nitrogen: number;
   /** Тектоника плит: null — решить случайно по массе и воде. */
   tectonics: boolean | null;
+  /** Длина суток, земных суток (по умолчанию 1). >20 — слабое динамо. */
+  rotation?: number;
+  /** Известная длительность динамо, млрд лет (только для реальных планет). */
+  dynamoGyr?: number;
 }
 
 /** seed подобран так, чтобы история шла похоже на настоящую Землю. «Переиграть» покажет другие варианты. */
@@ -147,6 +151,10 @@ export interface Derived {
   /** Сколько млрд лет работает магнитное динамо. */
   dynamo: number;
   tidalLock: boolean;
+  /** Медленное вращение (приливный захват или сутки > 20 земных) — слабое динамо. */
+  slowRotation: boolean;
+  /** Насколько легко молекулам улететь: 1/v²убегания относительно Земли (Земля 1, Марс ≈5). */
+  escape: number;
   land: number;
   starClass: StarClass;
   lifetime: number;
@@ -162,8 +170,9 @@ export function derive(p: PlanetParams): Derived {
   const tectonics = p.tectonics ?? r() < tectChance;
   // приливный захват: у красных карликов зона обитаемости очень близко
   const tidalLock = p.orbit < 0.45 * Math.cbrt(p.starMass) && p.starMass < 0.8;
-  // динамо: большим планетам дольше, медленное вращение (захват) — слабее
-  const dynamo = 8 * Math.pow(p.mass, 1.5) * (tidalLock ? 0.3 : 1) * (tectonics ? 1 : 0.5);
+  // динамо: большим планетам дольше, медленное вращение (захват, долгие сутки) — слабее
+  const slowRotation = tidalLock || (p.rotation ?? 1) > 20;
+  const dynamo = p.dynamoGyr ?? 8 * Math.pow(p.mass, 1.5) * (slowRotation ? 0.3 : 1) * (tectonics ? 1 : 0.5);
   // суша: при большом количестве воды — океанический мир
   let land = clamp(1 - 0.71 * Math.sqrt(p.water), 0, 1);
   if (!tectonics) land = clamp(land + 0.1, 0, 1);
@@ -173,6 +182,8 @@ export function derive(p: PlanetParams): Derived {
     tectonics,
     dynamo,
     tidalLock,
+    slowRotation,
+    escape: 1 / (gravity * radius),
     land,
     starClass: starClass(p.starMass),
     lifetime: starLifetime(p.starMass),
@@ -223,6 +234,8 @@ export interface SimResult {
 }
 
 const DT = 0.01; // 10 млн лет
+/** Шаг записи образцов (samples), млрд лет. Индекс образца: clamp(round(t / SAMPLE_DT), 0, len − 1). */
+export const SAMPLE_DT = DT * 2;
 export const MAX_AGE = 12;
 export const STAGE_NAMES = ['Мёртвая', 'Микробы', 'Фотосинтез', 'Сложные клетки', 'Животные в океане', 'Жизнь на суше', 'Разум', 'Технологии'];
 
@@ -255,6 +268,11 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
   let endReason = 'Звезде ещё жить и жить — история продолжается';
   let wasHabitable = false;
   let dynamoLost = false;
+  let carb = 120 * p.mass; // CO₂, запертый в карбонатных породах, бар (известняки Земли ≈ атмосфера Венеры)
+  let boiled = false;
+  let steam = 0; // пар выкипевших океанов, ещё висящий в воздухе (0..1)
+  let carbEv = false;
+  let airEv = false;
 
   const end = Math.min(MAX_AGE, d.lifetime);
   const V0 = 20; // вулканический CO₂, бар/млрд лет (масштаб модели)
@@ -296,26 +314,39 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
       dynamoLost = true;
       ev(t, 'atmo', '🧲 Ядро остыло — магнитное поле исчезло. Звёздный ветер сдувает атмосферу.', 'dynamo');
     }
-    const strip = (field ? 0.02 : 0.6) * activity * (0.5 + S * 0.5) / d.gravity;
+    // скорость убегания: малой планете удержать газ труднее (∝ 1/v²)
+    const strip = (field ? 0.02 : 0.6) * activity * (0.5 + S * 0.5) / d.gravity * d.escape * d.escape;
     pressure = Math.max(0, pressure - strip * pressure * DT * 3);
+    // без поля ветер уносит и CO₂ (с полем — нет: иначе ломается термостат Земли)
+    if (!field) co2 = Math.max(1e-6, co2 * Math.max(0, 1 - strip * DT * 3));
     if (!field) ocean = Math.max(0, ocean - 0.15 * DT * activity / d.gravity);
-    if (pressure < 0.005 && ocean > 0) ocean = Math.max(0, ocean - 0.5 * DT);
+    // в разреженном воздухе вода улетает, но замёрзшая (шапки, грунт) — гораздо медленнее
+    if (pressure < 0.005 && ocean > 0) ocean = Math.max(0, ocean - (T < 260 ? 0.03 : 0.5) * DT);
+    if (!airEv && t > 0.05 && pressure + co2 < 0.01) {
+      airEv = true;
+      ev(t, 'atmo', '🌫 Атмосфера почти улетучилась — давление меньше 1% земного', 'atmoloss');
+    }
+    steam *= Math.exp(-DT / 0.3);
 
     // --- геология ---
     if (step % 10 === 0) weatherFactor = Math.exp(gauss(rand) * 0.3);
-    const outgas = V0 * Math.exp(-t / 4) * Math.sqrt(p.mass) * (d.tectonics ? 1 : 0.3);
+    // малые планеты остывают быстрее — вулканы затихают раньше
+    const outgas = V0 * Math.exp(-t / (4 * Math.min(1, Math.sqrt(p.mass)))) * Math.sqrt(p.mass) * (d.tectonics ? 1 : 0.3);
     const landEff = Math.sqrt(d.land + 0.05);
     const plants = stage >= 5 ? 1.6 : 1;
 
     const climate = (pco2: number, iceFrac: number) => {
       const albedo = 0.3 + 0.32 * iceFrac;
       const teq = 255 * Math.pow((S * (1 - albedo)) / 0.7, 0.25);
-      const pf = Math.pow(clamp(pressure + pco2, 0.01, 50), 0.35);
+      const P = pressure + pco2;
+      const pf = Math.pow(clamp(P, 0.01, 100), 0.35);
       let gh = (33 + 4.33 * Math.log(Math.max(pco2, 1e-7) / 4e-4)) * pf;
       if (stage >= 1 && o2 < 0.001) gh += 8; // метан от древних микробов грел раннюю Землю
-      if (ocean <= 0.01) gh *= 0.6; // без водяного пара парник слабее
+      // без водяного пара парник слабее — но не у толстой CO₂-атмосферы
+      if (ocean <= 0.01) gh *= 0.6 + 0.4 * clamp(Math.log10(Math.max(P, 1)) / 1.5, 0, 1);
       // влажная парниковая катастрофа: при сильном нагреве водяной пар разгоняет сам себя
       else if (S > 1.06) gh += (S - 1.06) * 400;
+      if (ocean <= 0.01 && steam > 0.01 && S > 1.06) gh += steam * (S - 1.06) * 400; // пар ещё в воздухе
       return teq + Math.max(0, gh);
     };
     const weathering = (temp: number, pco2: number) =>
@@ -340,6 +371,16 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
       // нет воды или всё подо льдом — выветривания нет, CO₂ копится
       co2 += outgas * DT * 0.02;
     }
+    // без океанов карбонатные породы отдают CO₂ обратно в воздух
+    if (carb > 0.01 && (boiled || (ocean <= 0.01 && T > 420))) {
+      const rel = carb * 1.5 * DT;
+      carb -= rel;
+      co2 += rel;
+      if (!carbEv) {
+        carbEv = true;
+        ev(t, 'atmo', '🌋 Без океанов CO₂ из горных пород уходит в воздух — давление растёт', 'carbonates');
+      }
+    }
     co2 = clamp(co2, 1e-6, 100);
     T = climate(co2, ice);
     // лёд
@@ -348,14 +389,16 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
     T = climate(co2, ice);
 
     // глобальное оледенение (физическое): слишком холодно, лёд отражает свет
+    // без воздуха нет снегопадов: лёд только в шапках и грунте
+    const iceMax = pressure + co2 < 0.03 ? 0.15 : 1;
     if (!physSnowball && ocean > 0.01 && T < 255) {
       physSnowball = true;
-      ice = 1;
-      ev(t, 'climate', '❄️ Планета замёрзла целиком — «Земля-снежок»', 'snowball');
+      ice = iceMax;
+      ev(t, 'climate', '❄️ Планета замёрзла целиком — «снежок»', 'snowball');
     }
     if (physSnowball) {
-      ice = 1;
-      T = climate(co2, 1);
+      ice = iceMax;
+      T = climate(co2, iceMax);
       if (T > 275) {
         physSnowball = false;
         ice = 0.3;
@@ -385,7 +428,12 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
     // парниковая катастрофа: океаны испаряются, водород улетает в космос
     if (S > 1.1 && T > 320 && ocean > 0) {
       ocean = Math.max(0, ocean - DT * 2 * (S - 1.05));
-      if (ocean === 0) ev(t, 'climate', '🔥 Океаны выкипели — планета стала второй Венерой', 'runaway');
+      if (ocean < 0.01) {
+        ocean = 0;
+        boiled = true;
+        steam = 1;
+        ev(t, 'climate', '🔥 Океаны выкипели — парниковая катастрофа', 'runaway');
+      }
     }
     if (ocean > 0 && ocean < 0.01) ocean = 0;
 

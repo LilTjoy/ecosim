@@ -2,7 +2,7 @@ import type { PlanetEvent, SimResult } from './model';
 
 export const STAGE_COLORS = ['#3a3f4a', '#3f8f86', '#4fae5b', '#9ccc65', '#4fc3f7', '#8bc34a', '#ffca28', '#ff7043'];
 
-function prep(canvas: HTMLCanvasElement): [CanvasRenderingContext2D, number, number] {
+export function prep(canvas: HTMLCanvasElement): [CanvasRenderingContext2D, number, number] {
   const ctx = canvas.getContext('2d')!;
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth;
