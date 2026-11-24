@@ -112,6 +112,9 @@ const esc = (s: string) => s.replace(/[&<>"]/g, (ch) => ({ '&': '&amp;', '<': '&
 const VIEW_LABEL: Record<string, string> = { planet: '🪐 Планета', mc: '🎲 10 000 миров', eco: '🦊 Поверхность' };
 
 /** Ведёт урок: шаги, проверки раз в 300 мс, «коуч» — панель под вкладками. */
+/** Повтор действия шага (не путать с «↻ Новый мир» на панели «Поверхности»). */
+const AGAIN = '↻ Ещё раз';
+
 export class LessonEngine {
   private el: HTMLElement;
   private lesson: Lesson | null = null;
@@ -168,6 +171,11 @@ export class LessonEngine {
 
   get running(): Lesson | null {
     return this.lesson;
+  }
+
+  /** Коуч на экране: идёт урок или предложено «Продолжить» после перезагрузки. */
+  get visible(): boolean {
+    return !this.el.hidden;
   }
 
   lessonById(id: string): Lesson | undefined {
@@ -602,11 +610,11 @@ export class LessonEngine {
         result = '';
       }
     } else if (ss.gave && !review)
-      result = `<div class="l-guard"><p>${s.watch?.giveUp?.text ?? 'Так бывает — случайность. Можно повторить опыт кнопкой выше.'}</p><button data-c="giveup">Засчитать и идти дальше</button></div>`;
+      result = `<div class="l-guard"><p>${s.watch?.giveUp?.text ?? (s.action ? `Так бывает — случайность. Можно повторить опыт кнопкой «${AGAIN}» ниже.` : 'Так бывает — случайность.')}</p><button data-c="giveup">Засчитать и идти дальше</button></div>`;
 
     // кнопки
     const showAction = !!s.action && (!s.quizFirst || ss.quizOk || ss.wrong >= 2);
-    const actLabel = s.action ? (review || (ss.acted && !ss.running) ? `↻ ${s.action.label.replace(/^\S+\s/, '')}` : s.action.label) : '';
+    const actLabel = s.action ? (review || (ss.acted && !ss.running) ? AGAIN : s.action.label) : '';
     const needAction = showAction && !ss.acted && !review;
     const btns = [
       i > 0 ? '<button data-c="back">← Назад</button>' : '',

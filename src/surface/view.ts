@@ -936,5 +936,7 @@ export class SurfaceView {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
     this.setEnv(env, seed);
+    // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта
+    $(this.root, '.s-back').hidden = true;
   }
 }

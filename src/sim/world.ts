@@ -668,6 +668,9 @@ export class World {
     const g = this.grass;
     // трава обновляется частями: каждый тик — каждая 4-я клетка (×4 рост), так в 4 раза дешевле
     const phase = this.tick & 3;
+    // опыт урока «Принцип Гаузе»: убранный корм не отрастает, пока опыт идёт
+    const growBr = !this.blockActive('browse');
+    const growFo = !this.blockActive('forage');
     for (let i = phase; i < g.length; i += 4) {
       const temp = t.baseTemp[i] + shift;
       const max = BIOMES[t.biome[i]].fert;
@@ -679,8 +682,8 @@ export class World {
       if (g[i] < max) g[i] = Math.min(max, g[i] + rate * 4 * max * warm);
       const info = BIOMES[t.biome[i]];
       // листва растёт медленно, но её много; ягоды и насекомые — только в тёплое время
-      if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
-      if (temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
+      if (growBr && br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
+      if (growFo && temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
     }
   }
 
@@ -1244,7 +1247,6 @@ export class World {
   /** До какого такта корм не отрастает (0 — растёт как обычно). Действует только в том мире, где опыт начат. */
   blocked = { browse: 0, forage: 0 };
   private blockedTerrain: Terrain | null = null;
-  private lessonStepWrapped = false;
 
   /** Опыт: убрать листву или ягоды и не давать им отрастать `ticks` тактов. */
   removeResource(kind: 'browse' | 'forage', ticks: number): void {
@@ -1253,15 +1255,6 @@ export class World {
     this[kind].fill(0);
     this.blocked[kind] = this.tick + ticks;
     this.log(kind === 'browse' ? '🍂 Опыт: листва исчезла' : '🫐 Опыт: ягоды и насекомые исчезли', 'disaster');
-    if (!this.lessonStepWrapped) {
-      // обёртка над step() только у этого мира и только после начала опыта
-      this.lessonStepWrapped = true;
-      const base = World.prototype.step;
-      this.step = () => {
-        base.call(this);
-        this.applyBlocks();
-      };
-    }
   }
 
   /** Вернуть корм досрочно (ничего не делает, если опыт уже кончился). */
@@ -1271,15 +1264,16 @@ export class World {
     this.log('🌿 Опыт окончен: корм снова растёт', 'info');
   }
 
-  private applyBlocks(): void {
-    if (this.blockedTerrain !== this.terrain) return;
-    for (const k of ['browse', 'forage'] as const) {
-      if (!this.blocked[k]) continue;
-      if (this.tick < this.blocked[k]) this[k].fill(0);
-      else {
-        this.blocked[k] = 0;
-        this.log('🌿 Опыт окончен: корм снова растёт', 'info');
-      }
+  /** Опыт ещё идёт — этот корм не отрастает (вызывается из growGrass раз за такт, до кормёжки зверей). */
+  private blockActive(k: 'browse' | 'forage'): boolean {
+    if (!this.blocked[k]) return false;
+    if (this.blockedTerrain !== this.terrain) {
+      this.blocked[k] = 0; // мир создан заново — опыт забыт
+      return false;
     }
+    if (this.tick < this.blocked[k]) return true;
+    this.blocked[k] = 0;
+    this.log('🌿 Опыт окончен: корм снова растёт', 'info');
+    return false;
   }
 }

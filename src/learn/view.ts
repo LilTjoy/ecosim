@@ -179,7 +179,7 @@ export class LearnView {
         this.renderCards();
       } else if (b.classList.contains('l-resetp')) {
         if (!confirm('Стереть пройденные уроки и встреченные карточки?')) return;
-        if (this.engine.running) this.engine.close();
+        if (this.engine.visible) this.engine.close();
         reset();
         this.render();
       }
@@ -250,7 +250,7 @@ export class LearnView {
         <div class="l-lhead"><span class="l-licon">${L.icon}</span>${pill}</div>
         <h4>${L.title}</h4>
         <p>${L.teaser}</p>
-        <div class="l-lfoot"><span class="muted small">≈${L.minutes} мин · ${L.steps.length} шагов</span>${btn}</div>
+        <div class="l-lfoot"><span class="muted small">≈${L.minutes} мин · ${L.steps.length} ${plural(L.steps.length, 'шаг', 'шага', 'шагов')}</span>${btn}</div>
       </article>`;
     }).join('');
   }
@@ -328,4 +328,13 @@ export class LearnView {
       </div>
     </article>`;
   }
+}
+
+/** 1 шаг · 2–4 шага · 5+ шагов (с учётом 11–14). */
+function plural(n: number, one: string, few: string, many: string): string {
+  const m10 = n % 10;
+  const m100 = n % 100;
+  if (m10 === 1 && m100 !== 11) return one;
+  if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return few;
+  return many;
 }

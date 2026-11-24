@@ -58,6 +58,8 @@ export class McView {
   private jobId = 0;
   private pending: ((s: McStats | null) => void) | null = null;
   private silent = false;
+  /** Последний обычный (не тихий) расчёт — его возвращают на экран после тихих запусков урока. */
+  private shown: { stats: McStats; preset: keyof typeof PRESETS; n: string } | null = null;
   /** Доля посчитанных миров текущего запуска, 0..1. */
   progress = 0;
 
@@ -94,6 +96,30 @@ export class McView {
     });
   }
 
+  /**
+   * Урок закончился: если на экране тихий расчёт (или он ещё идёт), вернуть последний обычный,
+   * чтобы числа воронки совпадали с выбранными допущениями. Обычный расчёт пользователя не трогает.
+   */
+  restoreShown(): void {
+    if (!this.silent) return;
+    if (this.pending) {
+      this.jobId++; // сообщения тихого расчёта больше не принимаются
+      const p = this.pending;
+      this.pending = null;
+      p(null);
+    }
+    this.silent = false;
+    const s = this.shown;
+    this.stats = s ? s.stats : emptyStats();
+    this.preset = s ? s.preset : 'realist';
+    $<HTMLSelectElement>(this.root, '.mc-preset').value = this.preset;
+    if (s) $<HTMLSelectElement>(this.root, '.mc-n').value = s.n;
+    $(this.root, '.mc-run').textContent = s ? '▶ Запустить ещё' : '▶ Запустить';
+    $(this.root, '.mc-progress div').style.width = s ? '100%' : '0%';
+    this.progress = s ? 1 : 0;
+    this.render();
+  }
+
   private start(): void {
     const n = Number($<HTMLSelectElement>(this.root, '.mc-n').value);
     this.preset = $<HTMLSelectElement>(this.root, '.mc-preset').value as keyof typeof PRESETS;
@@ -109,7 +135,7 @@ export class McView {
     $(this.root, '.mc-run').textContent = '⏳ Считаю…';
     this.workers.forEach((w, i) => {
       w.onmessage = (e) => {
-        if (e.data.id !== id) return;
+        if (e.data.id !== id || id !== this.jobId) return;
         parts[i] = e.data.stats;
         done[i] = e.data.done;
         finished[i] = e.data.finished;
@@ -120,7 +146,10 @@ export class McView {
         this.render();
         if (finished.every(Boolean)) {
           $(this.root, '.mc-run').textContent = '▶ Запустить ещё';
-          if (!this.silent) this.onStats(this.stats, this.preset);
+          if (!this.silent) {
+            this.onStats(this.stats, this.preset);
+            this.shown = { stats: this.stats, preset: this.preset, n: String(n) };
+          }
           const p = this.pending;
           this.pending = null;
           p?.(this.stats);
