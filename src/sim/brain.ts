@@ -1,27 +1,29 @@
-import { gauss } from './genes';
+import { gauss } from '../lib/random';
 
 /**
- * Крошечная нейросеть: 9 входов → 6 скрытых нейронов (tanh) → 2 выхода.
+ * Крошечная нейросеть: 13 «ощущений» → 8 скрытых нейронов (tanh) → 2 действия.
  * Веса — это гены: их никто не обучает, они только мутируют и проходят отбор.
  */
-
 export const INPUTS = [
-  'еда: sin угла',
-  'еда: cos угла',
-  'еда: близость',
-  'угроза: sin угла',
-  'угроза: cos угла',
-  'угроза: близость',
+  'еда: sin',
+  'еда: cos',
+  'еда: близко',
+  'угроза: sin',
+  'угроза: cos',
+  'угроза: близко',
+  'пара: sin',
+  'пара: cos',
+  'пара: близко',
   'трава тут',
   'энергия',
+  'жарко/холодно',
   'смещение',
 ] as const;
 export const OUTPUTS = ['поворот', 'газ'] as const;
 
 export const IN = INPUTS.length;
-export const HID = 6;
+export const HID = 8;
 export const OUT = OUTPUTS.length;
-/** веса вход→скрытый, затем (скрытый+смещение)→выход */
 export const WEIGHTS = IN * HID + (HID + 1) * OUT;
 
 export function randomBrain(): Float32Array {
@@ -32,15 +34,12 @@ export function randomBrain(): Float32Array {
 
 export function mutateBrain(w: Float32Array, rate: number): Float32Array {
   const out = new Float32Array(w);
-  for (let i = 0; i < out.length; i++) {
-    if (Math.random() < 0.3) out[i] += gauss() * rate * 4;
-  }
+  for (let i = 0; i < out.length; i++) if (Math.random() < 0.25) out[i] += gauss() * rate * 4;
   return out;
 }
 
 const hidden = new Float32Array(HID);
 
-/** Прогон сети. Возвращает [поворот −1..1, газ 0..1] и заполняет activations для визуализации. */
 export function think(w: Float32Array, input: Float32Array, out: Float32Array, activations?: Float32Array): void {
   for (let h = 0; h < HID; h++) {
     let s = 0;
@@ -49,7 +48,7 @@ export function think(w: Float32Array, input: Float32Array, out: Float32Array, a
   }
   const o = IN * HID;
   for (let k = 0; k < OUT; k++) {
-    let s = w[o + k * (HID + 1) + HID]; // смещение
+    let s = w[o + k * (HID + 1) + HID];
     for (let h = 0; h < HID; h++) s += hidden[h] * w[o + k * (HID + 1) + h];
     out[k] = k === 0 ? Math.tanh(s) : 1 / (1 + Math.exp(-s));
   }

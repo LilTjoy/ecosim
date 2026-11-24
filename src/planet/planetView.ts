@@ -1,5 +1,6 @@
 import { clamp } from '../lib/random';
 import { drawGases, drawTemperature, drawTimeline, STAGE_COLORS, xToTime } from './charts';
+import type { SurfaceEnv } from '../sim/world';
 import { FACTS, FIELD_ICON, WORLD_FACTS, type Fact } from './facts';
 import { Globe } from './globe';
 import {
@@ -30,6 +31,7 @@ const TEMPLATE = /* html */ `
       <div class="p-metrics"></div>
     </div>
     <div class="p-star"></div>
+    <button class="p-descend primary" hidden>🦊 Спуститься на поверхность</button>
     <div class="p-fact" hidden></div>
     <div class="p-controls">
       <button class="p-play" title="Пробел">▶</button>
@@ -96,6 +98,7 @@ export class PlanetView {
   private shownFacts = new Set<string>();
   private explain = true;
   active = true;
+  onDescend: ((env: SurfaceEnv, seed: number) => void) | null = null;
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -144,6 +147,7 @@ export class PlanetView {
         if (act === 'replay') this.load({ ...this.params, seed: (Math.random() * 1e9) | 0 });
       };
     });
+    $(r, '.p-descend').onclick = () => this.onDescend?.(this.surfaceEnv(), this.params.seed);
     const play = $<HTMLButtonElement>(r, '.p-play');
     play.onclick = () => {
       if (this.now >= this.result.end - 0.01) this.now = 0;
@@ -287,6 +291,7 @@ export class PlanetView {
     this.globe.setState(s, tech);
 
     $(r, '.p-age').textContent = fmtAge(this.now);
+    $(r, '.p-descend').hidden = !(s.stage >= 4 && s.habitable);
     const sn = $(r, '.p-stagename');
     sn.textContent = s.stage === 0 && !s.habitable ? (s.ocean <= 0.01 ? 'Безводная пустыня' : 'Безжизненный мир') : STAGE_NAMES[s.stage];
     sn.style.color = STAGE_COLORS[s.stage] === '#3a3f4a' ? '#9aa0a6' : STAGE_COLORS[s.stage];
@@ -363,6 +368,24 @@ export class PlanetView {
 
   private hideFact(): void {
     $(this.root, '.p-fact').hidden = true;
+  }
+
+  /** Условия на поверхности в текущий момент истории — для уровня «Поверхность». */
+  surfaceEnv(): SurfaceEnv {
+    const s = this.sampleAt(this.now);
+    const d = this.result.derived;
+    const land = s.ocean <= 0.005 ? 1 : clamp(1 - (1 - d.land) * Math.pow(s.ocean, 0.6), 0, 1);
+    const t = clamp((d.teff - 2800) / 4200, 0, 1);
+    return {
+      name: `Мир #${this.params.seed}, ${fmtAge(this.now)}`,
+      sea: clamp(1 - land, 0.08, 0.85),
+      tempOffset: clamp((s.T - 288) / 80, -0.4, 0.4),
+      o2: s.o2,
+      gravity: d.gravity,
+      seasonAmp: this.params.moon > 0.3 ? 0.16 : 0.26,
+      landLife: s.stage >= 5,
+      starTint: [1, 0.82 + t * 0.18, 0.62 + t * 0.38],
+    };
   }
 
   private loop(): void {

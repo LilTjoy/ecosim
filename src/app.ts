@@ -3,6 +3,8 @@ import './planet/planet.css';
 import { DrakeView } from './planet/drakeView';
 import { McView } from './planet/mcView';
 import { PlanetView } from './planet/planetView';
+import { SurfaceView } from './surface/view';
+import './surface/surface.css';
 
 type ViewName = 'planet' | 'mc' | 'drake' | 'eco';
 
@@ -11,7 +13,12 @@ const el = (id: string) => document.getElementById(id)!;
 const planet = new PlanetView(el('view-planet'));
 const mc = new McView(el('view-mc'));
 const drake = new DrakeView(el('view-drake'));
-let ecoLoaded = false;
+const surface = new SurfaceView(el('view-eco'));
+surface.onBack = () => show('planet');
+planet.onDescend = (env, seed) => {
+  surface.setEnv(env, seed);
+  show('eco');
+};
 let mcStarted = false;
 
 mc.onStats = (s, preset) => drake.setStats(s, preset);
@@ -25,14 +32,11 @@ function show(name: ViewName): void {
   document.querySelectorAll<HTMLButtonElement>('.tabs [data-view]').forEach((b) => b.classList.toggle('active', b.dataset.view === name));
   planet.active = name === 'planet';
   drake.active = name === 'drake';
+  surface.active = name === 'eco';
   // Монте-Карло запускаем при первом заходе на вкладку миров или Дрейка
   if ((name === 'mc' || name === 'drake') && !mcStarted) {
     mcStarted = true;
     mc.run();
-  }
-  if (name === 'eco' && !ecoLoaded) {
-    ecoLoaded = true;
-    void import('./main');
   }
   if (location.hash !== `#${name}`) history.replaceState(null, '', `#${name}`);
   window.dispatchEvent(new Event('resize'));
