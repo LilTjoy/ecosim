@@ -385,7 +385,7 @@ export function simulate(p: PlanetParams, a: Assumptions, record = true): SimRes
     // парниковая катастрофа: океаны испаряются, водород улетает в космос
     if (S > 1.1 && T > 320 && ocean > 0) {
       ocean = Math.max(0, ocean - DT * 2 * (S - 1.05));
-      if (ocean === 0) ev(t, 'climate', '🔥 Океаны выкипели — планета стала второй Венерой', 'runaway');
+      if (ocean < 0.01) { ocean = 0; ev(t, 'climate', '🔥 Океаны выкипели — планета стала второй Венерой', 'runaway'); }
     }
     if (ocean > 0 && ocean < 0.01) ocean = 0;
 

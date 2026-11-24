@@ -1227,4 +1227,59 @@ export class World {
     this.history.push({ tick: this.tick, counts, means, grass: grass / this.grass.length });
     if (this.history.length > 900) this.history.shift();
   }
+
+  // ---------------- опыты для уроков 📚 (по умолчанию ничего не меняют) ----------------
+
+  private lessonTerrain: Terrain | null = null;
+  private lessonGen = 0;
+  /** Растёт после каждого reset() (новый мир = новый рельеф) — уроки замечают «↻ Новый мир». */
+  get resetGen(): number {
+    if (this.lessonTerrain !== this.terrain) {
+      this.lessonTerrain = this.terrain;
+      this.lessonGen++;
+    }
+    return this.lessonGen;
+  }
+
+  /** До какого такта корм не отрастает (0 — растёт как обычно). Действует только в том мире, где опыт начат. */
+  blocked = { browse: 0, forage: 0 };
+  private blockedTerrain: Terrain | null = null;
+  private lessonStepWrapped = false;
+
+  /** Опыт: убрать листву или ягоды и не давать им отрастать `ticks` тактов. */
+  removeResource(kind: 'browse' | 'forage', ticks: number): void {
+    if (this.blockedTerrain !== this.terrain) this.blocked = { browse: 0, forage: 0 };
+    this.blockedTerrain = this.terrain;
+    this[kind].fill(0);
+    this.blocked[kind] = this.tick + ticks;
+    this.log(kind === 'browse' ? '🍂 Опыт: листва исчезла' : '🫐 Опыт: ягоды и насекомые исчезли', 'disaster');
+    if (!this.lessonStepWrapped) {
+      // обёртка над step() только у этого мира и только после начала опыта
+      this.lessonStepWrapped = true;
+      const base = World.prototype.step;
+      this.step = () => {
+        base.call(this);
+        this.applyBlocks();
+      };
+    }
+  }
+
+  /** Вернуть корм досрочно (ничего не делает, если опыт уже кончился). */
+  restoreResource(kind: 'browse' | 'forage'): void {
+    if (this.blockedTerrain !== this.terrain || this.blocked[kind] <= this.tick) return;
+    this.blocked[kind] = 0;
+    this.log('🌿 Опыт окончен: корм снова растёт', 'info');
+  }
+
+  private applyBlocks(): void {
+    if (this.blockedTerrain !== this.terrain) return;
+    for (const k of ['browse', 'forage'] as const) {
+      if (!this.blocked[k]) continue;
+      if (this.tick < this.blocked[k]) this[k].fill(0);
+      else {
+        this.blocked[k] = 0;
+        this.log('🌿 Опыт окончен: корм снова растёт', 'info');
+      }
+    }
+  }
 }
