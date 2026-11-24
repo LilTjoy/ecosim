@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "bench": "esbuild scripts/bench.ts --bundle --platform=node --outfile=node_modules/.cache/bench.cjs --log-level=error && node node_modules/.cache/bench.cjs"
   },
   "devDependencies": {
     "typescript": "^5.6.3",
