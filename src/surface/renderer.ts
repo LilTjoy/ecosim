@@ -10,9 +10,32 @@ interface Particle {
   vy: number;
   life: number;
   max: number;
-  kind: 'heart' | 'spark' | 'ring' | 'blast' | 'star' | 'leaf';
+  kind: 'heart' | 'spark' | 'ring' | 'blast' | 'star' | 'leaf' | 'spore' | 'bubble' | 'glow' | 'steam';
   hue: number;
 }
+
+/** Линзы «микромира»: что раскрашивает слой клеток. */
+export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease';
+
+/** Что игрок уже успел увидеть на экране (для карточек фактов; читает view). */
+export interface Seen {
+  fairy: boolean;
+  glow: boolean;
+  bubble: boolean;
+  mushroom: boolean;
+  flies: boolean;
+  mould: boolean;
+  steam: boolean;
+  wake: boolean;
+  spore: boolean;
+  microscope: boolean;
+  stromatolite: boolean;
+  mat: boolean;
+  sick: boolean;
+}
+
+/** Бюджеты мелочей микромира на кадр (на узком экране — вдвое меньше). */
+const BUDGET = { mush: 400, spark: 1500, fungi: 300, micro: 700, wake: 200 };
 
 const BAKE_SCALE = 0.5; // пикселей текстуры на единицу мира
 const TILE_PX = 512;
@@ -31,8 +54,35 @@ function hash2(x: number, y: number): number {
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
 
+/** Целочисленный хеш → 0..1 (для мерцания и позиций искр). */
+function hashI(n: number): number {
+  let h = Math.imul(n ^ 0x9e3779b9, 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+/** Цвет по ступеням градиента (k = 0..1). */
+function ramp(stops: number[][], k: number, out: Float32Array, o: number): void {
+  const n = stops.length - 1;
+  const f = (k <= 0 ? 0 : k >= 1 ? 1 : k) * n;
+  const j = Math.min(n - 1, Math.floor(f));
+  const u = f - j;
+  const a = stops[j];
+  const b = stops[j + 1];
+  out[o] = a[0] + (b[0] - a[0]) * u;
+  out[o + 1] = a[1] + (b[1] - a[1]) * u;
+  out[o + 2] = a[2] + (b[2] - a[2]) * u;
+}
+
+/** Растительные украшения — на планете без жизни на суше их нет. */
+const PLANT_DECO = new Set<string>(['tree', 'acacia', 'bush', 'reed', 'cactus', 'flower']);
+const SPRING_RINGS = ['#8a4a2a', '#e88a2a', '#e8d24a', '#3fb07a', '#2a7fbf'];
+
+const MIC_RAMP = [[20, 26, 51], [107, 63, 160], [255, 122, 217]];
+const PLANKTON_RAMP = [[11, 31, 77], [27, 143, 191], [127, 224, 122]];
+
 interface Deco {
-  kind: 'tree' | 'acacia' | 'bush' | 'reed' | 'cactus' | 'rock' | 'snowrock' | 'flower' | 'pebble';
+  kind: 'tree' | 'acacia' | 'bush' | 'reed' | 'cactus' | 'rock' | 'snowrock' | 'flower' | 'pebble' | 'spring' | 'stromatolite' | 'mat';
   x: number;
   y: number;
   s: number;
@@ -62,6 +112,22 @@ export class SurfaceRenderer {
   private micro = new Noise(1234);
   private tileBudget = 0;
   private grain = this.makeGrain();
+  /** Текущая линза; менять через setLens — слой клеток перерисуется сразу. */
+  lens: Lens = 'off';
+  /** Флаги «уже видели» — view превращает их в карточки фактов. */
+  seen: Seen = { fairy: false, glow: false, bubble: false, mushroom: false, flies: false, mould: false, steam: false, wake: false, spore: false, microscope: false, stromatolite: false, mat: false, sick: false };
+  /** Светящиеся следы пловцов ночью (рисуются поверх ночной вуали). */
+  private wakes: Particle[] = [];
+  /** Клетки горячих источников. */
+  private springSet = new Set<number>();
+  /** Свой генератор для косметики — не трогает Math.random симуляции. */
+  private rnd = mulberry32(4242);
+  /** Масштаб бюджетов: 0.5 на узком экране. */
+  private bk = 1;
+  private zoom = 1;
+  private glowCyan = this.makeGlow(90, 210, 255);
+  private glowGreen = this.makeGlow(150, 255, 170);
+  private mushBuf = new Float32Array(BUDGET.mush * 4);
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -72,9 +138,18 @@ export class SurfaceRenderer {
     this.rebuild();
   }
 
+  /** Включить линзу и сразу перекрасить слой клеток. */
+  setLens(l: Lens): void {
+    if (this.lens === l) return;
+    this.lens = l;
+    this.updateOverlay();
+  }
+
   /** Перерисовать рельеф (новый мир). */
   rebuild(): void {
     const t = this.world.terrain;
+    this.springSet = new Set(t.springs);
+    this.wakes = [];
     const W = Math.round(this.world.width * BAKE_SCALE);
     const H = Math.round(this.world.height * BAKE_SCALE);
     this.bake = document.createElement('canvas');
@@ -302,9 +377,21 @@ export class SurfaceRenderer {
       add('pebble', 0.4, [1, 2.5]);
       add('bush', 0.15, [2, 3]);
     } else if (b === B.Beach) add('pebble', 0.3, [0.8, 1.6]);
+    // новое — после старого, чтобы деревья и камни остались на своих местах
+    if (this.springSet.has(i)) out.push({ kind: 'spring', x: (cx + 0.5) * cell, y: (cy + 0.5) * cell, s: 6 + r() * 4, v: r() });
+    const life = this.world.env.landLife;
+    if (!life) {
+      // суша без растений: строматолиты на мелководье, микробные маты на равнинах
+      if (b === B.Shallow) add('stromatolite', 0.4, [2, 4]);
+      else if (b === B.Beach || b === B.Grass || b === B.Savanna || b === B.Swamp) add('mat', 0.5, [3, 6]);
+    }
     // в русле деревья не растут, а кроны соседних клеток не закрывают реку
-    if (t.river[i] >= 2) return out.filter((d) => d.kind !== 'tree' && d.kind !== 'acacia' && d.kind !== 'reed');
-    return out.filter((d) => (d.kind !== 'tree' && d.kind !== 'acacia') || !this.nearRiver(d.x, d.y, d.s * 0.75 + 2.5));
+    const river = t.river[i] >= 2;
+    return out.filter((d) => {
+      if (!life && PLANT_DECO.has(d.kind)) return false;
+      if (d.kind === 'tree' || d.kind === 'acacia') return !river && !this.nearRiver(d.x, d.y, d.s * 0.75 + 2.5);
+      return !(river && d.kind === 'reed');
+    });
   }
 
   /** Есть ли русло реки ближе r к точке (по узлам и серединам отрезков соседних клеток). */
@@ -422,6 +509,46 @@ export class SurfaceRenderer {
         g.fillStyle = `rgba(${150 + v * 50},${145 + v * 45},${140 + v * 40},0.8)`;
         g.beginPath();
         g.ellipse(x, y, s, s * 0.7, v * 3, 0, Math.PI * 2);
+        g.fill();
+        break;
+      case 'spring':
+        // горячий источник: кольца бактерий-термофилов — от синей середины к бурой кайме
+        for (let k = 0; k < 5; k++) {
+          g.fillStyle = SPRING_RINGS[k];
+          g.globalAlpha = k ? 0.95 : 0.8;
+          g.beginPath();
+          g.ellipse(x, y, s * (1 - k * 0.17), s * (1 - k * 0.17) * (0.85 + v * 0.1), v * 3, 0, Math.PI * 2);
+          g.fill();
+        }
+        g.globalAlpha = 1;
+        g.fillStyle = 'rgba(220,245,255,0.5)';
+        g.beginPath();
+        g.arc(x - s * 0.08, y - s * 0.08, s * 0.12, 0, Math.PI * 2);
+        g.fill();
+        break;
+      case 'stromatolite':
+        g.fillStyle = 'rgba(0,0,0,0.25)';
+        g.beginPath();
+        g.arc(x + s * 0.25, y + s * 0.3, s, 0, Math.PI * 2);
+        g.fill();
+        g.fillStyle = `rgb(${118 + v * 25},${106 + v * 20},${88 + v * 12})`;
+        g.beginPath();
+        g.arc(x, y, s, 0, Math.PI * 2);
+        g.fill();
+        g.strokeStyle = 'rgba(205,190,160,0.55)';
+        g.lineWidth = Math.max(0.2, s * 0.1);
+        g.beginPath();
+        g.arc(x, y, s * 0.65, 0, Math.PI * 2);
+        g.moveTo(x + s * 0.32, y);
+        g.arc(x, y, s * 0.32, 0, Math.PI * 2);
+        g.stroke();
+        break;
+      case 'mat':
+        // микробный мат: пурпурные бактерии на ранней Земле, позже — бурые цианобактерии
+        g.fillStyle = (this.world.env.lifeStage ?? 7) < 2 ? 'rgba(122,70,140,0.5)' : 'rgba(118,84,48,0.5)';
+        g.beginPath();
+        g.ellipse(x, y, s, s * 0.65, v * 3, 0, Math.PI * 2);
+        g.ellipse(x + s * 0.5, y + s * 0.25, s * 0.55, s * 0.4, v * 5, 0, Math.PI * 2);
         g.fill();
         break;
     }
@@ -552,21 +679,47 @@ export class SurfaceRenderer {
     return c;
   }
 
-  /** Трава, снег и лёд по клеткам — меняются с сезонами. */
-  /** Цвет травы/снега/льда клетки (RGBA 0..255). */
+  /** Мягкое пятно света (для искр планктона и грибов). */
+  private makeGlow(r: number, g: number, b: number): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = c.height = 32;
+    const x = c.getContext('2d')!;
+    const gr = x.createRadialGradient(16, 16, 0, 16, 16, 16);
+    gr.addColorStop(0, 'rgba(255,255,255,1)');
+    gr.addColorStop(0.18, `rgba(${r},${g},${b},0.9)`);
+    gr.addColorStop(0.5, `rgba(${r},${g},${b},0.25)`);
+    gr.addColorStop(1, `rgba(${r},${g},${b},0)`);
+    x.fillStyle = gr;
+    x.fillRect(0, 0, 32, 32);
+    return c;
+  }
+
+  /** Цвет травы/снега/льда клетки (RGBA 0..255); видимые без линз следы почвы и цветение воды. */
   private cellColor(i: number, out: Float32Array, o: number): void {
+    if (this.lens !== 'off') {
+      this.lensColor(i, out, o);
+      return;
+    }
     const w = this.world;
     const t = w.terrain;
     const b = BIOMES[t.biome[i]];
     const temp = t.baseTemp[i] + w.season.shift;
     const snow = clamp((0.1 - temp) / 0.08, 0, 1);
+    const soilOn = w.settings.soil;
     if (b.water) {
-      // лёд на воде зимой
+      // лёд зимой; летом у устьев и берегов — зелёное цветение планктона (вода богаче среднего)
       const ice = clamp((0.04 - temp) / 0.05, 0, 1);
-      out[o] = 225;
-      out[o + 1] = 238;
-      out[o + 2] = 248;
-      out[o + 3] = ice * 220;
+      let bloom = 0;
+      if (soilOn) {
+        bloom = (w.nut[i] - 1.01) * 2.6 * clamp((temp - 0.03) * 4, 0, 1);
+        bloom = bloom < 0 ? 0 : bloom > 0.4 ? 0.4 : bloom;
+      }
+      const wi = ice * 0.86;
+      const k = wi + bloom > 1e-3 ? bloom / (wi + bloom) : temp > 0.04 ? 1 : 0;
+      out[o] = 225 + (60 - 225) * k;
+      out[o + 1] = 238 + (165 - 238) * k;
+      out[o + 2] = 248 + (105 - 248) * k;
+      out[o + 3] = Math.max(wi, bloom) * 255;
       return;
     }
     const gr = clamp(w.grass[i] / Math.max(0.05, b.fert), 0, 1) * Math.min(1, b.fert * 1.6);
@@ -577,6 +730,30 @@ export class SurfaceRenderer {
     let g = pg + (170 - pg) * autumn;
     let bb = pb * (1 - autumn);
     let a = gr * 0.85;
+    if (soilOn) {
+      // богатая почва — трава гуще и темнее, бедная — бледнее
+      let lush = (w.nut[i] - 1) * 0.9;
+      lush = lush < -0.25 ? -0.25 : lush > 0.3 ? 0.3 : lush;
+      g += 45 * lush;
+      r -= 25 * lush;
+      bb -= 10 * lush;
+      // свежий гумус: бурое пятно там, где разлагалась туша или много навоза
+      const L = w.litter[i];
+      if (L > 1.5 && w.act[i] > 0.3) {
+        const st = Math.min(0.4, (L - 1.5) * 0.35);
+        r += (58 - r) * st;
+        g += (42 - g) * st;
+        bb += (28 - bb) * st;
+        a = Math.max(a, st);
+      }
+    }
+    if (!w.env.landLife) {
+      // на суше нет растений — только бурые микробные плёнки
+      r = 115;
+      g = 95;
+      bb = 62;
+      a *= 0.6;
+    }
     if (snow > 0) {
       r = r + (240 - r) * snow;
       g = g + (245 - g) * snow;
@@ -587,6 +764,64 @@ export class SurfaceRenderer {
     out[o + 1] = g;
     out[o + 2] = bb;
     out[o + 3] = a * 255;
+  }
+
+  /** Раскраска клетки линзой: плодородие, микробы, планктон, болезни. */
+  private lensColor(i: number, out: Float32Array, o: number): void {
+    const w = this.world;
+    const t = w.terrain;
+    const b = BIOMES[t.biome[i]];
+    switch (this.lens) {
+      case 'fert': {
+        if (b.water) {
+          const k = clamp((w.soil[i] - 0.6) / 1.2, 0, 1);
+          out[o] = 20 + 40 * k;
+          out[o + 1] = 40 + 130 * k;
+          out[o + 2] = 90 + 30 * k;
+          out[o + 3] = 0.7 * 255;
+          return;
+        }
+        // бедно — к кирпичному, богато — к зелёному; середина — нейтральная
+        const tt = clamp((w.nut[i] - 1) / 0.3, -1, 1);
+        const u = Math.min(1, Math.abs(tt) * 1.4);
+        const [tr, tg, tb] = tt < 0 ? [200, 85, 60] : [60, 190, 90];
+        out[o] = 175 + (tr - 175) * u;
+        out[o + 1] = 165 + (tg - 165) * u;
+        out[o + 2] = 120 + (tb - 120) * u;
+        out[o + 3] = clamp(0.15 + 0.65 * Math.abs(tt), 0, 0.8) * 255;
+        return;
+      }
+      case 'microbes': {
+        if (b.water) {
+          out[o + 3] = 0;
+          return;
+        }
+        if (w.act[i] < 0.05) {
+          // мороз: микробы «спят»
+          out[o] = 90;
+          out[o + 1] = 120;
+          out[o + 2] = 170;
+        } else ramp(MIC_RAMP, (w.mic[i] - 0.03) / 0.8, out, o);
+        out[o + 3] = 0.78 * 255;
+        return;
+      }
+      case 'plankton': {
+        if (!b.water) {
+          out[o] = out[o + 1] = out[o + 2] = 90;
+          out[o + 3] = 0.5 * 255;
+          return;
+        }
+        const v = clamp(w.grass[i] / b.fert, 0, 1) * w.nut[i];
+        ramp(PLANKTON_RAMP, v * v * 0.95, out, o);
+        out[o + 3] = 0.85 * 255;
+        return;
+      }
+      default:
+        out[o] = 10;
+        out[o + 1] = 12;
+        out[o + 2] = 20;
+        out[o + 3] = 0.5 * 255;
+    }
   }
 
   /** Трава, снег и лёд — меняются с сезонами. Сглаживаем между клетками, чтобы не было «шашечек». */
@@ -625,6 +860,7 @@ export class SurfaceRenderer {
     const t = w.terrain;
     const cell = w.cell;
     const shift = w.season.shift;
+    if (!w.env.landLife) return; // на безжизненной суше травинок нет
     ctx.lineWidth = 0.35;
     ctx.lineCap = 'round';
     const wind = Math.sin(w.tick / 30) * 0.6;
@@ -655,6 +891,498 @@ export class SurfaceRenderer {
     }
   }
 
+  /** Видимые клетки прямоугольника мира: [c0, c1, r0, r1]. */
+  private cellRange(x0: number, y0: number, x1: number, y1: number): [number, number, number, number] {
+    const t = this.world.terrain;
+    const cell = this.world.cell;
+    return [Math.max(0, Math.floor(x0 / cell)), Math.min(t.cols - 1, Math.floor(x1 / cell)), Math.max(0, Math.floor(y0 / cell)), Math.min(t.rows - 1, Math.floor(y1 / cell))];
+  }
+
+  /** Свечение планктона в клетке воды ночью (0..1). */
+  private glowAt(i: number, night: number): number {
+    const w = this.world;
+    const t = w.terrain;
+    const T = t.baseTemp[i] + w.season.shift;
+    if (T <= 0.35) return 0;
+    const nu = (w.nut[i] - 0.9) / 0.4 + 0.3;
+    return night * Math.min(1, w.grass[i] / BIOMES[t.biome[i]].fert) * Math.min(1, (T - 0.35) * 3) * (nu < 0 ? 0 : nu > 1 ? 1 : nu);
+  }
+
+  /** Грибы на лесной подстилке и «ведьмины кольца» на лугах (при сильном приближении). */
+  private drawMicroLife(x0: number, y0: number, x1: number, y1: number): void {
+    const w = this.world;
+    if (!w.mic || !w.env.landLife) return;
+    const t = w.terrain;
+    const cell = w.cell;
+    const sh = w.season.shift;
+    const ctx = this.ctx;
+    const M = this.mushBuf;
+    const max = Math.floor(BUDGET.mush * this.bk);
+    let n = 0;
+    const rings: number[] = [];
+    const [c0, c1, r0, r1] = this.cellRange(x0 - 4, y0 - 4, x1 + 4, y1 + 4);
+    for (let cy = r0; cy <= r1 && n < max; cy++) {
+      for (let cx = c0; cx <= c1 && n < max; cx++) {
+        const i = cy * t.cols + cx;
+        const bi = t.biome[i];
+        if ((bi !== B.Forest && bi !== B.Swamp && bi !== B.Grass) || t.river[i] >= 2) continue;
+        const m = w.mic[i];
+        if (m <= 0.55 || w.litter[i] <= 0.25) continue;
+        const T = t.baseTemp[i] + sh;
+        if (T <= 0.2 || T >= 0.65) continue;
+        const r = mulberry32(w.seed ^ Math.imul(i, 2654435761));
+        for (let k = Math.floor((m - 0.5) * 6); k > 0 && n < max; k--, n++) {
+          M[n * 4] = (cx + r()) * cell;
+          M[n * 4 + 1] = (cy + r()) * cell;
+          M[n * 4 + 2] = 1.3 + r() * 1;
+          M[n * 4 + 3] = r() < 0.12 ? 4 : 1 + Math.floor(r() * 3);
+        }
+        if (bi === B.Grass && m > 0.7 && hash2(cx + 0.1, cy + 0.1) < 0.06) {
+          // грибница растёт кругом, а грибы встают по его краю
+          const x = (cx + 0.3 + r() * 0.4) * cell;
+          const y = (cy + 0.3 + r() * 0.4) * cell;
+          rings.push(x, y);
+          for (let q = 0; q < 7 && n < max; q++, n++) {
+            const a = (q / 7) * Math.PI * 2 + r() * 0.4;
+            M[n * 4] = x + Math.cos(a) * 5;
+            M[n * 4 + 1] = y + Math.sin(a) * 5;
+            M[n * 4 + 2] = 0.9 + r() * 0.4;
+            M[n * 4 + 3] = 0;
+          }
+        }
+      }
+    }
+    if (!n) return;
+    if (rings.length) {
+      // трава над краем грибницы гуще и темнее
+      ctx.strokeStyle = 'rgba(24,74,26,0.4)';
+      ctx.lineWidth = 1.8;
+      ctx.beginPath();
+      for (let k = 0; k < rings.length; k += 2) {
+        ctx.moveTo(rings[k] + 5, rings[k + 1]);
+        ctx.arc(rings[k], rings[k + 1], 5, 0, Math.PI * 2);
+      }
+      ctx.stroke();
+      this.seen.fairy = true;
+    }
+    ctx.fillStyle = 'rgba(0,0,0,0.28)';
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = M[k * 4], y = M[k * 4 + 1], s = M[k * 4 + 2];
+      ctx.moveTo(x + s * 0.75, y + 0.1);
+      ctx.ellipse(x + s * 0.2, y + 0.1, s * 0.55, s * 0.22, 0, 0, Math.PI * 2);
+    }
+    ctx.fill();
+    ctx.fillStyle = 'rgb(236,226,204)';
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      const x = M[k * 4], y = M[k * 4 + 1], s = M[k * 4 + 2];
+      ctx.rect(x - s * 0.15, y - s * 0.75, s * 0.3, s * 0.75);
+    }
+    ctx.fill();
+    const caps = ['#d8b88c', '#a8703f', '#7f5230', '#c08a50', '#cf3527'];
+    for (let kind = 0; kind < 5; kind++) {
+      ctx.fillStyle = caps[kind];
+      ctx.beginPath();
+      for (let k = 0; k < n; k++) {
+        if (M[k * 4 + 3] !== kind) continue;
+        const x = M[k * 4], y = M[k * 4 + 1] - M[k * 4 + 2] * 0.7, s = M[k * 4 + 2];
+        ctx.moveTo(x - s * 0.6, y);
+        ctx.ellipse(x, y, s * 0.6, s * 0.42, 0, Math.PI, Math.PI * 2);
+        ctx.closePath();
+      }
+      ctx.fill();
+    }
+    // мухомор — белые крапинки
+    ctx.fillStyle = 'rgba(255,255,255,0.9)';
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) {
+      if (M[k * 4 + 3] !== 4) continue;
+      const x = M[k * 4], y = M[k * 4 + 1] - M[k * 4 + 2] * 0.7, s = M[k * 4 + 2];
+      for (const [dx, dy] of [[-0.28, -0.12], [0.1, -0.28], [0.32, -0.08]]) {
+        ctx.moveTo(x + dx * s + s * 0.08, y + dy * s);
+        ctx.arc(x + dx * s, y + dy * s, s * 0.08, 0, Math.PI * 2);
+      }
+    }
+    ctx.fill();
+    this.seen.mushroom = true;
+  }
+
+  /** Линза «микробы» при большом увеличении: палочки, кокки, спириллы, гифы; в воде — диатомеи и водоросли. */
+  private drawMicroscope(x0: number, y0: number, x1: number, y1: number): void {
+    const w = this.world;
+    if (!w.mic) return;
+    const t = w.terrain;
+    const cell = w.cell;
+    const ctx = this.ctx;
+    const f = this.frame * 0.1;
+    let budget = Math.floor(BUDGET.micro * this.bk);
+    const rods = new Path2D();
+    const cocci = new Path2D();
+    const spir = new Path2D();
+    const hyph = new Path2D();
+    const diat = new Path2D();
+    const algae = new Path2D();
+    const [c0, c1, r0, r1] = this.cellRange(x0, y0, x1, y1);
+    for (let cy = r0; cy <= r1 && budget > 0; cy++) {
+      for (let cx = c0; cx <= c1 && budget > 0; cx++) {
+        const i = cy * t.cols + cx;
+        const b = BIOMES[t.biome[i]];
+        if (b.water) {
+          const n = Math.round(clamp(w.grass[i] / b.fert, 0, 1) * w.nut[i] * 3);
+          for (let k = 0; k < n && budget > 0; k++, budget--) {
+            const h = hashI(i * 8 + k);
+            const x = (cx + 0.1 + 0.8 * h) * cell + Math.sin(f * 0.6 + k + h * 6) * 0.8;
+            const y = (cy + 0.1 + 0.8 * hashI(i * 8 + k + 99991)) * cell + Math.cos(f * 0.5 + k) * 0.8;
+            if (k & 1) {
+              algae.moveTo(x + 0.8, y);
+              algae.arc(x, y, 0.8, 0, Math.PI * 2);
+            } else {
+              const a = h * 6 + f * 0.2;
+              diat.moveTo(x + Math.cos(a) * 1.3, y + Math.sin(a) * 1.3);
+              diat.lineTo(x + Math.cos(a + 2.09) * 1.3, y + Math.sin(a + 2.09) * 1.3);
+              diat.lineTo(x + Math.cos(a + 4.19) * 1.3, y + Math.sin(a + 4.19) * 1.3);
+              diat.closePath();
+            }
+          }
+          continue;
+        }
+        if (w.myc[i] > 0.3) {
+          // гифы грибницы — тонкие ветвящиеся нити, сшивающие соседние клетки
+          for (let q = 0; q < (w.myc[i] > 0.7 ? 2 : 1); q++, budget--) {
+            const h1 = hashI(i * 8 + q * 2 + 5);
+            const h2 = hashI(i * 8 + q * 2 + 6);
+            const sx = (cx + h1) * cell;
+            const sy = cy * cell;
+            const ex = (cx + h2) * cell;
+            const ey = (cy + 1) * cell;
+            const mx = (sx + ex) / 2 + (h2 - 0.5) * 12;
+            const my = (sy + ey) / 2;
+            hyph.moveTo(sx, sy);
+            hyph.quadraticCurveTo(sx + (h1 - 0.5) * 10, sy + cell * 0.3, mx, my);
+            hyph.quadraticCurveTo(ex - (h1 - 0.5) * 10, ey - cell * 0.3, ex, ey);
+            // боковая веточка
+            hyph.moveTo(mx, my);
+            hyph.quadraticCurveTo(mx + (h1 > 0.5 ? 4 : -4), my + 2, mx + (h1 > 0.5 ? 7 : -7), my - 3 + h2 * 6);
+          }
+        }
+        const n = Math.round(w.mic[i] * 5);
+        for (let k = 0; k < n && budget > 0; k++, budget--) {
+          const h = hashI(i * 8 + k);
+          const h2 = hashI(i * 8 + k + 99991);
+          const x = (cx + 0.1 + 0.8 * h) * cell + Math.sin(f + k + h * 6) * 0.6;
+          const y = (cy + 0.1 + 0.8 * h2) * cell + Math.cos(f * 0.8 + k * 1.7) * 0.6;
+          const a = h2 * 6 + Math.sin(f * 0.5 + k) * 0.4;
+          const ca = Math.cos(a);
+          const sa = Math.sin(a);
+          const kind = (h * 97) % 3 | 0;
+          if (kind === 0) {
+            rods.moveTo(x - ca * 1.1, y - sa * 1.1);
+            rods.lineTo(x + ca * 1.1, y + sa * 1.1);
+          } else if (kind === 1) {
+            // диплококки — парами
+            cocci.moveTo(x + 0.5, y);
+            cocci.arc(x, y, 0.5, 0, Math.PI * 2);
+            cocci.moveTo(x + ca * 1.05 + 0.5, y + sa * 1.05);
+            cocci.arc(x + ca * 1.05, y + sa * 1.05, 0.5, 0, Math.PI * 2);
+          } else {
+            const wob = Math.sin(f * 2 + k);
+            spir.moveTo(x - ca * 1.4, y - sa * 1.4);
+            for (let q = 1; q <= 6; q++) {
+              const u = -1.4 + (q * 2.8) / 6;
+              const o = (q & 1 ? 0.45 : -0.45) * (0.8 + 0.2 * wob);
+              spir.lineTo(x + ca * u - sa * o, y + sa * u + ca * o);
+            }
+          }
+        }
+      }
+    }
+    ctx.save();
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(250,240,210,0.5)';
+    ctx.lineWidth = 0.3;
+    ctx.stroke(hyph);
+    // тёмная кайма — как контраст под микроскопом
+    ctx.strokeStyle = 'rgba(30,8,40,0.6)';
+    ctx.lineWidth = 1.15;
+    ctx.stroke(rods);
+    ctx.lineWidth = 0.7;
+    ctx.stroke(spir);
+    ctx.lineWidth = 0.45;
+    ctx.stroke(cocci);
+    ctx.strokeStyle = '#ffe6f7';
+    ctx.lineWidth = 0.7;
+    ctx.stroke(rods);
+    ctx.fillStyle = '#e2c8ff';
+    ctx.fill(cocci);
+    ctx.strokeStyle = '#9af0ff';
+    ctx.lineWidth = 0.3;
+    ctx.stroke(spir);
+    ctx.fillStyle = 'rgba(238,208,104,0.85)';
+    ctx.fill(diat);
+    ctx.strokeStyle = 'rgba(140,240,150,0.9)';
+    ctx.lineWidth = 0.35;
+    ctx.stroke(algae);
+    ctx.restore();
+    this.seen.microscope = true;
+  }
+
+  /** Пузыри болотного газа и пар над горячими источниками. */
+  private emitAmbient(x0: number, y0: number, x1: number, y1: number, z: number): void {
+    const P = this.particles;
+    const w = this.world;
+    if (P.length > 500 || z <= 1 || !w.litter) return;
+    const t = w.terrain;
+    const cell = w.cell;
+    const rnd = this.rnd;
+    if (z > 1.5) {
+      const [c0, c1, r0, r1] = this.cellRange(x0, y0, x1, y1);
+      for (let k = 0, made = 0; k < 12 && made < 3 * this.bk; k++) {
+        const cx = c0 + Math.floor(rnd() * (c1 - c0 + 1));
+        const cy = r0 + Math.floor(rnd() * (r1 - r0 + 1));
+        const i = cy * t.cols + cx;
+        if (t.biome[i] !== B.Swamp || t.baseTemp[i] + w.season.shift < 0.06) continue;
+        if (rnd() < w.litter[i] * w.act[i] * 0.06) {
+          P.push({ x: (cx + rnd()) * cell, y: (cy + rnd()) * cell, vx: 0, vy: -0.02, life: 0, max: 40, kind: 'bubble', hue: 0.4 + rnd() * 0.5 });
+          made++;
+          this.seen.bubble = true;
+        }
+      }
+    }
+    for (const sI of t.springs) {
+      const x = ((sI % t.cols) + 0.5) * cell;
+      const y = (((sI / t.cols) | 0) + 0.5) * cell;
+      if (x < x0 - 20 || x > x1 + 20 || y < y0 - 20 || y > y1 + 20 || rnd() > 0.3) continue;
+      P.push({ x: x + (rnd() - 0.5) * 6, y: y + (rnd() - 0.5) * 6, vx: 0.04 + rnd() * 0.06, vy: -0.12 - rnd() * 0.08, life: 0, max: 70, kind: 'steam', hue: 0 });
+      this.seen.steam = true;
+    }
+  }
+
+  /** Ночью: светящийся планктон, гнилушки в лесу и светящиеся следы пловцов (режим 'lighter'). */
+  private drawNightGlow(x0: number, y0: number, x1: number, y1: number, z: number, night: number): void {
+    const w = this.world;
+    if (!w.nut) return;
+    const ctx = this.ctx;
+    const t = w.terrain;
+    const cell = w.cell;
+    const fr = this.frame;
+    ctx.globalCompositeOperation = 'lighter';
+    // искры планктона: на общем плане — каждая третья клетка
+    let budget = Math.floor(BUDGET.spark * this.bk);
+    const thin = z < 0.6;
+    const R = Math.max(1.8, 5 / z) * (thin ? 1.4 : 1);
+    const spr = this.glowCyan;
+    const [c0, c1, r0, r1] = this.cellRange(x0, y0, x1, y1);
+    let drew = false;
+    for (let cy = r0; cy <= r1 && budget > 0; cy++) {
+      for (let cx = c0; cx <= c1; cx++) {
+        const i = cy * t.cols + cx;
+        if (t.biome[i] > B.Shallow) continue;
+        if (thin && hashI(i) > 0.34) continue;
+        const gl = this.glowAt(i, night);
+        if (gl <= 0.15) continue;
+        const n = gl > 0.55 ? 3 : gl > 0.3 ? 2 : 1;
+        for (let k = 0; k < n; k++) {
+          const h = hashI(i * 4 + k + 7);
+          const fl = 0.5 + 0.5 * Math.sin(fr * 0.07 + h * 40);
+          ctx.globalAlpha = Math.min(1, gl * 0.9 * fl);
+          ctx.drawImage(spr, (cx + h) * cell - R, (cy + hashI(i * 4 + k + 0x5bd1)) * cell - R, R * 2, R * 2);
+        }
+        drew = true;
+        if ((budget -= n) <= 0) break;
+      }
+    }
+    if (drew) this.seen.glow = true;
+    // гнилушки и светящиеся грибы на лесной подстилке
+    if (z > 1.5 && w.mic) {
+      let fb = Math.floor(BUDGET.fungi * this.bk);
+      const R2 = Math.max(0.7, 1.4 / z);
+      ctx.globalAlpha = 0.35 * night;
+      for (let cy = r0; cy <= r1 && fb > 0; cy++) {
+        for (let cx = c0; cx <= c1 && fb > 0; cx++) {
+          const i = cy * t.cols + cx;
+          if (t.biome[i] !== B.Forest || w.mic[i] <= 0.6) continue;
+          for (let k = 0; k < 2; k++, fb--) {
+            ctx.drawImage(this.glowGreen, (cx + hashI(i * 2 + k + 31)) * cell - R2, (cy + hashI(i * 2 + k + 977)) * cell - R2, R2 * 2, R2 * 2);
+          }
+        }
+      }
+    }
+    // светящийся след: планктон вспыхивает там, где воду тревожат
+    const Wk = this.wakes;
+    if (fr % 4 === 0 && Wk.length < BUDGET.wake * this.bk) {
+      for (const c of w.creatures) {
+        if (c.v <= 0.3 || c.x < x0 || c.x > x1 || c.y < y0 || c.y > y1) continue;
+        const i = t.index(c.x, c.y);
+        if (t.biome[i] > B.Shallow || this.glowAt(i, night) <= 0.2) continue;
+        Wk.push({ x: c.x, y: c.y, vx: 0, vy: 0, life: 0, max: 50, kind: 'glow', hue: Math.max(1.5, c.g.size * 0.9) });
+        this.seen.wake = true;
+        if (Wk.length >= BUDGET.wake * this.bk) break;
+      }
+    }
+    for (const p of Wk) {
+      p.life++;
+      const k = p.life / p.max;
+      const r = p.hue * (1 + k);
+      ctx.globalAlpha = 0.55 * (1 - k) * night;
+      ctx.drawImage(spr, p.x - r, p.y - r, r * 2, r * 2);
+    }
+    if (Wk.length && Wk[0].life >= Wk[0].max) this.wakes = Wk.filter((p) => p.life < p.max);
+    ctx.globalAlpha = 1;
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /** Падаль по стадиям: пятно, туша с мухами → кости; плесень; следы костей. */
+  private drawCorpses(vis: (x: number, y: number) => boolean, z: number): void {
+    const ctx = this.ctx;
+    const w = this.world;
+    const t = w.terrain;
+    const sh = w.season.shift;
+    const act = w.act;
+    const tick = w.tick;
+    // следы костей тают за 900 тактов
+    ctx.strokeStyle = 'rgb(225,220,200)';
+    ctx.lineWidth = 0.7;
+    for (const m of w.boneMarks) {
+      const age = tick - m.t;
+      if (age >= 900 || age < 0 || !vis(m.x, m.y)) continue;
+      const r = Math.max(1.2, m.size * 0.5);
+      ctx.globalAlpha = 0.7 * (1 - age / 900);
+      ctx.beginPath();
+      ctx.moveTo(m.x - r, m.y - r * 0.4);
+      ctx.lineTo(m.x + r, m.y + r * 0.4);
+      ctx.moveTo(m.x - r * 0.4, m.y + r * 0.6);
+      ctx.lineTo(m.x + r * 0.4, m.y - r * 0.6);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    for (const k of w.corpses) {
+      if (!vis(k.x, k.y)) continue;
+      const st = clamp(1 - k.energy / Math.max(1e-6, k.e0), 0, 1);
+      const s = Math.max(1.6, k.size);
+      const rot = hash2(k.x, k.y) * Math.PI * 2;
+      const cr = Math.cos(rot);
+      const sr = Math.sin(rot);
+      // бурое пятно: соки уходят в почву (в воде — нет)
+      if (t.biome[k.idx] > B.Shallow) {
+        ctx.fillStyle = `rgba(55,40,28,${0.12 + 0.3 * st})`;
+        ctx.beginPath();
+        ctx.ellipse(k.x, k.y, s * (1.2 + st), s * (1.2 + st) * 0.8, rot, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (st < 0.5) {
+        ctx.fillStyle = k.sick ? 'hsl(90,20%,35%)' : `hsl(${k.hue},15%,35%)`;
+        ctx.beginPath();
+        ctx.ellipse(k.x, k.y, s, s * 0.55, rot, 0, Math.PI * 2);
+        ctx.moveTo(k.x + cr * s * 1.5, k.y + sr * s * 1.5);
+        ctx.ellipse(k.x + cr * s * 1.15, k.y + sr * s * 1.15, s * 0.38, s * 0.3, rot, 0, Math.PI * 2);
+        ctx.fill();
+        // торчащие лапы
+        ctx.strokeStyle = k.sick ? 'hsl(90,15%,25%)' : `hsl(${k.hue},12%,25%)`;
+        ctx.lineWidth = Math.max(0.4, s * 0.14);
+        ctx.beginPath();
+        for (const [u, d] of [[0.5, 0.1], [0.3, -0.05], [-0.4, 0.12], [-0.6, -0.08]]) {
+          const bx = k.x + cr * s * u - sr * s * 0.45;
+          const by = k.y + sr * s * u + cr * s * 0.45;
+          ctx.moveTo(bx, by);
+          ctx.lineTo(bx - sr * s * 0.6 + cr * s * d * 3, by + cr * s * 0.6 + sr * s * d * 3);
+        }
+        ctx.stroke();
+        if (st > 0.25 && z > 2) {
+          // сквозь шкуру уже проступают рёбра
+          ctx.strokeStyle = `rgba(225,215,190,${(st - 0.25) * 2.4})`;
+          ctx.lineWidth = Math.max(0.25, s * 0.08);
+          ctx.beginPath();
+          for (let q = -2; q <= 2; q++) {
+            const bx = k.x + cr * s * q * 0.22;
+            const by = k.y + sr * s * q * 0.22;
+            ctx.moveTo(bx + sr * s * 0.42, by - cr * s * 0.42);
+            ctx.lineTo(bx - sr * s * 0.3, by + cr * s * 0.3);
+          }
+          ctx.stroke();
+        }
+        if (z > 1.5 && t.baseTemp[k.idx] + sh > 0.3) {
+          // мухи кружат над тушей
+          const fr = this.frame * 0.25 + (k.idx & 7);
+          const fs = Math.max(0.4, 1 / z);
+          ctx.fillStyle = 'rgba(10,10,10,0.9)';
+          ctx.beginPath();
+          for (let q = 0; q < 3; q++) {
+            const a = fr * (1 + q * 0.13) + q * 2.1;
+            const R = s * 1.5 + 2;
+            const fx = k.x + Math.cos(a) * R;
+            const fy = k.y + Math.sin(a * 1.3) * R * 0.7;
+            ctx.moveTo(fx + fs, fy);
+            ctx.arc(fx, fy, fs, 0, Math.PI * 2);
+          }
+          ctx.fill();
+          this.seen.flies = true;
+        }
+      } else {
+        // кости
+        ctx.strokeStyle = 'rgba(235,228,210,0.85)';
+        ctx.lineWidth = 1;
+        const r = Math.max(2, k.size * 0.8);
+        ctx.beginPath();
+        ctx.moveTo(k.x - r, k.y - r * 0.5);
+        ctx.lineTo(k.x + r, k.y + r * 0.5);
+        ctx.moveTo(k.x - r, k.y + r * 0.5);
+        ctx.lineTo(k.x + r, k.y - r * 0.5);
+        ctx.stroke();
+      }
+      if (z > 2 && st > 0.1 && act && act[k.idx] > 0.8) {
+        // плесень — серо-зелёные пушистые точки
+        const h = hash2(k.y, k.x);
+        ctx.fillStyle = 'rgba(178,198,150,0.85)';
+        ctx.beginPath();
+        for (let q = 0; q < (h > 0.5 ? 4 : 3); q++) {
+          const a = h * 20 + q * 1.9;
+          const rr = s * (0.25 + 0.45 * ((h * (q + 3) * 7) % 1));
+          const mx = k.x + Math.cos(a) * rr;
+          const my = k.y + Math.sin(a) * rr * 0.6;
+          const ms = 0.25 + s * (0.04 + 0.025 * q);
+          ctx.moveTo(mx + ms, my);
+          ctx.arc(mx, my, ms, 0, Math.PI * 2);
+        }
+        ctx.fill();
+        this.seen.mould = true;
+      }
+    }
+  }
+
+  /** Линза болезней: больные — пульсирующие красные кольца, переболевшие — синие точки, очаги — подписи. */
+  private drawDiseaseMarks(vis: (x: number, y: number) => boolean, z: number): void {
+    const ctx = this.ctx;
+    const w = this.world;
+    const pulse = 3 * Math.sin(this.frame * 0.2);
+    ctx.beginPath();
+    for (const c of w.creatures) {
+      if (c.sick <= 0 || !vis(c.x, c.y)) continue;
+      const r = Math.max(6 / z, c.g.size * 2 + 3 + pulse);
+      ctx.moveTo(c.x + r, c.y);
+      ctx.arc(c.x, c.y, r, 0, Math.PI * 2);
+    }
+    ctx.strokeStyle = 'rgba(255,72,60,0.95)';
+    ctx.lineWidth = 1.8 / z;
+    ctx.stroke();
+    ctx.beginPath();
+    for (const c of w.creatures) {
+      if (c.immune <= 0 || c.sick > 0 || !vis(c.x, c.y)) continue;
+      const r = Math.max(1.6 / z, c.g.size * 0.35);
+      ctx.rect(c.x - r, c.y - c.g.size * 1.3 - r * 2, r * 2, r * 2);
+    }
+    ctx.fillStyle = '#5aa9ff';
+    ctx.fill();
+    ctx.font = `${Math.max(4, 13 / z)}px system-ui`;
+    ctx.textAlign = 'center';
+    ctx.fillStyle = 'rgba(255,200,190,0.95)';
+    for (const P of w.pathogens.values()) {
+      if (!P.announced || P.ended !== null || !vis(P.x, P.y)) continue;
+      ctx.fillText(`🦠 ${P.name}`, P.x, P.y);
+    }
+  }
+
   /** Подхватить мгновенные события мира и превратить их в частицы. */
   private consumeFx(): void {
     for (const e of this.world.fx) this.spawnFx(e);
@@ -682,6 +1410,11 @@ export class SurfaceRenderer {
       }
     } else if (e.kind === 'newSpecies') {
       for (let i = 0; i < 3; i++) P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: -i * 15, max: 70, kind: 'star', hue: e.hue });
+    } else if (e.kind === 'outbreak') {
+      // споры вспышки: зелёное облачко, всплывающее над очагом
+      const r = this.rnd;
+      for (let i = 0; i < 8; i++) P.push({ x: e.x + (r() - 0.5) * 10, y: e.y + (r() - 0.5) * 10, vx: (r() - 0.5) * 0.3, vy: -0.15 - r() * 0.25, life: -i * 4, max: 120, kind: 'spore', hue: 0 });
+      this.seen.spore = true;
     }
   }
 
@@ -691,6 +1424,8 @@ export class SurfaceRenderer {
     const W = canvas.width / dpr;
     const H = canvas.height / dpr;
     this.frame++;
+    this.bk = window.innerWidth < 700 ? 0.5 : 1;
+    this.zoom = cam.zoom;
     if (this.frame % 12 === 0) this.updateOverlay();
     this.consumeFx();
 
@@ -732,31 +1467,29 @@ export class SurfaceRenderer {
       ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
       ctx.restore();
     } else ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
-    if (px > 2.5) this.drawGrassBlades(cam.x - W / 2 / z, cam.y - H / 2 / z, cam.x + W / 2 / z, cam.y + H / 2 / z);
+    const vx0 = cam.x - W / 2 / z;
+    const vy0 = cam.y - H / 2 / z;
+    const vx1 = cam.x + W / 2 / z;
+    const vy1 = cam.y + H / 2 / z;
+    if (px > 2.5 && this.lens === 'off') this.drawGrassBlades(vx0, vy0, vx1, vy1);
+    // под линзой деревья полупрозрачны — иначе в лесу раскраску не видно
+    if (this.lens !== 'off') ctx.globalAlpha = 0.3;
     for (const [t, x, y, size] of shown) ctx.drawImage(t.deco, x, y, size, size);
+    ctx.globalAlpha = 1;
+    // грибы и микроскоп — поверх крон, иначе в лесу их не разглядеть
+    if (this.lens === 'microbes' && px > 5) this.drawMicroscope(vx0, vy0, vx1, vy1);
+    else if (px > 2.5 && this.lens === 'off') this.drawMicroLife(vx0, vy0, vx1, vy1);
+    this.emitAmbient(vx0, vy0, vx1, vy1, z);
 
     // видимая область (с запасом)
-    const x0 = cam.x - W / 2 / z - 30;
-    const x1 = cam.x + W / 2 / z + 30;
-    const y0 = cam.y - H / 2 / z - 30;
-    const y1 = cam.y + H / 2 / z + 30;
+    const x0 = vx0 - 30;
+    const x1 = vx1 + 30;
+    const y0 = vy0 - 30;
+    const y1 = vy1 + 30;
     const vis = (x: number, y: number) => x > x0 && x < x1 && y > y0 && y < y1;
 
-    // падаль — косточки
-    if (z > 0.6) {
-      ctx.strokeStyle = 'rgba(235,228,210,0.85)';
-      ctx.lineWidth = 1;
-      for (const k of world.corpses) {
-        if (!vis(k.x, k.y)) continue;
-        const r = Math.max(2, k.size * 0.8);
-        ctx.beginPath();
-        ctx.moveTo(k.x - r, k.y - r * 0.5);
-        ctx.lineTo(k.x + r, k.y + r * 0.5);
-        ctx.moveTo(k.x - r, k.y + r * 0.5);
-        ctx.lineTo(k.x + r, k.y - r * 0.5);
-        ctx.stroke();
-      }
-    }
+    // падаль: пятно, туша с мухами → кости, плесень; потом — следы костей
+    if (z > 0.6) this.drawCorpses(vis, z);
 
     if (selected?.alive) {
       ctx.fillStyle = 'rgba(255,255,255,0.05)';
@@ -782,11 +1515,13 @@ export class SurfaceRenderer {
         ctx.arc(c.x, c.y, c.g.size * 1.6 + 4, 0, Math.PI * 2);
         ctx.stroke();
       }
-      ctx.globalAlpha = dim ? 0.25 : 1;
+      // в линзе болезней здоровые приглушены, чтобы были видны больные
+      ctx.globalAlpha = dim ? 0.25 : this.lens === 'disease' && c.sick <= 0 ? 0.45 : 1;
       if (detail && c.g.size * z > 2.5) this.drawAnimal(c);
       else this.drawDot(c, z);
     }
     ctx.globalAlpha = 1;
+    if (this.lens === 'disease') this.drawDiseaseMarks(vis, z);
 
     this.drawParticles();
 
@@ -795,6 +1530,10 @@ export class SurfaceRenderer {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       ctx.fillStyle = `rgba(8,14,40,${night * 0.55})`;
       ctx.fillRect(0, 0, W, H);
+      if (night > 0.3) {
+        ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
+        this.drawNightGlow(vx0, vy0, vx1, vy1, z, night);
+      } else this.wakes.length = 0;
       // глаза светятся в темноте
       if (detail && night > 0.3) {
         ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
@@ -839,6 +1578,8 @@ export class SurfaceRenderer {
 
   private color(c: Creature, l = 55): string {
     const e = clamp(c.energy / this.world.maxEnergy(c.g), 0.2, 1);
+    // больные зеленеют и блекнут — тем сильнее, чем злее штамм
+    if (c.sick > 0) return `hsl(${c.g.hue + (75 - c.g.hue) * 0.5 * c.vir}, ${(35 + e * 35) * 0.55}%, ${l - (1 - e) * 15}%)`;
     return `hsl(${c.g.hue}, ${35 + e * 35}%, ${l - (1 - e) * 15}%)`;
   }
 
@@ -856,6 +1597,11 @@ export class SurfaceRenderer {
       ctx.fill();
     } else {
       ctx.fillRect(c.x - r, c.y - r, r * 2, r * 2);
+    }
+    if (c.sick > 0) {
+      ctx.strokeStyle = 'rgba(200,245,160,0.85)';
+      ctx.lineWidth = 0.8 / z;
+      ctx.strokeRect(c.x - r - 0.6 / z, c.y - r - 0.6 / z, r * 2 + 1.2 / z, r * 2 + 1.2 / z);
     }
   }
 
@@ -989,6 +1735,20 @@ export class SurfaceRenderer {
       ctx.arc(hx + hr * 0.45, side * hr * 0.45, eyeR * 0.55, 0, Math.PI * 2);
       ctx.fill();
     }
+    // больной: бледно-зелёные «микробы» кружат у головы
+    if (c.sick > 0) {
+      const a = this.frame * 0.15 + c.id;
+      ctx.fillStyle = 'rgba(200,245,160,0.9)';
+      ctx.beginPath();
+      for (let q = 0; q < 2; q++) {
+        const sx = hx + Math.cos(a + q * Math.PI) * hr * 1.5;
+        const sy = Math.sin(a + q * Math.PI) * hr * 1.5;
+        ctx.moveTo(sx + Math.max(0.3, s * 0.09), sy);
+        ctx.arc(sx, sy, Math.max(0.3, s * 0.09), 0, Math.PI * 2);
+      }
+      ctx.fill();
+      this.seen.sick = true;
+    }
     // клыки хищника
     if (pred) {
       ctx.fillStyle = '#fff';
@@ -1052,6 +1812,26 @@ export class SurfaceRenderer {
         ctx.beginPath();
         ctx.arc(p.x, p.y, 6 + k * 70, 0, Math.PI * 2);
         ctx.stroke();
+      } else if (p.kind === 'spore') {
+        ctx.globalAlpha = Math.sin(Math.PI * k) * 0.85;
+        ctx.fillStyle = '#a6e06a';
+        ctx.beginPath();
+        ctx.arc(p.x + Math.sin(p.life * 0.1 + p.vx * 50) * 1.5, p.y, Math.max(0.9, 2.6 / this.zoom), 0, Math.PI * 2);
+        ctx.fill();
+      } else if (p.kind === 'bubble') {
+        // пузырь метана: всплывает, растёт и лопается
+        ctx.globalAlpha = 0.65 * (1 - k * k);
+        ctx.strokeStyle = 'rgba(215,240,220,1)';
+        ctx.lineWidth = 0.25;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.hue * (0.4 + k), 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (p.kind === 'steam') {
+        ctx.globalAlpha = 0.2 * Math.sin(Math.PI * k);
+        ctx.fillStyle = '#eef3f8';
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 1.5 + k * 6, 0, Math.PI * 2);
+        ctx.fill();
       }
     }
     ctx.globalAlpha = 1;
@@ -1070,11 +1850,19 @@ export class SurfaceRenderer {
     }
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.drawImage(this.miniBase, 0, 0, mw, mh);
+    if (this.lens !== 'off') ctx.drawImage(this.overlay, 0, 0, mw, mh);
     const sx = mw / this.world.width;
     const sy = mh / this.world.height;
+    const dis = this.lens === 'disease';
     for (const c of this.world.creatures) {
+      if (dis && c.sick > 0) continue;
       ctx.fillStyle = `hsl(${c.g.hue},70%,${c.g.diet > 0.65 ? 60 : 75}%)`;
       ctx.fillRect(c.x * sx - 0.75, c.y * sy - 0.75, 1.5, 1.5);
+    }
+    if (dis) {
+      // больные — красным поверх остальных
+      ctx.fillStyle = '#ff4a3c';
+      for (const c of this.world.creatures) if (c.sick > 0) ctx.fillRect(c.x * sx - 1.25, c.y * sy - 1.25, 2.5, 2.5);
     }
     const z = this.cam.zoom;
     ctx.strokeStyle = '#fff';
