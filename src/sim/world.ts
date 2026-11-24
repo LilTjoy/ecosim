@@ -105,9 +105,13 @@ export interface SurfaceEnv {
   landLife: boolean;
   /** Цвет света звезды. */
   starTint: [number, number, number];
+  /** Вулканизм (тектоника плит → 1, иначе 0.3): число горячих источников. */
+  volcanism?: number;
+  /** Стадия жизни на планете (0..7, как в model.ts). */
+  lifeStage?: number;
 }
 
-export const EARTH_ENV: SurfaceEnv = { name: 'Земля', sea: 0.3, tempOffset: 0, o2: 0.21, gravity: 1, seasonAmp: 0.16, landLife: true, starTint: [1, 1, 1] };
+export const EARTH_ENV: SurfaceEnv = { name: 'Земля', sea: 0.3, tempOffset: 0, o2: 0.21, gravity: 1, seasonAmp: 0.16, landLife: true, starTint: [1, 1, 1], volcanism: 1, lifeStage: 7 };
 
 export interface Settings {
   mutationRate: number;
@@ -191,7 +195,7 @@ export class World {
     this.brainMode = mode;
     this.seed = seed;
     this.env = env;
-    this.terrain = new Terrain(this.width, this.height, this.cell, seed, env.sea, env.tempOffset);
+    this.terrain = new Terrain(this.width, this.height, this.cell, seed, env.sea, env.tempOffset, env.volcanism ?? 1);
     this.grass = new Float32Array(this.terrain.cols * this.terrain.rows);
     this.claim = new Float32Array(this.grass.length);
     this.claimTick = new Int32Array(this.grass.length).fill(-10);
@@ -1021,11 +1025,16 @@ export class World {
 
   /** Если какой-то трофический уровень пуст — с большой земли приплывают новые колонисты. */
   private migrantsFromAfar(): void {
-    let plants = 0;
+    // гильдии: пловцы отдельно, иначе по диете (как в стенде scripts/bench.ts)
+    let herb = 0;
+    let omni = 0;
     let meat = 0;
+    let swim = 0;
     for (const c of this.creatures) {
-      if (c.g.diet < 0.5) plants++;
-      else if (c.g.diet > 0.65) meat++;
+      if (c.g.swim > 0.6) swim++;
+      else if (c.g.diet < 0.3) herb++;
+      else if (c.g.diet <= 0.65) omni++;
+      else meat++;
     }
     const arrive = (base: Partial<Genome>, n: number, what: string) => {
       const sp = this.colonize(base, n);
@@ -1035,8 +1044,12 @@ export class World {
       const list = FOUNDERS.filter((x) => f(x.g));
       return list[Math.floor(Math.random() * list.length)].g;
     };
-    if (plants < 40) arrive(pickF((g) => (g.diet ?? 0) < 0.3), 40, 'травоядные');
-    if (meat < 4 && plants > 150) arrive(pickF((g) => (g.diet ?? 0) > 0.65), 8, 'хищники');
+    if (this.env.landLife) {
+      if (herb < 25) arrive(pickF((g) => (g.diet ?? 0) < 0.3 && (g.swim ?? 0) < 0.6), 30, 'травоядные');
+      if (omni < 10) arrive(pickF((g) => g.diet === 0.45 || g.diet === 0.6), 20, 'всеядные');
+      if (meat < 4 && herb + omni > 150) arrive(pickF((g) => (g.diet ?? 0) > 0.65), 8, 'хищники');
+    }
+    if (swim < 10) arrive(pickF((g) => (g.swim ?? 0) > 0.6), 20, 'морские травоядные');
   }
 
   // ---------------- инструменты и катастрофы ----------------

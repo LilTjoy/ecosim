@@ -610,7 +610,8 @@ export class SurfaceView {
     }`;
     const at = this.cursor ?? [this.cam.x, this.cam.y];
     const reg = w.terrain.regionAt(at[0], at[1]);
-    $(this.root, '.s-region').textContent = reg ? `📍 ${reg.name}` : '';
+    const water = w.terrain.waterAt(at[0], at[1]);
+    $(this.root, '.s-region').textContent = reg ? `📍 ${reg.name}${water ? ' · 〰 ' + water : ''}` : water ? `〰 ${water}` : '';
   }
 
   private renderPanel(): void {

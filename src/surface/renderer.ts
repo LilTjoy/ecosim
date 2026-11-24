@@ -44,6 +44,12 @@ export class SurfaceRenderer {
   private ctx: CanvasRenderingContext2D;
   private bake!: HTMLCanvasElement;
   private overlay!: HTMLCanvasElement;
+  /** Реки общего плана (тот же масштаб, что и bake). */
+  private riverLayer!: HTMLCanvasElement;
+  /** Узлы русел: смещённые центры клеток (меандры) и главный приток каждой клетки. */
+  private rivX = new Float32Array(0);
+  private rivY = new Float32Array(0);
+  private rivUp = new Int32Array(0);
   private overlayCtx!: CanvasRenderingContext2D;
   private overlayImg!: ImageData;
   miniBase!: HTMLCanvasElement;
@@ -123,8 +129,17 @@ export class SurfaceRenderer {
       }
     }
     g.putImageData(img, 0, 0);
+    this.buildRivers();
     this.decorate(g);
     this.tiles.clear();
+
+    // реки — отдельным слоем поверх травы
+    this.riverLayer = document.createElement('canvas');
+    this.riverLayer.width = W;
+    this.riverLayer.height = H;
+    const rg = this.riverLayer.getContext('2d')!;
+    rg.scale(BAKE_SCALE, BAKE_SCALE);
+    this.strokeRivers(rg, 0, t.cols - 1, 0, t.rows - 1, false, 1.8);
 
     // слой травы/снега — по клеткам, растягивается со сглаживанием
     this.overlay = document.createElement('canvas');
@@ -139,7 +154,118 @@ export class SurfaceRenderer {
     this.miniBase = document.createElement('canvas');
     this.miniBase.width = 240;
     this.miniBase.height = Math.round((240 * this.world.height) / this.world.width);
-    this.miniBase.getContext('2d')!.drawImage(this.bake, 0, 0, this.miniBase.width, this.miniBase.height);
+    const mg = this.miniBase.getContext('2d')!;
+    mg.drawImage(this.bake, 0, 0, this.miniBase.width, this.miniBase.height);
+    // на миникарте реки тоньше пикселя — рисуем заново, не тоньше 1 px
+    const ms = this.miniBase.width / this.world.width;
+    mg.scale(ms, ms);
+    mg.lineCap = mg.lineJoin = 'round';
+    mg.strokeStyle = 'rgba(79,143,192,0.9)';
+    for (let i = 0; i < t.river.length; i++) {
+      if (t.river[i] < 2 || t.flow[i] < 160 || t.drain[i] < 0) continue;
+      mg.lineWidth = Math.max(0.8, Math.min(1.6, 0.5 + Math.sqrt(t.flow[i] / 2000))) / ms;
+      this.riverSegment(mg, i);
+      mg.stroke();
+    }
+  }
+
+  /** Узлы русел: центр клетки, сдвинутый поперёк течения плавным шумом, — реки петляют. */
+  private buildRivers(): void {
+    const t = this.world.terrain;
+    const n = t.cols * t.rows;
+    const cell = this.world.cell;
+    this.rivX = new Float32Array(n);
+    this.rivY = new Float32Array(n);
+    this.rivUp = new Int32Array(n).fill(-1);
+    const nz = new Noise(this.world.seed + 77);
+    for (let i = 0; i < n; i++) {
+      const cx = i % t.cols;
+      const cy = (i / t.cols) | 0;
+      let x = (cx + 0.5) * cell;
+      let y = (cy + 0.5) * cell;
+      const d = t.drain[i];
+      if (t.river[i] >= 1 && d >= 0) {
+        const dx = (d % t.cols) - cx;
+        const dy = ((d / t.cols) | 0) - cy;
+        const l = Math.hypot(dx, dy);
+        const off = clamp((nz.fbm(cx * 0.21, cy * 0.21, 2) - 0.5) * 1.5 + (hash2(cx, cy) - 0.5) * 0.12, -0.42, 0.42) * cell;
+        x += (-dy / l) * off;
+        y += (dx / l) * off;
+        // главный приток — самый полноводный
+        const u = this.rivUp[d];
+        if (u < 0 || t.flow[i] > t.flow[u]) this.rivUp[d] = i;
+      }
+      this.rivX[i] = x;
+      this.rivY[i] = y;
+    }
+  }
+
+  /** Путь одного отрезка русла: от середины с главным притоком — через узел — к середине с низовьем. */
+  private riverSegment(g: CanvasRenderingContext2D, i: number): void {
+    const t = this.world.terrain;
+    const X = this.rivX;
+    const Y = this.rivY;
+    const d = t.drain[i];
+    const u = this.rivUp[i];
+    const px = X[i];
+    const py = Y[i];
+    const ex = (px + X[d]) / 2;
+    const ey = (py + Y[d]) / 2;
+    g.beginPath();
+    if (u >= 0) g.moveTo((X[u] + px) / 2, (Y[u] + py) / 2);
+    else g.moveTo(px, py);
+    g.quadraticCurveTo(px, py, ex, ey);
+    // приток или устье: дотягиваем до узла низовья
+    if (this.rivUp[d] !== i) g.lineTo(X[d], Y[d]);
+  }
+
+  /**
+   * Реки и ручьи в мировых координатах для клеток прямоугольника.
+   * Ширина растёт со стоком, ручьи сужаются к истокам.
+   */
+  private strokeRivers(g: CanvasRenderingContext2D, c0: number, c1: number, r0: number, r1: number, streams: boolean, wk = 1): void {
+    const t = this.world.terrain;
+    const width = (f: number) => clamp(0.8 + 0.35 * Math.sqrt(f / 80), 1, 4.5) * wk;
+    g.save();
+    g.lineCap = 'round';
+    g.lineJoin = 'round';
+    const each = (min: number, max: number, fn: (i: number) => void) => {
+      for (let cy = r0; cy <= r1; cy++) {
+        for (let cx = c0; cx <= c1; cx++) {
+          const i = cy * t.cols + cx;
+          if (t.river[i] >= min && t.river[i] <= max && t.drain[i] >= 0) fn(i);
+        }
+      }
+    };
+    if (streams) {
+      // ручьи: тонкие, от истока к устью шире
+      g.strokeStyle = 'rgba(79,143,192,0.7)';
+      each(1, 1, (i) => {
+        g.lineWidth = 0.35 + 0.6 * clamp((t.flow[i] - 18) / 62, 0, 1);
+        this.riverSegment(g, i);
+        g.stroke();
+      });
+    }
+    // берега: влажная тёмная кромка
+    g.strokeStyle = 'rgba(38,58,34,0.32)';
+    each(2, 2, (i) => {
+      g.lineWidth = width(t.flow[i]) + 1.8 * wk;
+      this.riverSegment(g, i);
+      g.stroke();
+    });
+    g.strokeStyle = '#2f5f86';
+    each(2, 2, (i) => {
+      g.lineWidth = width(t.flow[i]);
+      this.riverSegment(g, i);
+      g.stroke();
+    });
+    g.strokeStyle = '#4f8fc0';
+    each(2, 2, (i) => {
+      g.lineWidth = width(t.flow[i]) * 0.6;
+      this.riverSegment(g, i);
+      g.stroke();
+    });
+    g.restore();
   }
 
   /**
@@ -176,7 +302,33 @@ export class SurfaceRenderer {
       add('pebble', 0.4, [1, 2.5]);
       add('bush', 0.15, [2, 3]);
     } else if (b === B.Beach) add('pebble', 0.3, [0.8, 1.6]);
-    return out;
+    // в русле деревья не растут, а кроны соседних клеток не закрывают реку
+    if (t.river[i] >= 2) return out.filter((d) => d.kind !== 'tree' && d.kind !== 'acacia' && d.kind !== 'reed');
+    return out.filter((d) => (d.kind !== 'tree' && d.kind !== 'acacia') || !this.nearRiver(d.x, d.y, d.s * 0.75 + 2.5));
+  }
+
+  /** Есть ли русло реки ближе r к точке (по узлам и серединам отрезков соседних клеток). */
+  private nearRiver(x: number, y: number, r: number): boolean {
+    const t = this.world.terrain;
+    const cell = this.world.cell;
+    const X = this.rivX;
+    const Y = this.rivY;
+    const cx = Math.floor(x / cell);
+    const cy = Math.floor(y / cell);
+    const r2 = r * r;
+    for (let yy = Math.max(0, cy - 1); yy <= Math.min(t.rows - 1, cy + 1); yy++) {
+      for (let xx = Math.max(0, cx - 1); xx <= Math.min(t.cols - 1, cx + 1); xx++) {
+        const j = yy * t.cols + xx;
+        if (t.river[j] < 2) continue;
+        const d = t.drain[j];
+        for (let k = 0; k <= 2; k++) {
+          const px = X[j] + ((X[d] - X[j]) * k) / 4 - x;
+          const py = Y[j] + ((Y[d] - Y[j]) * k) / 4 - y;
+          if (px * px + py * py < r2) return true;
+        }
+      }
+    }
+    return false;
   }
 
   /** Нарисовать украшения в мировых координатах (контекст уже отмасштабирован). */
@@ -312,6 +464,8 @@ export class SurfaceRenderer {
     const c1 = Math.min(t.cols - 1, Math.floor(((tx + 1) * size + 12) / cell));
     const r0 = Math.max(0, Math.floor((ty * size - 12) / cell));
     const r1 = Math.min(t.rows - 1, Math.floor(((ty + 1) * size + 12) / cell));
+    // реки чётко, до деревьев (кроны нависают над водой)
+    this.strokeRivers(g, Math.max(0, c0 - 1), Math.min(t.cols - 1, c1 + 1), Math.max(0, r0 - 1), Math.min(t.rows - 1, r1 + 1), true, 1.2);
     for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) for (const d of this.decoItems(cx, cy)) this.drawDeco(g, d, level);
     const pair = { ground, deco: c };
     this.tiles.set(key, pair);
@@ -568,6 +722,16 @@ export class SurfaceRenderer {
       }
     }
     ctx.drawImage(this.overlay, 0, 0, world.width, world.height);
+    // реки поверх травы и линз; там, где уже есть чёткий тайл, — реки рисует тайл
+    if (shown.length) {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, world.width, world.height);
+      for (const [, x, y, size] of shown) ctx.rect(x, y, size, size);
+      ctx.clip('evenodd');
+      ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
+      ctx.restore();
+    } else ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
     if (px > 2.5) this.drawGrassBlades(cam.x - W / 2 / z, cam.y - H / 2 / z, cam.x + W / 2 / z, cam.y + H / 2 / z);
     for (const [t, x, y, size] of shown) ctx.drawImage(t.deco, x, y, size, size);
 

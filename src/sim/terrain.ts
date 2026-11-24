@@ -26,7 +26,7 @@ export interface BiomeInfo {
   ground: [number, number, number];
   /** Цвет растительности. */
   plant: [number, number, number];
-  water?: boolean;
+  water: boolean;
   /** Листва деревьев и кустов (достают только крупные). */
   browse: number;
   /** Ягоды, семена, насекомые (едят всеядные). */
@@ -36,15 +36,15 @@ export interface BiomeInfo {
 export const BIOMES: BiomeInfo[] = [
   { name: 'Глубокое море', fert: 0.9, move: 1, sense: 1, ground: [22, 52, 92], plant: [40, 110, 120], water: true, browse: 0, forage: 0 },
   { name: 'Мелководье', fert: 1.3, move: 1, sense: 1, ground: [42, 98, 138], plant: [60, 140, 120], water: true, browse: 0, forage: 0 },
-  { name: 'Пляж', fert: 0.15, move: 0.95, sense: 1.1, ground: [196, 180, 132], plant: [150, 170, 90], browse: 0, forage: 0.3 },
-  { name: 'Луга', fert: 1, move: 1, sense: 1, ground: [104, 98, 62], plant: [92, 168, 70], browse: 0.3, forage: 0.45 },
-  { name: 'Саванна', fert: 0.7, move: 1, sense: 1.15, ground: [150, 128, 76], plant: [170, 172, 72], browse: 1.4, forage: 0.35 },
-  { name: 'Лес', fert: 0.8, move: 0.85, sense: 0.6, ground: [58, 70, 40], plant: [50, 120, 56], browse: 3, forage: 0.9 },
-  { name: 'Болото', fert: 0.65, move: 0.6, sense: 0.8, ground: [62, 70, 52], plant: [86, 120, 70], browse: 1.5, forage: 0.8 },
-  { name: 'Пустыня', fert: 0.08, move: 0.95, sense: 1.2, ground: [212, 176, 116], plant: [170, 160, 80], browse: 0.15, forage: 0.12 },
-  { name: 'Тундра', fert: 0.45, move: 0.85, sense: 1.1, ground: [130, 136, 128], plant: [120, 146, 108], browse: 0.6, forage: 0.35 },
-  { name: 'Горы', fert: 0.1, move: 0.6, sense: 1.25, ground: [112, 104, 98], plant: [104, 130, 90], browse: 0.25, forage: 0.1 },
-  { name: 'Ледники', fert: 0.03, move: 0.7, sense: 1.2, ground: [222, 230, 238], plant: [170, 190, 170], browse: 0, forage: 0 },
+  { name: 'Пляж', fert: 0.15, move: 0.95, sense: 1.1, ground: [196, 180, 132], plant: [150, 170, 90], water: false, browse: 0, forage: 0.3 },
+  { name: 'Луга', fert: 1, move: 1, sense: 1, ground: [104, 98, 62], plant: [92, 168, 70], water: false, browse: 0.3, forage: 0.45 },
+  { name: 'Саванна', fert: 0.7, move: 1, sense: 1.15, ground: [150, 128, 76], plant: [170, 172, 72], water: false, browse: 1.4, forage: 0.35 },
+  { name: 'Лес', fert: 0.8, move: 0.85, sense: 0.6, ground: [58, 70, 40], plant: [50, 120, 56], water: false, browse: 3, forage: 0.9 },
+  { name: 'Болото', fert: 0.65, move: 0.6, sense: 0.8, ground: [62, 70, 52], plant: [86, 120, 70], water: false, browse: 1.5, forage: 0.8 },
+  { name: 'Пустыня', fert: 0.08, move: 0.95, sense: 1.2, ground: [212, 176, 116], plant: [170, 160, 80], water: false, browse: 0.15, forage: 0.12 },
+  { name: 'Тундра', fert: 0.45, move: 0.85, sense: 1.1, ground: [130, 136, 128], plant: [120, 146, 108], water: false, browse: 0.6, forage: 0.35 },
+  { name: 'Горы', fert: 0.1, move: 0.6, sense: 1.25, ground: [112, 104, 98], plant: [104, 130, 90], water: false, browse: 0.25, forage: 0.1 },
+  { name: 'Ледники', fert: 0.03, move: 0.7, sense: 1.2, ground: [222, 230, 238], plant: [170, 190, 170], water: false, browse: 0, forage: 0 },
 ];
 
 /** Крупные «классы» местности — по ним нарезаются именованные регионы. */
@@ -79,6 +79,10 @@ export function properName(rand: () => number): string {
   return s[0].toUpperCase() + s.slice(1);
 }
 
+/** Пороги стока: ручей и река (в «клетках дождя»). */
+export const RIVER_MIN = 80,
+  STREAM_MIN = 30;
+
 export interface Region {
   id: number;
   name: string;
@@ -97,6 +101,17 @@ export class Terrain {
   readonly biome: Uint8Array;
   readonly region: Int16Array;
   regions: Region[] = [];
+  /** Гидрология: куда стекает клетка (-1 у воды), порядок заливки (снизу вверх), накопленный сток. */
+  readonly drain: Int32Array;
+  readonly order: Int32Array;
+  readonly flow: Float32Array;
+  /** 0 — нет, 1 — ручей, 2 — река. */
+  readonly river: Uint8Array;
+  /** ≥0 — русло реки id; ≤-2 — приток реки -(v+2); -1 — нет. */
+  readonly rivId: Int16Array;
+  rivers: { name: string; mouth: number; flow: number }[] = [];
+  /** Клетки горячих источников (украшение). */
+  springs: number[] = [];
   seaLevel = 0;
   mountainLevel = 0;
 
@@ -108,6 +123,8 @@ export class Terrain {
     /** Доля карты под водой (0..1) и сдвиг температуры — задаются планетой. */
     readonly sea = 0.3,
     readonly tempOffset = 0,
+    /** Вулканизм планеты: сколько горячих источников. */
+    readonly volcanism = 1,
   ) {
     this.cols = Math.ceil(width / cell);
     this.rows = Math.ceil(height / cell);
@@ -117,6 +134,11 @@ export class Terrain {
     this.baseTemp = new Float32Array(n);
     this.biome = new Uint8Array(n);
     this.region = new Int16Array(n).fill(-1);
+    this.drain = new Int32Array(n).fill(-1);
+    this.order = new Int32Array(n);
+    this.flow = new Float32Array(n);
+    this.river = new Uint8Array(n);
+    this.rivId = new Int16Array(n).fill(-1);
     this.generate();
   }
 
@@ -200,7 +222,183 @@ export class Terrain {
       }
     }
 
+    this.hydrology();
     this.buildRegions(rand);
+  }
+
+  /** Реки: priority-flood (Barnes 2014) → сток → русла, имена, притоки; горячие источники. */
+  private hydrology(): void {
+    const { cols, rows, elev, biome, drain, order, flow, river, rivId } = this;
+    const n = cols * rows;
+    // свой поток случайностей — имена регионов и карта не меняются
+    const rand2 = mulberry32(this.seed ^ 0x9e3779b9);
+    const wet = (i: number) => biome[i] <= B.Shallow;
+    // двоичная куча на типизированных массивах
+    const hk = new Float32Array(n);
+    const hi = new Int32Array(n);
+    let hn = 0;
+    const push = (i: number, k: number) => {
+      let c = hn++;
+      while (c > 0) {
+        const p = (c - 1) >> 1;
+        if (hk[p] <= k) break;
+        hk[c] = hk[p];
+        hi[c] = hi[p];
+        c = p;
+      }
+      hk[c] = k;
+      hi[c] = i;
+    };
+    const pop = (): number => {
+      const top = hi[0];
+      const k = hk[--hn];
+      const i = hi[hn];
+      let c = 0;
+      for (;;) {
+        let m = 2 * c + 1;
+        if (m >= hn) break;
+        if (m + 1 < hn && hk[m + 1] < hk[m]) m++;
+        if (hk[m] >= k) break;
+        hk[c] = hk[m];
+        hi[c] = hi[m];
+        c = m;
+      }
+      hk[c] = k;
+      hi[c] = i;
+      return top;
+    };
+    const filled = Float32Array.from(elev);
+    const visited = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const x = i % cols;
+      const y = (i / cols) | 0;
+      if (wet(i) || x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
+        visited[i] = 1;
+        push(i, elev[i]);
+      }
+    }
+    let k = 0;
+    while (hn > 0) {
+      const i = pop();
+      order[k++] = i;
+      const x = i % cols;
+      const y = (i / cols) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= rows) continue;
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          if ((dx === 0 && dy === 0) || xx < 0 || xx >= cols) continue;
+          const j = yy * cols + xx;
+          if (visited[j]) continue;
+          visited[j] = 1;
+          filled[j] = Math.max(elev[j], filled[i] + 1e-5);
+          if (!wet(j)) drain[j] = i;
+          push(j, filled[j]);
+        }
+      }
+    }
+    // сток: дождь на суше, сверху вниз
+    for (let i = 0; i < n; i++) flow[i] = wet(i) ? 0 : 0.3 + this.moist[i];
+    for (let q = n - 1; q >= 0; q--) {
+      const i = order[q];
+      if (drain[i] >= 0) flow[drain[i]] += flow[i];
+    }
+    for (let i = 0; i < n; i++) river[i] = wet(i) ? 0 : flow[i] >= RIVER_MIN ? 2 : flow[i] >= STREAM_MIN ? 1 : 0;
+
+    // имена: устья крупных рек
+    const mouths: number[] = [];
+    for (let i = 0; i < n; i++) if (river[i] >= 2 && drain[i] >= 0 && wet(drain[i]) && flow[i] >= 150) mouths.push(i);
+    mouths.sort((a, b) => flow[b] - flow[a]);
+    const used = new Set<string>();
+    for (const m of mouths.slice(0, 12)) {
+      let name = '';
+      do name = 'р. ' + properName(rand2);
+      while (used.has(name));
+      used.add(name);
+      const id = this.rivers.length;
+      this.rivers.push({ name, mouth: m, flow: flow[m] });
+      // главное русло: вверх по самому полноводному притоку
+      let i = m;
+      rivId[i] = id;
+      for (;;) {
+        let best = -1;
+        const x = i % cols;
+        const y = (i / cols) | 0;
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            const yy = y + dy;
+            if (xx < 0 || yy < 0 || xx >= cols || yy >= rows) continue;
+            const j = yy * cols + xx;
+            if (drain[j] === i && flow[j] >= RIVER_MIN && (best < 0 || flow[j] > flow[best])) best = j;
+          }
+        }
+        if (best < 0 || rivId[best] !== -1) break;
+        rivId[best] = id;
+        i = best;
+      }
+    }
+    // притоки: снизу вверх по течению наследуют имя
+    for (let q = 0; q < n; q++) {
+      const i = order[q];
+      if (rivId[i] !== -1 || river[i] < 1 || drain[i] < 0) continue;
+      const v = rivId[drain[i]];
+      if (v !== -1) rivId[i] = v >= 0 ? -(v + 2) : v;
+    }
+
+    // горячие источники: 2–6 клеток от гор (заснеженные вершины тоже горы)
+    const dist = new Uint8Array(n).fill(255);
+    const qu = new Int32Array(n);
+    let qh = 0;
+    let qt = 0;
+    for (let i = 0; i < n; i++) if (biome[i] === B.Mountain || biome[i] === B.Snow) { dist[i] = 0; qu[qt++] = i; }
+    while (qh < qt) {
+      const i = qu[qh++];
+      if (dist[i] >= 6) continue;
+      const x = i % cols;
+      const y = (i / cols) | 0;
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          const xx = x + dx;
+          const yy = y + dy;
+          if (xx < 0 || yy < 0 || xx >= cols || yy >= rows) continue;
+          const j = yy * cols + xx;
+          if (dist[j] === 255) { dist[j] = dist[i] + 1; qu[qt++] = j; }
+        }
+      }
+    }
+    const cand: number[] = [];
+    for (let i = 0; i < n; i++) {
+      const b = biome[i];
+      if (!wet(i) && b !== B.Snow && b !== B.Mountain && dist[i] >= 2 && dist[i] <= 6) cand.push(i);
+    }
+    const nS = Math.round(1 + 4 * this.volcanism);
+    for (let tries = 0; tries < 300 && cand.length && this.springs.length < nS; tries++) {
+      const c = cand[Math.floor(rand2() * cand.length)];
+      const cx = c % cols;
+      const cy = (c / cols) | 0;
+      if (this.springs.every((s) => Math.hypot((s % cols) - cx, ((s / cols) | 0) - cy) >= 12)) this.springs.push(c);
+    }
+  }
+
+  /** Река или приток рядом с точкой (окно 5×5 клеток). */
+  waterAt(x: number, y: number): string | null {
+    const c = this.index(x, y);
+    const cx = c % this.cols;
+    const cy = (c / this.cols) | 0;
+    let trib = -1;
+    for (let dy = -2; dy <= 2; dy++) {
+      for (let dx = -2; dx <= 2; dx++) {
+        const xx = cx + dx;
+        const yy = cy + dy;
+        if (xx < 0 || yy < 0 || xx >= this.cols || yy >= this.rows) continue;
+        const v = this.rivId[yy * this.cols + xx];
+        if (v >= 0) return this.rivers[v].name;
+        if (v <= -2 && trib < 0) trib = -(v + 2);
+      }
+    }
+    return trib >= 0 ? 'приток ' + this.rivers[trib].name : null;
   }
 
   /** Связные области одного класса местности → именованные регионы. */
@@ -261,5 +459,24 @@ export class Terrain {
   regionAt(x: number, y: number): Region | null {
     const r = this.region[this.index(x, y)];
     return r >= 0 && this.regions[r].cells >= 30 ? this.regions[r] : null;
+  }
+}
+
+/** Тип почвы клетки (только для показа). */
+export function soilName(t: Terrain, i: number): string {
+  const T = t.baseTemp[i];
+  const m = t.moist[i];
+  switch (t.biome[i] as B) {
+    case B.Deep: return 'донный ил';
+    case B.Shallow: return 'ил';
+    case B.Grass: return T >= 0.3 && T <= 0.55 && m >= 0.35 && m <= 0.65 ? 'чернозём' : 'луговая';
+    case B.Savanna: return 'красная саванная';
+    case B.Forest: return T < 0.4 ? 'подзол' : T <= 0.62 ? 'бурая лесная' : 'красная тропическая (латерит)';
+    case B.Swamp: return 'торф';
+    case B.Tundra: return 'мерзлотная';
+    case B.Desert: return 'пустынная (пески)';
+    case B.Beach: return 'песок';
+    case B.Mountain: return 'каменистая';
+    default: return 'лёд и камень';
   }
 }
