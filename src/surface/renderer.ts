@@ -1,4 +1,4 @@
-import { clamp, mulberry32 } from '../lib/random';
+import { clamp, mulberry32, Noise } from '../lib/random';
 import { B, BIOMES } from '../sim/terrain';
 import type { Creature, Fx, World } from '../sim/world';
 import type { Camera } from './camera';
@@ -15,6 +15,29 @@ interface Particle {
 }
 
 const BAKE_SCALE = 0.5; // пикселей текстуры на единицу мира
+const TILE_PX = 512;
+/** Во сколько раз слой травы детальнее сетки клеток (сглаживание). */
+const OV = 3;
+
+interface TilePair {
+  ground: HTMLCanvasElement;
+  deco: HTMLCanvasElement;
+}
+
+/** Быстрый детерминированный шум 0..1 по координатам. */
+function hash2(x: number, y: number): number {
+  let h = (Math.floor(x * 4) * 374761393 + Math.floor(y * 4) * 668265263) | 0;
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+
+interface Deco {
+  kind: 'tree' | 'acacia' | 'bush' | 'reed' | 'cactus' | 'rock' | 'snowrock' | 'flower' | 'pebble';
+  x: number;
+  y: number;
+  s: number;
+  v: number;
+}
 
 /** Рисует поверхность: запечённый рельеф, траву и снег, существ, эффекты, ночь. */
 export class SurfaceRenderer {
@@ -28,6 +51,11 @@ export class SurfaceRenderer {
   private frame = 0;
   /** id вида, который подсвечен (остальные приглушены). */
   focusSpecies: number | null = null;
+  private tiles = new Map<string, TilePair>();
+  private cellCol = new Float32Array(0);
+  private micro = new Noise(1234);
+  private tileBudget = 0;
+  private grain = this.makeGrain();
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -95,14 +123,16 @@ export class SurfaceRenderer {
       }
     }
     g.putImageData(img, 0, 0);
-    this.decorate(g, rnd);
+    this.decorate(g);
+    this.tiles.clear();
 
     // слой травы/снега — по клеткам, растягивается со сглаживанием
     this.overlay = document.createElement('canvas');
-    this.overlay.width = t.cols;
-    this.overlay.height = t.rows;
+    this.overlay.width = t.cols * OV;
+    this.overlay.height = t.rows * OV;
     this.overlayCtx = this.overlay.getContext('2d')!;
-    this.overlayImg = this.overlayCtx.createImageData(t.cols, t.rows);
+    this.overlayImg = this.overlayCtx.createImageData(t.cols * OV, t.rows * OV);
+    this.cellCol = new Float32Array(t.cols * t.rows * 4);
     this.updateOverlay();
 
     // основа миникарты
@@ -112,117 +142,363 @@ export class SurfaceRenderer {
     this.miniBase.getContext('2d')!.drawImage(this.bake, 0, 0, this.miniBase.width, this.miniBase.height);
   }
 
-  /** Деревья, камни, кактусы, тростник — рисуются прямо в текстуру рельефа. */
-  private decorate(g: CanvasRenderingContext2D, rnd: () => number): void {
+  /**
+   * Украшения клетки (деревья, камни, кактусы…) — детерминированно по её координатам,
+   * чтобы на общем плане и при приближении всё стояло на тех же местах.
+   */
+  private decoItems(cx: number, cy: number): Deco[] {
     const t = this.world.terrain;
-    const s = BAKE_SCALE;
-    const n = t.cols * t.rows;
-    for (let k = 0; k < n * 1.6; k++) {
-      const x = rnd() * this.world.width;
-      const y = rnd() * this.world.height;
-      const b = t.biome[t.index(x, y)] as B;
-      const px = x * s;
-      const py = y * s;
-      if (b === B.Forest && rnd() < 0.85) {
-        const r = (5 + rnd() * 5) * s;
-        g.fillStyle = 'rgba(0,0,0,0.25)';
+    const i = cy * t.cols + cx;
+    const b = t.biome[i] as B;
+    const r = mulberry32((this.world.seed * 7919) ^ (cx * 73856093) ^ (cy * 19349663));
+    const cell = this.world.cell;
+    const out: Deco[] = [];
+    const add = (kind: Deco['kind'], n: number, size: [number, number]) => {
+      const k = Math.floor(n) + (r() < n % 1 ? 1 : 0);
+      for (let q = 0; q < k; q++) {
+        out.push({ kind, x: (cx + r()) * cell, y: (cy + r()) * cell, s: size[0] + r() * (size[1] - size[0]), v: r() });
+      }
+    };
+    if (b === B.Forest) add('tree', 2.4, [5, 10]);
+    else if (b === B.Swamp) {
+      add('reed', 1.2, [3, 6]);
+      add('tree', 0.35, [4, 7]);
+    } else if (b === B.Desert) add('cactus', 0.12, [3, 5]);
+    else if (b === B.Mountain) add('rock', 0.7, [3, 8]);
+    else if (b === B.Snow) add('snowrock', 0.6, [3, 8]);
+    else if (b === B.Grass) {
+      add('flower', 0.6, [0.6, 1.2]);
+      add('bush', 0.08, [3, 5]);
+    } else if (b === B.Savanna) {
+      add('acacia', 0.06, [5, 8]);
+      add('bush', 0.1, [2, 4]);
+    } else if (b === B.Tundra) {
+      add('pebble', 0.4, [1, 2.5]);
+      add('bush', 0.15, [2, 3]);
+    } else if (b === B.Beach) add('pebble', 0.3, [0.8, 1.6]);
+    return out;
+  }
+
+  /** Нарисовать украшения в мировых координатах (контекст уже отмасштабирован). */
+  private drawDeco(g: CanvasRenderingContext2D, d: Deco, detail: number): void {
+    const { x, y, s, v } = d;
+    switch (d.kind) {
+      case 'tree': {
+        g.fillStyle = 'rgba(0,0,0,0.28)';
         g.beginPath();
-        g.ellipse(px + r * 0.4, py + r * 0.5, r, r * 0.8, 0, 0, Math.PI * 2);
+        g.ellipse(x + s * 0.35, y + s * 0.45, s, s * 0.8, 0, 0, Math.PI * 2);
         g.fill();
-        const shade = 30 + rnd() * 25;
-        g.fillStyle = `rgb(${shade * 0.6},${shade + 50},${shade * 0.6})`;
+        const sh = 26 + v * 26;
+        g.fillStyle = `rgb(${sh * 0.55},${sh + 46},${sh * 0.55})`;
         g.beginPath();
-        g.arc(px, py, r, 0, Math.PI * 2);
+        g.arc(x, y, s, 0, Math.PI * 2);
         g.fill();
-        g.fillStyle = 'rgba(160,220,120,0.18)';
-        g.beginPath();
-        g.arc(px - r * 0.3, py - r * 0.3, r * 0.5, 0, Math.PI * 2);
-        g.fill();
-      } else if (b === B.Swamp && rnd() < 0.5) {
-        g.strokeStyle = 'rgba(90,120,60,0.7)';
-        g.lineWidth = 0.6;
-        for (let i = 0; i < 3; i++) {
-          g.beginPath();
-          g.moveTo(px + i, py);
-          g.lineTo(px + i + (rnd() - 0.5) * 2, py - 3 - rnd() * 3);
-          g.stroke();
+        if (detail > 1.5) {
+          // крона из нескольких «шапок» листвы
+          g.fillStyle = `rgba(${70 + v * 30},${140 + v * 30},${60},0.55)`;
+          for (let k = 0; k < 4; k++) {
+            const a = v * 6 + k * 1.7;
+            g.beginPath();
+            g.arc(x + Math.cos(a) * s * 0.45, y + Math.sin(a) * s * 0.45, s * 0.42, 0, Math.PI * 2);
+            g.fill();
+          }
         }
-      } else if (b === B.Desert && rnd() < 0.08) {
-        g.fillStyle = 'rgba(70,110,60,0.9)';
-        g.fillRect(px - 0.6, py - 3, 1.2, 3);
-        g.fillRect(px - 2, py - 2, 1, 1.5);
-        g.fillRect(px + 1, py - 2.5, 1, 1.5);
-      } else if ((b === B.Mountain || b === B.Snow) && rnd() < 0.35) {
-        const r = (3 + rnd() * 5) * s;
+        g.fillStyle = 'rgba(190,240,150,0.2)';
+        g.beginPath();
+        g.arc(x - s * 0.3, y - s * 0.3, s * 0.45, 0, Math.PI * 2);
+        g.fill();
+        break;
+      }
+      case 'acacia':
         g.fillStyle = 'rgba(0,0,0,0.22)';
         g.beginPath();
-        g.moveTo(px, py - r);
-        g.lineTo(px + r, py + r * 0.6);
-        g.lineTo(px - r * 0.2, py + r * 0.6);
+        g.ellipse(x + 2, y + 2, s * 1.3, s * 0.6, 0, 0, Math.PI * 2);
         g.fill();
-        g.fillStyle = b === B.Snow ? 'rgba(250,252,255,0.9)' : 'rgba(150,145,140,0.8)';
+        g.fillStyle = `rgb(${86 + v * 20},${116 + v * 20},48)`;
         g.beginPath();
-        g.moveTo(px, py - r);
-        g.lineTo(px - r * 0.2, py + r * 0.6);
-        g.lineTo(px - r, py + r * 0.6);
+        g.ellipse(x, y, s * 1.3, s * 0.6, 0, 0, Math.PI * 2);
         g.fill();
-      } else if (b === B.Grass && rnd() < 0.05) {
-        g.fillStyle = `rgba(${220 + rnd() * 35},${180 + rnd() * 60},${80 + rnd() * 120},0.8)`;
-        g.fillRect(px, py, 0.8, 0.8); // цветы
-      } else if (b === B.Savanna && rnd() < 0.03) {
-        const r = (4 + rnd() * 3) * s;
+        break;
+      case 'bush':
+        g.fillStyle = `rgba(${50 + v * 30},${100 + v * 30},${45},0.9)`;
+        g.beginPath();
+        g.arc(x, y, s * 0.6, 0, Math.PI * 2);
+        g.arc(x + s * 0.5, y + s * 0.2, s * 0.45, 0, Math.PI * 2);
+        g.fill();
+        break;
+      case 'reed':
+        g.strokeStyle = `rgba(${90 + v * 40},${120 + v * 30},60,0.8)`;
+        g.lineWidth = 0.5;
+        for (let k = 0; k < 3; k++) {
+          g.beginPath();
+          g.moveTo(x + k * 0.9, y);
+          g.lineTo(x + k * 0.9 + (v - 0.5) * 2, y - s);
+          g.stroke();
+        }
+        break;
+      case 'cactus':
         g.fillStyle = 'rgba(0,0,0,0.2)';
+        g.fillRect(x + 0.6, y - 0.2, s * 0.35, s * 0.25);
+        g.fillStyle = 'rgb(70,118,62)';
+        g.fillRect(x - s * 0.12, y - s, s * 0.24, s);
+        g.fillRect(x - s * 0.45, y - s * 0.65, s * 0.18, s * 0.4);
+        g.fillRect(x + s * 0.27, y - s * 0.75, s * 0.18, s * 0.45);
+        break;
+      case 'rock':
+      case 'snowrock': {
+        g.fillStyle = 'rgba(0,0,0,0.25)';
         g.beginPath();
-        g.ellipse(px + 1, py + 1, r * 1.2, r * 0.6, 0, 0, Math.PI * 2);
+        g.moveTo(x, y - s);
+        g.lineTo(x + s, y + s * 0.6);
+        g.lineTo(x - s * 0.2, y + s * 0.6);
         g.fill();
-        g.fillStyle = 'rgb(90,120,50)';
+        g.fillStyle = d.kind === 'snowrock' ? 'rgb(245,248,252)' : `rgb(${130 + v * 40},${124 + v * 36},${118 + v * 30})`;
         g.beginPath();
-        g.ellipse(px, py, r * 1.2, r * 0.6, 0, 0, Math.PI * 2);
-        g.fill(); // акация
+        g.moveTo(x, y - s);
+        g.lineTo(x - s * 0.2, y + s * 0.6);
+        g.lineTo(x - s, y + s * 0.6);
+        g.fill();
+        break;
       }
+      case 'flower':
+        g.fillStyle = `hsla(${[50, 0, 280, 200, 330][Math.floor(v * 5)]},65%,${72 + v * 12}%,0.75)`;
+        g.beginPath();
+        g.arc(x, y, s * 0.5, 0, Math.PI * 2);
+        g.fill();
+        break;
+      case 'pebble':
+        g.fillStyle = `rgba(${150 + v * 50},${145 + v * 45},${140 + v * 40},0.8)`;
+        g.beginPath();
+        g.ellipse(x, y, s, s * 0.7, v * 3, 0, Math.PI * 2);
+        g.fill();
+        break;
     }
   }
 
+  /** Деревья, камни, кактусы — в текстуру общего плана. */
+  private decorate(g: CanvasRenderingContext2D): void {
+    const t = this.world.terrain;
+    g.save();
+    g.scale(BAKE_SCALE, BAKE_SCALE);
+    for (let cy = 0; cy < t.rows; cy++) for (let cx = 0; cx < t.cols; cx++) for (const d of this.decoItems(cx, cy)) this.drawDeco(g, d, 1);
+    g.restore();
+  }
+
+  /** Детальный тайл (512 px) при приближении: чёткие деревья, камни и зерно почвы. */
+  private tile(level: number, tx: number, ty: number): TilePair | null {
+    const key = `${level}:${tx}:${ty}`;
+    const cached = this.tiles.get(key);
+    if (cached) {
+      this.tiles.delete(key);
+      this.tiles.set(key, cached); // LRU: свежий — в конец
+      return cached;
+    }
+    if (this.tileBudget <= 0) return null;
+    this.tileBudget--;
+    const size = TILE_PX / level; // в единицах мира
+    const ground = this.groundTile(tx * size, ty * size, size);
+    const c = document.createElement('canvas');
+    c.width = c.height = TILE_PX;
+    const g = c.getContext('2d')!;
+    // зерно почвы
+    g.globalAlpha = 0.07;
+    g.fillStyle = g.createPattern(this.grain, 'repeat')!;
+    g.fillRect(0, 0, TILE_PX, TILE_PX);
+    g.globalAlpha = 1;
+    g.setTransform(level, 0, 0, level, -tx * size * level, -ty * size * level);
+    const t = this.world.terrain;
+    const cell = this.world.cell;
+    const c0 = Math.max(0, Math.floor((tx * size - 12) / cell));
+    const c1 = Math.min(t.cols - 1, Math.floor(((tx + 1) * size + 12) / cell));
+    const r0 = Math.max(0, Math.floor((ty * size - 12) / cell));
+    const r1 = Math.min(t.rows - 1, Math.floor(((ty + 1) * size + 12) / cell));
+    for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) for (const d of this.decoItems(cx, cy)) this.drawDeco(g, d, level);
+    const pair = { ground, deco: c };
+    this.tiles.set(key, pair);
+    if (this.tiles.size > 48) this.tiles.delete(this.tiles.keys().next().value!);
+    return pair;
+  }
+
+  /**
+   * Рельеф тайла в высоком разрешении: та же функция, что и у общего плана,
+   * плюс микрорельеф — он даёт чёткую изрезанную кромку берега и фактуру склонов.
+   */
+  private groundTile(x0: number, y0: number, size: number): HTMLCanvasElement {
+    const N = 256;
+    const t = this.world.terrain;
+    const step = size / N;
+    const E = new Float32Array((N + 2) * (N + 2));
+    const f = { e: 0, m: 0, t: 0 };
+    const micro = this.micro;
+    for (let j = 0; j < N + 2; j++) {
+      for (let i = 0; i < N + 2; i++) {
+        const x = x0 + (i - 0.5) * step;
+        const y = y0 + (j - 0.5) * step;
+        t.fieldsAt(x, y, f);
+        E[j * (N + 2) + i] = f.e + (micro.fbm(x / 22, y / 22, 3) - 0.5) * 0.012;
+      }
+    }
+    const c = document.createElement('canvas');
+    c.width = c.height = N;
+    const g = c.getContext('2d')!;
+    const img = g.createImageData(N, N);
+    const d = img.data;
+    const sea = t.seaLevel;
+    for (let j = 0; j < N; j++) {
+      for (let i = 0; i < N; i++) {
+        const x = x0 + (i + 0.5) * step;
+        const y = y0 + (j + 0.5) * step;
+        t.fieldsAt(x, y, f);
+        const e = E[(j + 1) * (N + 2) + i + 1];
+        const b = t.classify(e, f.m, f.t);
+        const info = BIOMES[b];
+        let [r, gg, bb] = info.ground;
+        const n = (hash2(x, y) - 0.5) * 12;
+        if (info.water) {
+          const depth = clamp((sea - e) * 8, 0, 1);
+          r = 52 - depth * 32;
+          gg = 112 - depth * 62;
+          bb = 150 - depth * 52;
+          if (sea - e < 0.0025) {
+            r += 70;
+            gg += 70;
+            bb += 55;
+          }
+        } else {
+          const ex = E[(j + 1) * (N + 2) + i + 2] - E[(j + 1) * (N + 2) + i];
+          const ey = E[(j + 2) * (N + 2) + i + 1] - E[j * (N + 2) + i + 1];
+          const shade = clamp(1 - ((ex + ey) * 60) / step, 0.65, 1.4);
+          r *= shade;
+          gg *= shade;
+          bb *= shade;
+        }
+        const o = (j * N + i) * 4;
+        d[o] = clamp(r + n, 0, 255);
+        d[o + 1] = clamp(gg + n, 0, 255);
+        d[o + 2] = clamp(bb + n, 0, 255);
+        d[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
+  private makeGrain(): HTMLCanvasElement {
+    const c = document.createElement('canvas');
+    c.width = c.height = 128;
+    const g = c.getContext('2d')!;
+    const img = g.createImageData(128, 128);
+    const r = mulberry32(99);
+    for (let i = 0; i < 128 * 128; i++) {
+      const v = r() < 0.5 ? 0 : 255;
+      img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = r() * 255;
+    }
+    g.putImageData(img, 0, 0);
+    return c;
+  }
+
   /** Трава, снег и лёд по клеткам — меняются с сезонами. */
-  updateOverlay(): void {
+  /** Цвет травы/снега/льда клетки (RGBA 0..255). */
+  private cellColor(i: number, out: Float32Array, o: number): void {
     const w = this.world;
     const t = w.terrain;
+    const b = BIOMES[t.biome[i]];
+    const temp = t.baseTemp[i] + w.season.shift;
+    const snow = clamp((0.1 - temp) / 0.08, 0, 1);
+    if (b.water) {
+      // лёд на воде зимой
+      const ice = clamp((0.04 - temp) / 0.05, 0, 1);
+      out[o] = 225;
+      out[o + 1] = 238;
+      out[o + 2] = 248;
+      out[o + 3] = ice * 220;
+      return;
+    }
+    const gr = clamp(w.grass[i] / Math.max(0.05, b.fert), 0, 1) * Math.min(1, b.fert * 1.6);
+    const [pr, pg, pb] = b.plant;
+    // осенью трава желтеет
+    const autumn = clamp((0.25 - temp) * 3, 0, 0.5);
+    let r = pr + (200 - pr) * autumn;
+    let g = pg + (170 - pg) * autumn;
+    let bb = pb * (1 - autumn);
+    let a = gr * 0.85;
+    if (snow > 0) {
+      r = r + (240 - r) * snow;
+      g = g + (245 - g) * snow;
+      bb = bb + (250 - bb) * snow;
+      a = Math.max(a, snow * 0.9);
+    }
+    out[o] = r;
+    out[o + 1] = g;
+    out[o + 2] = bb;
+    out[o + 3] = a * 255;
+  }
+
+  /** Трава, снег и лёд — меняются с сезонами. Сглаживаем между клетками, чтобы не было «шашечек». */
+  updateOverlay(): void {
+    const t = this.world.terrain;
+    const C = this.cellCol;
+    for (let i = 0; i < t.cols * t.rows; i++) this.cellColor(i, C, i * 4);
+    const W = t.cols * OV;
+    const H = t.rows * OV;
     const d = this.overlayImg.data;
-    const shift = w.season.shift;
-    for (let i = 0; i < w.grass.length; i++) {
-      const b = BIOMES[t.biome[i]];
-      const temp = t.baseTemp[i] + shift;
-      const snow = clamp((0.1 - temp) / 0.08, 0, 1);
-      const o = i * 4;
-      if (b.water) {
-        // лёд на воде зимой
-        const ice = clamp((0.04 - temp) / 0.05, 0, 1);
-        d[o] = 225;
-        d[o + 1] = 238;
-        d[o + 2] = 248;
-        d[o + 3] = ice * 220;
-        continue;
+    for (let y = 0; y < H; y++) {
+      const fy = clamp((y + 0.5) / OV - 0.5, 0, t.rows - 1.001);
+      const y0 = Math.floor(fy);
+      const ty = fy - y0;
+      for (let x = 0; x < W; x++) {
+        const fx = clamp((x + 0.5) / OV - 0.5, 0, t.cols - 1.001);
+        const x0 = Math.floor(fx);
+        const tx = fx - x0;
+        const a = (y0 * t.cols + x0) * 4;
+        const b = a + 4;
+        const c = a + t.cols * 4;
+        const e = c + 4;
+        const o = (y * W + x) * 4;
+        for (let k = 0; k < 4; k++) {
+          d[o + k] = (C[a + k] * (1 - tx) + C[b + k] * tx) * (1 - ty) + (C[c + k] * (1 - tx) + C[e + k] * tx) * ty;
+        }
       }
-      const gr = clamp(w.grass[i] / Math.max(0.05, b.fert), 0, 1) * Math.min(1, b.fert * 1.6);
-      const [pr, pg, pb] = b.plant;
-      // осенью трава желтеет
-      const autumn = clamp((0.25 - temp) * 3, 0, 0.5);
-      let r = pr + (200 - pr) * autumn;
-      let g = pg + (170 - pg) * autumn;
-      let bb = pb * (1 - autumn);
-      let a = gr * 0.85;
-      if (snow > 0) {
-        r = r + (240 - r) * snow;
-        g = g + (245 - g) * snow;
-        bb = bb + (250 - bb) * snow;
-        a = Math.max(a, snow * 0.9);
-      }
-      d[o] = r;
-      d[o + 1] = g;
-      d[o + 2] = bb;
-      d[o + 3] = a * 255;
     }
     this.overlayCtx.putImageData(this.overlayImg, 0, 0);
+  }
+
+  /** Травинки при сильном приближении: густота = сколько травы осталось в клетке. */
+  private drawGrassBlades(x0: number, y0: number, x1: number, y1: number): void {
+    const ctx = this.ctx;
+    const w = this.world;
+    const t = w.terrain;
+    const cell = w.cell;
+    const shift = w.season.shift;
+    ctx.lineWidth = 0.35;
+    ctx.lineCap = 'round';
+    const wind = Math.sin(w.tick / 30) * 0.6;
+    for (let cy = Math.max(0, Math.floor(y0 / cell)); cy <= Math.min(t.rows - 1, Math.floor(y1 / cell)); cy++) {
+      for (let cx = Math.max(0, Math.floor(x0 / cell)); cx <= Math.min(t.cols - 1, Math.floor(x1 / cell)); cx++) {
+        const i = cy * t.cols + cx;
+        const b = BIOMES[t.biome[i]];
+        if (b.water || b.fert < 0.2) continue;
+        const temp = t.baseTemp[i] + shift;
+        if (temp < 0.06) continue; // под снегом
+        const frac = clamp(w.grass[i] / b.fert, 0, 1);
+        const n = Math.round(frac * 9);
+        if (!n) continue;
+        const autumn = clamp((0.25 - temp) * 3, 0, 0.5);
+        const [pr, pg, pb] = b.plant;
+        ctx.strokeStyle = `rgb(${(pr + (210 - pr) * autumn) * 0.8},${(pg + (180 - pg) * autumn) * 0.85},${pb * 0.7})`;
+        const r = mulberry32(i * 2654435761);
+        ctx.beginPath();
+        for (let k = 0; k < n; k++) {
+          const x = (cx + r()) * cell;
+          const y = (cy + r()) * cell;
+          const len = 1.2 + r() * 2 * frac;
+          ctx.moveTo(x, y);
+          ctx.lineTo(x + wind * len * 0.4 + (r() - 0.5), y - len);
+        }
+        ctx.stroke();
+      }
+    }
   }
 
   /** Подхватить мгновенные события мира и превратить их в частицы. */
@@ -272,7 +548,28 @@ export class SurfaceRenderer {
     ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
     ctx.imageSmoothingEnabled = true;
     ctx.drawImage(this.bake, 0, 0, world.width, world.height);
+    // при приближении — чёткие детальные тайлы поверх размытой подложки
+    const px = z * dpr;
+    const shown: [TilePair, number, number, number][] = [];
+    if (px > 1.1) {
+      const level = px > 5 ? 8 : px > 2.5 ? 4 : 2;
+      const size = TILE_PX / level;
+      const vx0 = cam.x - W / 2 / z;
+      const vy0 = cam.y - H / 2 / z;
+      this.tileBudget = 2; // не больше 2 новых тайлов за кадр — без рывков
+      for (let ty = Math.max(0, Math.floor(vy0 / size)); ty <= Math.min(Math.ceil(world.height / size) - 1, Math.floor((vy0 + H / z) / size)); ty++) {
+        for (let tx = Math.max(0, Math.floor(vx0 / size)); tx <= Math.min(Math.ceil(world.width / size) - 1, Math.floor((vx0 + W / z) / size)); tx++) {
+          const t = this.tile(level, tx, ty);
+          if (t) {
+            ctx.drawImage(t.ground, tx * size, ty * size, size, size);
+            shown.push([t, tx * size, ty * size, size]);
+          }
+        }
+      }
+    }
     ctx.drawImage(this.overlay, 0, 0, world.width, world.height);
+    if (px > 2.5) this.drawGrassBlades(cam.x - W / 2 / z, cam.y - H / 2 / z, cam.x + W / 2 / z, cam.y + H / 2 / z);
+    for (const [t, x, y, size] of shown) ctx.drawImage(t.deco, x, y, size, size);
 
     // видимая область (с запасом)
     const x0 = cam.x - W / 2 / z - 30;
@@ -572,7 +869,9 @@ export class SurfaceRenderer {
         ctx.stroke();
       } else if (p.kind === 'spark') {
         ctx.fillStyle = p.hue === 0 ? '#ff5252' : '#ffb74d';
-        ctx.fillRect(p.x - 1, p.y - 1, 2, 2);
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.hue === 0 ? 0.7 : 1.6, 0, Math.PI * 2);
+        ctx.fill();
         p.vx *= 0.92;
         p.vy *= 0.92;
       } else if (p.kind === 'blast') {

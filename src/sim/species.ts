@@ -21,6 +21,8 @@ export interface Species {
   depth: number;
   /** Объявлен ли вид (набрал минимальную численность). */
   announced: boolean;
+  /** Сейчас идёт эпидемия из-за тесноты. */
+  crowded: boolean;
   x: number;
   y: number;
 }
@@ -100,6 +102,7 @@ export class SpeciesRegistry {
       mean: Object.fromEntries(GENE_KEYS.map((k) => [k, founder[k]])) as Record<GeneKey, number>,
       depth: parent ? (this.all.get(parent)?.depth ?? 0) + 1 : 0,
       announced: false,
+      crowded: false,
       x: 0,
       y: 0,
     };

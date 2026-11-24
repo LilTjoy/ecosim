@@ -27,20 +27,24 @@ export interface BiomeInfo {
   /** Цвет растительности. */
   plant: [number, number, number];
   water?: boolean;
+  /** Листва деревьев и кустов (достают только крупные). */
+  browse: number;
+  /** Ягоды, семена, насекомые (едят всеядные). */
+  forage: number;
 }
 
 export const BIOMES: BiomeInfo[] = [
-  { name: 'Глубокое море', fert: 0.35, move: 1, sense: 1, ground: [22, 52, 92], plant: [40, 110, 120], water: true },
-  { name: 'Мелководье', fert: 0.5, move: 1, sense: 1, ground: [42, 98, 138], plant: [60, 140, 120], water: true },
-  { name: 'Пляж', fert: 0.15, move: 0.95, sense: 1.1, ground: [196, 180, 132], plant: [150, 170, 90] },
-  { name: 'Луга', fert: 1, move: 1, sense: 1, ground: [104, 98, 62], plant: [92, 168, 70] },
-  { name: 'Саванна', fert: 0.7, move: 1, sense: 1.15, ground: [150, 128, 76], plant: [170, 172, 72] },
-  { name: 'Лес', fert: 0.8, move: 0.85, sense: 0.6, ground: [58, 70, 40], plant: [50, 120, 56] },
-  { name: 'Болото', fert: 0.65, move: 0.6, sense: 0.8, ground: [62, 70, 52], plant: [86, 120, 70] },
-  { name: 'Пустыня', fert: 0.08, move: 0.95, sense: 1.2, ground: [212, 176, 116], plant: [170, 160, 80] },
-  { name: 'Тундра', fert: 0.45, move: 0.85, sense: 1.1, ground: [130, 136, 128], plant: [120, 146, 108] },
-  { name: 'Горы', fert: 0.1, move: 0.6, sense: 1.25, ground: [112, 104, 98], plant: [104, 130, 90] },
-  { name: 'Ледники', fert: 0.03, move: 0.7, sense: 1.2, ground: [222, 230, 238], plant: [170, 190, 170] },
+  { name: 'Глубокое море', fert: 0.9, move: 1, sense: 1, ground: [22, 52, 92], plant: [40, 110, 120], water: true, browse: 0, forage: 0 },
+  { name: 'Мелководье', fert: 1.3, move: 1, sense: 1, ground: [42, 98, 138], plant: [60, 140, 120], water: true, browse: 0, forage: 0 },
+  { name: 'Пляж', fert: 0.15, move: 0.95, sense: 1.1, ground: [196, 180, 132], plant: [150, 170, 90], browse: 0, forage: 0.3 },
+  { name: 'Луга', fert: 1, move: 1, sense: 1, ground: [104, 98, 62], plant: [92, 168, 70], browse: 0.3, forage: 0.45 },
+  { name: 'Саванна', fert: 0.7, move: 1, sense: 1.15, ground: [150, 128, 76], plant: [170, 172, 72], browse: 1.4, forage: 0.35 },
+  { name: 'Лес', fert: 0.8, move: 0.85, sense: 0.6, ground: [58, 70, 40], plant: [50, 120, 56], browse: 3, forage: 0.9 },
+  { name: 'Болото', fert: 0.65, move: 0.6, sense: 0.8, ground: [62, 70, 52], plant: [86, 120, 70], browse: 1.5, forage: 0.8 },
+  { name: 'Пустыня', fert: 0.08, move: 0.95, sense: 1.2, ground: [212, 176, 116], plant: [170, 160, 80], browse: 0.15, forage: 0.12 },
+  { name: 'Тундра', fert: 0.45, move: 0.85, sense: 1.1, ground: [130, 136, 128], plant: [120, 146, 108], browse: 0.6, forage: 0.35 },
+  { name: 'Горы', fert: 0.1, move: 0.6, sense: 1.25, ground: [112, 104, 98], plant: [104, 130, 90], browse: 0.25, forage: 0.1 },
+  { name: 'Ледники', fert: 0.03, move: 0.7, sense: 1.2, ground: [222, 230, 238], plant: [170, 190, 170], browse: 0, forage: 0 },
 ];
 
 /** Крупные «классы» местности — по ним нарезаются именованные регионы. */

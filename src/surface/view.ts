@@ -31,6 +31,7 @@ const STATE_NAMES: Record<Creature['state'], string> = {
   migrate: 'кочует',
   herd: 'держится стада',
   swim: 'плывёт',
+  rest: 'отдыхает',
 };
 
 const dietIcon = (d: number) => (d < 0.3 ? '🌿' : d < 0.65 ? '🍽' : '🍖');
@@ -482,9 +483,11 @@ export class SurfaceView {
       if (e.kind === 'species') this.queueFact('species');
       else if (e.kind === 'migration' && e.text.startsWith('🧭')) this.queueFact('migration');
       else if (e.kind === 'extinct') this.queueFact('extinct');
+      else if (e.kind === 'disaster' && e.text.includes('расплодились')) this.queueFact('disease');
     }
     this.lastEventTick = this.world.tick;
-    if (this.world.tick > 6000) this.queueFact('cycle');
+    if (this.world.tick > 3000) this.queueFact('niche');
+    if (this.world.tick > 9000) this.queueFact('cycle');
   }
 
   // ---------------- игрок ----------------
@@ -564,11 +567,12 @@ export class SurfaceView {
         <div>
           <div class="spname" data-a="species" style="color:${spColor(sp)}">${sp.name}</div>
           <div class="latin">${sp.latin}</div>
-          <div class="muted small">#${c.id} · поколение ${c.generation} · ${Math.floor(c.age / DAY)} дн. · ${c.alive ? STATE_NAMES[c.state] : '✝ ' + (c.cause ?? '')}</div>
+          <div class="muted small">#${c.id} · поколение ${c.generation} · ${Math.floor(c.age / DAY)} дн. · ${c.alive ? STATE_NAMES[c.state] + (c.state === 'rest' ? ' <a data-fact="rest">?</a>' : '') : '✝ ' + (c.cause ?? '')}</div>
           <div class="bar"><div style="width:${e * 100}%"></div></div>
         </div>
         <button data-a="close" class="x">✕</button>
       </div>
+      <div class="muted small">Ест: ${this.dietText(c)}</div>
       <div class="genes">${genes}</div>
       <div class="muted small">Детей: ${c.children} · живых потомков: <b class="gold">${this.family.size}</b> · добыча: ${c.kills}${c.father === null && c.mother !== null ? ' · рождён без отца <a data-fact="parthenogenesis">?</a>' : ''}</div>
       <div class="btns">
@@ -576,6 +580,20 @@ export class SurfaceView {
         <button data-a="follow" class="${this.follow ? 'active' : ''}">🎯 Следить</button>
       </div>`;
     this.renderer.portrait($(el, '.portrait'), c);
+  }
+
+  /** Чем питается существо — по его генам и нишам. */
+  private dietText(c: Creature): string {
+    const w = this.world;
+    const parts: string[] = [];
+    const pv = w.plantValue(c);
+    if (c.g.swim > 0.5 && pv > 0.2) parts.push('водоросли');
+    if (pv > 0.2 && w.grassAccess(c, w.terrain.index(c.x, c.y)) > 0.2 && c.g.swim < 0.7) parts.push('траву');
+    if (w.reach(c) * pv > 0.15) parts.push('<a data-fact="browse">листву</a>');
+    if (w.forageEff(c) > 0.2) parts.push('<a data-fact="niche">ягоды и насекомых</a>');
+    if (c.g.diet > 0.35) parts.push(`добычу до размера ${w.preyLimit(c).toFixed(1)}`);
+    if (c.g.diet > 0.3) parts.push('падаль');
+    return parts.join(', ') || '—';
   }
 
   // ---------------- панель ----------------
@@ -724,8 +742,10 @@ export class SurfaceView {
     const [ctx, w, h] = this.canvasCtx($(this.root, '.s-web'), 420);
     type Node = { id: number; x: number; y: number; r: number; label: string; color: string };
     const nodes = new Map<number, Node>();
-    nodes.set(0, { id: 0, x: w * 0.35, y: h - 24, r: 14, label: '🌿 Растения', color: '#4fae5b' });
-    nodes.set(-1, { id: -1, x: w * 0.8, y: h - 24, r: 10, label: '🦴 Падаль', color: '#bfb59a' });
+    nodes.set(0, { id: 0, x: w * 0.35, y: h - 24, r: 14, label: '🌿 Трава, водоросли', color: '#4fae5b' });
+    nodes.set(-1, { id: -1, x: w * 0.9, y: h - 24, r: 10, label: '🦴 Падаль', color: '#bfb59a' });
+    nodes.set(-2, { id: -2, x: w * 0.6, y: h - 24, r: 11, label: '🍓 Ягоды, насекомые', color: '#d85a7f' });
+    nodes.set(-3, { id: -3, x: w * 0.12, y: h - 24, r: 12, label: '🌳 Листва', color: '#2f7d3a' });
     const sorted = [...living].sort((a, b) => a.mean.diet - b.mean.diet);
     sorted.forEach((s, i) => {
       const y = h - 70 - s.mean.diet * (h - 120);

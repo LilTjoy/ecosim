@@ -4,7 +4,7 @@ import { clamp } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
 import { B, BIOMES, Terrain } from './terrain';
 
-export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim';
+export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest';
 
 export interface Creature {
   id: number;
@@ -25,6 +25,16 @@ export interface Creature {
   alive: boolean;
   state: State;
   cooldown: number;
+  /** Пауза после неудачной атаки. */
+  cooldownHunt: number;
+  /** Кэш признаков, зависящих только от генов. */
+  pv: number;
+  reachK: number;
+  fe: number;
+  /** Запомненное место с кормом и до какого такта мы туда идём. */
+  gx: number;
+  gy: number;
+  gt: number;
   lonely: number;
   /** Сколько сородичей рядом (для охоты стаей). */
   pack: number;
@@ -114,15 +124,28 @@ const FOUNDERS: { n: number; g: Partial<Genome> }[] = [
   { n: 140, g: { size: 3.5, speed: 1.3, sense: 50, diet: 0.05, tempPref: 0.5, social: 0.6, hue: 110 } },
   { n: 50, g: { size: 4.5, speed: 1.1, sense: 60, diet: 0.05, tempPref: 0.2, social: 0.8, hue: 30 } },
   { n: 50, g: { size: 2.5, speed: 1.6, sense: 70, diet: 0.08, tempPref: 0.8, social: 0.2, hue: 50 } },
-  { n: 30, g: { size: 4.5, speed: 1.2, sense: 55, diet: 0.15, tempPref: 0.55, swim: 0.8, social: 0.5, hue: 190 } },
+  { n: 30, g: { size: 4.5, speed: 1.2, sense: 90, diet: 0.15, tempPref: 0.55, swim: 0.8, social: 0.25, hue: 190 } },
   { n: 40, g: { size: 6.5, speed: 1.3, sense: 60, diet: 0.45, tempPref: 0.5, social: 0.5, hue: 280 } },
-  { n: 16, g: { size: 6, speed: 2.2, sense: 85, diet: 0.9, tempPref: 0.5, social: 0.6, hue: 5 } },
+  { n: 16, g: { size: 6, speed: 2, sense: 85, diet: 0.9, tempPref: 0.5, social: 0.6, hue: 5 } },
   { n: 10, g: { size: 6.5, speed: 2, sense: 90, diet: 0.9, tempPref: 0.2, social: 0.2, hue: 220 } },
+  // крупные пастбищные гиганты — им не страшны мелкие хищники
+  { n: 30, g: { size: 9, speed: 1.1, sense: 60, diet: 0.03, tempPref: 0.45, social: 0.85, hue: 25, pattern: 0.1 } },
+  // мелкий хищник — ловит грызунов, а не конкурирует с крупными
+  { n: 14, g: { size: 3, speed: 2.4, sense: 75, diet: 0.85, tempPref: 0.55, social: 0.1, hue: 35, pattern: 0.9 } },
+  // падальщики-стервятники: зоркие, стайные, едят останки
+  { n: 16, g: { size: 5, speed: 1.6, sense: 130, diet: 0.6, tempPref: 0.6, social: 0.75, hue: 320 } },
 ];
 
 export class World {
   terrain!: Terrain;
   grass!: Float32Array;
+  /** Листва — корм крупных. */
+  browse!: Float32Array;
+  /** Ягоды и насекомые — корм всеядных. */
+  forage!: Float32Array;
+  /** Кто самый крупный пасся на клетке (для конкуренции). */
+  private claim!: Float32Array;
+  private claimTick!: Int32Array;
   creatures: Creature[] = [];
   corpses: Corpse[] = [];
   species = new SpeciesRegistry();
@@ -144,7 +167,15 @@ export class World {
   playerStats = { generation: 0, possessed: 0, deaths: 0 };
 
   private nextId = 1;
-  private hash = new Map<number, Creature[]>();
+  /** Пространственная сетка: массив корзин вместо Map — заметно быстрее. */
+  private grid: Creature[][] = [];
+  private corpseGrid: Corpse[][] = [];
+  private gw = 0;
+  private gh = 0;
+  /** Сдвиг температуры текущего сезона (кэш на такт). */
+  private shiftNow = 0;
+  /** Риск болезни для видов (обновляется раз в 20 тактов). */
+  private crowdRisk = new Map<number, number>();
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -162,7 +193,16 @@ export class World {
     this.env = env;
     this.terrain = new Terrain(this.width, this.height, this.cell, seed, env.sea, env.tempOffset);
     this.grass = new Float32Array(this.terrain.cols * this.terrain.rows);
-    for (let i = 0; i < this.grass.length; i++) this.grass[i] = this.maxGrass(i) * Math.random();
+    this.claim = new Float32Array(this.grass.length);
+    this.claimTick = new Int32Array(this.grass.length).fill(-10);
+    this.browse = new Float32Array(this.grass.length);
+    this.forage = new Float32Array(this.grass.length);
+    for (let i = 0; i < this.grass.length; i++) {
+      const b = BIOMES[this.terrain.biome[i]];
+      this.grass[i] = b.fert * Math.random();
+      this.browse[i] = b.browse * (0.5 + Math.random() * 0.5);
+      this.forage[i] = b.forage * Math.random();
+    }
     this.creatures = [];
     this.corpses = [];
     this.species.clear();
@@ -267,7 +307,7 @@ export class World {
   }
 
   temp(idx: number): number {
-    return this.terrain.baseTemp[idx] + this.season.shift;
+    return this.terrain.baseTemp[idx] + this.shiftNow;
   }
 
   maxGrass(idx: number): number {
@@ -302,6 +342,13 @@ export class World {
       alive: true,
       state: 'wander',
       cooldown: 0,
+      cooldownHunt: 0,
+      gx: 0,
+      gy: 0,
+      gt: 0,
+      pv: Math.pow(1 - g.diet, 1.1),
+      reachK: clamp((g.size - 4.5) / 3.5, 0, 1),
+      fe: clamp(1 - Math.abs(g.diet - 0.45) * 2.6, 0, 1),
       lonely: 0,
       pack: 0,
       alarm: 0,
@@ -317,6 +364,15 @@ export class World {
   /** Предельный размер тела: кислород позволяет вырасти, гравитация — мешает. */
   get maxSize(): number {
     return clamp(14 * Math.sqrt(this.env.o2 / 0.21) / Math.sqrt(this.env.gravity), 2.5, 18);
+  }
+
+  /**
+   * Болезни и паразиты: чем теснее живёт вид, тем быстрее они распространяются.
+   * Это естественный тормоз для «взрыва» численности одного вида.
+   */
+  crowding(sp: number): number {
+    const n = this.species.all.get(sp)?.count ?? 0;
+    return n > 400 ? 0.0005 * (n / 400 - 1) : 0;
   }
 
   maxEnergy(g: Genome): number {
@@ -338,8 +394,22 @@ export class World {
   /** Может ли `a` съесть `b`. Стая позволяет брать добычу крупнее. */
   canEat(a: Creature, b: Creature): boolean {
     if (a.g.diet < 0.35 || a.sp === b.sp) return false;
+    return b.g.size < this.preyLimit(a);
+  }
+
+  /** Самая крупная добыча, которую хищник может одолеть. Стая позволяет брать крупнее. */
+  preyLimit(a: Creature): number {
     const pack = 1 + Math.min(0.8, a.pack * 0.25 * a.g.social);
-    return b.g.size < a.g.size * (0.45 + a.g.diet * 0.75) * pack;
+    return a.g.size * (0.45 + a.g.diet * 0.75) * pack;
+  }
+
+  /**
+   * Шанс одолеть добычу при контакте: мелкую — почти наверняка, крупную (у предела) — редко.
+   * Так у травоядных появляется смысл расти: размер — это защита.
+   */
+  captureChance(a: Creature, b: Creature): number {
+    const r = b.g.size / this.preyLimit(a);
+    return clamp(1.25 - r * 1.15, 0.04, 1);
   }
 
   ready(c: Creature): boolean {
@@ -360,7 +430,7 @@ export class World {
     // мало кислорода — обмен веществ менее выгоден; гравитация утяжеляет движение
     const air = Math.pow(0.21 / Math.max(0.02, this.env.o2), 0.3);
     const base = 0.05 * m * air;
-    const muscles = 0.01 * m * speed * speed;
+    const muscles = 0.006 * m * speed * speed;
     const move = 0.008 * m * v * v * this.env.gravity;
     const eyes = 0.0008 * sense;
     const gills = 0.012 * swim * m;
@@ -375,32 +445,64 @@ export class World {
   // ---------------- пространственный хеш ----------------
 
   private buildHash(): void {
-    this.hash.clear();
-    for (const c of this.creatures) {
-      const k = Math.floor(c.x / HASH) * 4096 + Math.floor(c.y / HASH);
-      let bucket = this.hash.get(k);
-      if (!bucket) this.hash.set(k, (bucket = []));
-      bucket.push(c);
+    this.gw = Math.ceil(this.width / HASH) + 1;
+    this.gh = Math.ceil(this.height / HASH) + 1;
+    const n = this.gw * this.gh;
+    if (this.grid.length !== n) {
+      this.grid = Array.from({ length: n }, () => []);
+      this.corpseGrid = Array.from({ length: n }, () => []);
     }
+    for (const b of this.grid) b.length = 0;
+    for (const b of this.corpseGrid) b.length = 0;
+    for (const c of this.creatures) this.grid[this.cellOf(c.x, c.y)].push(c);
+    for (const k of this.corpses) this.corpseGrid[this.cellOf(k.x, k.y)].push(k);
+  }
+
+  private cellOf(x: number, y: number): number {
+    const gx = clamp(Math.floor(x / HASH), 0, this.gw - 1);
+    const gy = clamp(Math.floor(y / HASH), 0, this.gh - 1);
+    return gy * this.gw + gx;
   }
 
   forNear(x: number, y: number, r: number, fn: (o: Creature, d2: number) => void): void {
     const r2 = r * r;
-    const x0 = Math.floor((x - r) / HASH);
-    const x1 = Math.floor((x + r) / HASH);
-    const y0 = Math.floor((y - r) / HASH);
-    const y1 = Math.floor((y + r) / HASH);
-    for (let hx = x0; hx <= x1; hx++) {
-      for (let hy = y0; hy <= y1; hy++) {
-        const bucket = this.hash.get(hx * 4096 + hy);
-        if (!bucket) continue;
-        for (const o of bucket) {
-          const d2 = (o.x - x) ** 2 + (o.y - y) ** 2;
+    const x0 = Math.max(0, Math.floor((x - r) / HASH));
+    const x1 = Math.min(this.gw - 1, Math.floor((x + r) / HASH));
+    const y0 = Math.max(0, Math.floor((y - r) / HASH));
+    const y1 = Math.min(this.gh - 1, Math.floor((y + r) / HASH));
+    for (let hy = y0; hy <= y1; hy++) {
+      const row = hy * this.gw;
+      for (let hx = x0; hx <= x1; hx++) {
+        const bucket = this.grid[row + hx];
+        for (let k = 0; k < bucket.length; k++) {
+          const o = bucket[k];
+          const dx = o.x - x;
+          const dy = o.y - y;
+          const d2 = dx * dx + dy * dy;
           if (d2 < r2) fn(o, d2);
         }
       }
     }
   }
+
+  /** Туши поблизости (через ту же сетку). */
+  private forCorpses(x: number, y: number, r: number, fn: (k: Corpse, d2: number) => void): void {
+    const r2 = r * r;
+    const x0 = Math.max(0, Math.floor((x - r) / HASH));
+    const x1 = Math.min(this.gw - 1, Math.floor((x + r) / HASH));
+    const y0 = Math.max(0, Math.floor((y - r) / HASH));
+    const y1 = Math.min(this.gh - 1, Math.floor((y + r) / HASH));
+    for (let hy = y0; hy <= y1; hy++) {
+      for (let hx = x0; hx <= x1; hx++) {
+        for (const k of this.corpseGrid[hy * this.gw + hx]) {
+          if (k.energy <= 0) continue;
+          const d2 = (k.x - x) ** 2 + (k.y - y) ** 2;
+          if (d2 < r2) fn(k, d2);
+        }
+      }
+    }
+  }
+
 
   creatureAt(x: number, y: number, slack = 8): Creature | null {
     let best = null as Creature | null;
@@ -449,16 +551,22 @@ export class World {
         }
         return;
       }
-      if (d2 < threatD && this.canEat(o, c)) {
+      // от хищника, который нас почти не может одолеть, не бегаем (слон не боится льва)
+      if (d2 < threatD && this.canEat(o, c) && this.captureChance(o, c) > 0.15) {
         threatD = d2;
         threat = o;
-      } else if (hungry && d2 < preyD && this.canEat(c, o)) {
+      } else if (hungry && this.canEat(c, o)) {
         // не гонимся за теми, кто заметно быстрее, если они не совсем рядом
         // всеядные охотятся только на лёгкую добычу — медленную или совсем рядом
         const reach = c.g.diet > 0.65 ? 1.1 : 0.85;
         if (o.g.speed < c.g.speed * reach || d2 < (c.g.size * 5) ** 2) {
-          preyD = d2;
-          prey = o;
+          // выбираем не просто ближайшую, а ту, которую реально одолеть
+          const ch = this.captureChance(c, o);
+          const eff = d2 / (ch * ch);
+          if (eff < preyD) {
+            preyD = eff;
+            prey = o;
+          }
         }
       }
     });
@@ -475,6 +583,7 @@ export class World {
 
   step(): void {
     this.tick++;
+    this.shiftNow = this.season.shift;
     if (this.drought > 0 && --this.drought === 0) this.log('🌧 Засуха закончилась.', 'info');
     this.growGrass();
     this.buildHash();
@@ -496,6 +605,7 @@ export class World {
       c.energy -= this.cost(c, v, idx2);
       c.age++;
       if (c.cooldown > 0) c.cooldown--;
+      if (c.cooldownHunt > 0) c.cooldownHunt--;
       this.feed(c, idx2, p.prey);
 
       // спаривание при касании
@@ -511,7 +621,9 @@ export class World {
 
       const max = this.maxEnergy(c.g);
       if (c.energy > max) c.energy = max;
+      const risk = this.crowdRisk.get(c.sp) ?? 0;
       if (c.energy <= 0) this.die(c, 'голод');
+      else if (risk && Math.random() < risk) this.die(c, 'болезнь');
       else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
       else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5) this.die(c, 'утонул');
     }
@@ -549,8 +661,10 @@ export class World {
 
   private growGrass(): void {
     const t = this.terrain;
-    const rate = 0.0016 * this.settings.grassGrowth * (this.drought > 0 ? 0.1 : 1);
-    const shift = this.season.shift;
+    const rate = 0.0024 * this.settings.grassGrowth * (this.drought > 0 ? 0.1 : 1);
+    const br = this.browse;
+    const fo = this.forage;
+    const shift = this.shiftNow;
     const g = this.grass;
     // трава обновляется частями: каждый тик — каждая 4-я клетка (×4 рост), так в 4 раза дешевле
     const phase = this.tick & 3;
@@ -563,52 +677,98 @@ export class World {
       }
       const warm = clamp((temp - 0.03) * 4, 0, 1) * clamp((1.05 - temp) * 4, 0, 1);
       if (g[i] < max) g[i] = Math.min(max, g[i] + rate * 4 * max * warm);
+      const info = BIOMES[t.biome[i]];
+      // листва растёт медленно, но её много; ягоды и насекомые — только в тёплое время
+      if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
+      if (temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
     }
   }
 
   /** Лучшее направление: трава × съедобность − неуютная температура. */
+  /** Оценка клетки: еда − неуютный климат + «свой» тип среды. */
+  private cellScore(c: Creature, i: number): number {
+    if (!this.passable(c.g, i)) return -Infinity;
+    const d = Math.abs(this.temp(i) - c.g.tempPref);
+    const water = BIOMES[this.terrain.biome[i]].water ? 1 : 0;
+    const habitat = c.g.swim > 0.6 ? (water ? 0.3 : -0.3) : 0;
+    return this.foodValue(c, i) - Math.max(0, d - 0.08) * Math.max(0, d - 0.08) * 6 + habitat;
+  }
+
+  /**
+   * Куда идти за едой. Животное помнит хорошее место и идёт к нему, а не мечется;
+   * если вокруг пусто — ищет дальше (знает свою территорию).
+   */
   private scan(c: Creature, idx: number): { angle: number; score: number; dist: number; here: number } {
-    const plant = this.plantValue(c);
-    const scoreAt = (i: number) => {
-      if (!this.passable(c.g, i)) return -Infinity;
-      const d = Math.abs(this.temp(i) - c.g.tempPref);
-      const water = BIOMES[this.terrain.biome[i]].water ? 1 : 0;
-      // пловцы тянутся к воде, сухопутные — к суше
-      const habitat = c.g.swim > 0.6 ? (water ? 0.15 : -0.1) : 0;
-      return this.grass[i] * plant - d * d * 3 + habitat;
-    };
-    const here = scoreAt(idx);
+    const here = this.cellScore(c, idx);
+    if (c.gt > this.tick) {
+      const dist = Math.hypot(c.gx - c.x, c.gy - c.y);
+      const gs = this.cellScore(c, this.terrain.index(c.gx, c.gy));
+      if (dist > 6 && gs > here + 0.04) return { angle: Math.atan2(c.gy - c.y, c.gx - c.x), score: gs, dist, here };
+      c.gt = 0;
+    }
     let best = { angle: c.heading, score: here, dist: 0, here };
-    const r = c.g.sense;
-    for (let i = 0; i < 6; i++) {
-      const a = c.heading + (Math.random() - 0.5) * Math.PI * 1.8;
-      const d = r * (0.3 + Math.random() * 0.9);
+    const far = here < 0.12 ? 3.5 : 1.2;
+    const r = c.g.sense * far;
+    for (let k = 0; k < 8; k++) {
+      const a = Math.random() * Math.PI * 2;
+      const d = r * (0.2 + Math.random() * 0.8);
       const x = c.x + Math.cos(a) * d;
       const y = c.y + Math.sin(a) * d;
       if (x < 0 || y < 0 || x >= this.width || y >= this.height) continue;
-      const s = scoreAt(this.terrain.index(x, y));
-      if (s > best.score + 0.02) best = { angle: a, score: s, dist: d, here };
+      // чем дальше, тем дороже дорога
+      const sc = this.cellScore(c, this.terrain.index(x, y)) - d * 0.0006;
+      if (sc > best.score + 0.05) best = { angle: a, score: sc, dist: d, here };
+    }
+    if (best.dist > 0) {
+      c.gx = c.x + Math.cos(best.angle) * best.dist;
+      c.gy = c.y + Math.sin(best.angle) * best.dist;
+      c.gt = this.tick + 40 + Math.round(best.dist);
     }
     return best;
   }
 
+
+  /** Сколько травы может съесть существо на этой клетке (пловцы — водоросли, сухопутные — траву). */
+  grassAccess(c: Creature, i: number): number {
+    const water = BIOMES[this.terrain.biome[i]].water;
+    if (water) return c.g.swim > 0.5 ? 1 : 0;
+    return clamp(1 - 1.2 * Math.max(0, c.g.swim - 0.3), 0, 1);
+  }
+
+  /** Доступ к листве: чем крупнее, тем выше достаёт (жираф, слон). */
+  reach(c: Creature): number {
+    return c.reachK;
+  }
+
+  /** Ягоды и насекомые лучше всего переваривают всеядные. */
+  forageEff(c: Creature): number {
+    return c.fe;
+  }
+
+  /** Насколько «вкусна» клетка для этого существа (для выбора, куда идти). */
+  foodValue(c: Creature, i: number): number {
+    const plant = this.plantValue(c);
+    return this.grass[i] * plant * this.grassAccess(c, i) + this.browse[i] * this.reach(c) * plant * 0.45 + this.forage[i] * this.forageEff(c) * 1.3;
+  }
+
   plantValue(c: Creature): number {
-    return Math.pow(1 - c.g.diet, 1.1);
+    // всеядные — универсалы: теряют в эффективности меньше, чем могли бы
+    return c.pv;
   }
 
   private nearestCorpse(c: Creature, r: number): Corpse | null {
     if (c.g.diet < 0.3) return null;
     let best = null as Corpse | null;
-    let bestD = r * r;
-    for (const k of this.corpses) {
-      const d = (k.x - c.x) ** 2 + (k.y - c.y) ** 2;
-      if (d < bestD) {
-        bestD = d;
+    let bestD = Infinity;
+    this.forCorpses(c.x, c.y, r, (k, d2) => {
+      if (d2 < bestD) {
+        bestD = d2;
         best = k;
       }
-    }
+    });
     return best;
   }
+
 
   private thinkRules(c: Creature, p: ReturnType<World['perceive']>, idx: number): number {
     const steer = (a: number, w = 1) => {
@@ -642,6 +802,11 @@ export class World {
       c.state = 'hunt';
       return 1;
     }
+    // сытый хищник отдыхает — как львы, которые спят до 20 часов в сутки
+    if (c.g.diet > 0.65 && c.energy > max * 0.65) {
+      c.state = 'rest';
+      return 0.04;
+    }
     // 4. падаль
     if (c.energy < max * 0.8) {
       const k = this.nearestCorpse(c, c.g.sense);
@@ -659,7 +824,7 @@ export class World {
       steer(s.angle, 0.8);
       c.state = tempBad ? 'migrate' : 'graze';
       throttle = tempBad ? 0.9 : 0.7;
-    } else if (this.grass[idx] * this.plantValue(c) > 0.2) {
+    } else if (this.foodValue(c, idx) > 0.2) {
       c.state = 'graze';
       throttle = 0.12;
     } else {
@@ -696,7 +861,7 @@ export class World {
     }
     if (p.threat) rel(p.threat.x, p.threat.y, 3);
     if (p.mate) rel(p.mate.x, p.mate.y, 6);
-    inp[9] = this.grass[idx] * this.plantValue(c);
+    inp[9] = this.foodValue(c, idx);
     inp[10] = c.energy / this.maxEnergy(c.g);
     inp[11] = clamp((this.temp(idx) - c.g.tempPref) * 3, -1, 1);
     inp[12] = 1;
@@ -722,6 +887,8 @@ export class World {
     const b = this.terrain.biome[idx];
     let mul = BIOMES[b].move;
     if (BIOMES[b].water) mul = 0.25 + 0.75 * c.g.swim;
+    // плавники на суше мешают
+    else mul *= 1 - 0.55 * Math.max(0, c.g.swim - 0.3);
     const v = c.g.speed * throttle * mul;
     c.v = v;
     if (v === 0) return 0;
@@ -739,24 +906,57 @@ export class World {
   }
 
   private feed(c: Creature, idx: number, prey: Creature | null): void {
-    // трава
-    const plant = this.plantValue(c);
+    // трава (или водоросли — для пловцов)
+    const plant = this.plantValue(c) * this.grassAccess(c, idx);
     if (plant > 0.02) {
       // крупные едят эффективнее: укус растёт быстрее, чем обмен веществ
-      const bite = Math.min(this.grass[idx], 0.008 * Math.pow(c.g.size, 1.85));
+      let bite = Math.min(this.grass[idx], 0.008 * Math.pow(c.g.size, 1.85));
+      // конкуренция: если на этой клетке пасётся кто-то гораздо крупнее — мелкого оттесняют
+      const rival = this.claim[idx];
+      if (rival > c.g.size * 1.4 && this.claimTick[idx] >= this.tick - 1) bite *= 0.35;
+      if (c.g.size > rival || this.claimTick[idx] < this.tick - 1) {
+        this.claim[idx] = c.g.size;
+        this.claimTick[idx] = this.tick;
+      }
       if (bite > 0) {
         this.grass[idx] -= bite;
-        c.energy += bite * 42 * plant;
+        // правило Джармана — Белла: крупные лучше переваривают грубую пищу
+        const digest = 42 * Math.pow(c.g.size / 4, 0.3);
+        c.energy += bite * digest * plant;
         this.bump(c.sp, 0, bite * 0.2);
       }
     }
+    // листва: грубая пища, но её много — ниша гигантов
+    const reach = this.reach(c) * this.plantValue(c);
+    if (reach > 0.02 && this.browse[idx] > 0) {
+      const bite = Math.min(this.browse[idx], 0.01 * Math.pow(c.g.size, 1.85) * reach);
+      this.browse[idx] -= bite;
+      c.energy += bite * 26 * Math.pow(c.g.size / 4, 0.3);
+      this.bump(c.sp, -3, bite * 0.2);
+    }
+    // ягоды и насекомые: ценная пища для всеядных
+    const fe = this.forageEff(c);
+    if (fe > 0.02 && this.forage[idx] > 0) {
+      const bite = Math.min(this.forage[idx], 0.006 * Math.pow(c.g.size, 1.5));
+      this.forage[idx] -= bite;
+      c.energy += bite * 28 * fe;
+      this.bump(c.sp, -2, bite * 0.2);
+    }
     if (c.g.diet < 0.3) return;
-    const meat = Math.pow(c.g.diet, 0.4);
+    // цена универсальности: всеядный переваривает мясо хуже настоящего хищника
+    const meat = Math.pow(c.g.diet, 0.8);
     // охота: касание = поймал
     const target = prey && prey.alive ? prey : null;
     if (target) {
       const r = c.g.size + target.g.size + 2;
-      if ((target.x - c.x) ** 2 + (target.y - c.y) ** 2 < r * r && this.canEat(c, target)) {
+      if ((target.x - c.x) ** 2 + (target.y - c.y) ** 2 < r * r && this.canEat(c, target) && c.cooldownHunt <= 0) {
+        if (Math.random() > this.captureChance(c, target)) {
+          // добыча отбилась: хищник тратит силы, а крупная жертва может ранить
+          c.cooldownHunt = 40;
+          c.energy -= this.maxEnergy(c.g) * (target.g.size > c.g.size * 0.8 ? 0.08 : 0.02);
+          target.alarm = 30;
+          return;
+        }
         this.die(target, `съеден (${this.species.all.get(c.sp)?.name ?? 'хищник'})`, false);
         c.energy += (target.energy + this.maxEnergy(target.g) * 0.5) * meat;
         c.kills++;
@@ -765,16 +965,12 @@ export class World {
       }
     }
     // падаль
-    for (const k of this.corpses) {
-      if (k.energy <= 0) continue;
-      const r = c.g.size + k.size + 2;
-      if ((k.x - c.x) ** 2 + (k.y - c.y) ** 2 < r * r) {
-        const bite = Math.min(k.energy, 2 + c.g.size * 1.5);
-        k.energy -= bite;
-        c.energy += bite * meat * 0.8;
-        this.bump(c.sp, -1, bite * 0.01);
-        break;
-      }
+    const k = this.nearestCorpse(c, c.g.size + 16);
+    if (k && (k.x - c.x) ** 2 + (k.y - c.y) ** 2 < (c.g.size + k.size + 2) ** 2) {
+      const bite = Math.min(k.energy, 2 + c.g.size * 1.5);
+      k.energy -= bite;
+      c.energy += bite * meat * 0.8;
+      this.bump(c.sp, -1, bite * 0.01);
     }
   }
 
@@ -827,13 +1023,20 @@ export class World {
   private migrantsFromAfar(): void {
     let plants = 0;
     let meat = 0;
-    for (const c of this.creatures) c.g.diet < 0.5 ? plants++ : meat++;
+    for (const c of this.creatures) {
+      if (c.g.diet < 0.5) plants++;
+      else if (c.g.diet > 0.65) meat++;
+    }
     const arrive = (base: Partial<Genome>, n: number, what: string) => {
       const sp = this.colonize(base, n);
       this.log(`⛵ С большой земли приплыли ${what}: «${sp.name}» (${n})`, 'migration');
     };
-    if (plants < 40) arrive(FOUNDERS[Math.floor(Math.random() * 4)].g, 40, 'травоядные');
-    if (meat < 4 && plants > 150) arrive(FOUNDERS[5 + Math.floor(Math.random() * 2)].g, 8, 'хищники');
+    const pickF = (f: (g: Partial<Genome>) => boolean) => {
+      const list = FOUNDERS.filter((x) => f(x.g));
+      return list[Math.floor(Math.random() * list.length)].g;
+    };
+    if (plants < 40) arrive(pickF((g) => (g.diet ?? 0) < 0.3), 40, 'травоядные');
+    if (meat < 4 && plants > 150) arrive(pickF((g) => (g.diet ?? 0) > 0.65), 8, 'хищники');
   }
 
   // ---------------- инструменты и катастрофы ----------------
@@ -989,6 +1192,13 @@ export class World {
       const n = counts.get(sp.id) ?? 0;
       sp.count = n;
       sp.peak = Math.max(sp.peak, n);
+      const risk = this.crowding(sp.id);
+      if (risk > 0) this.crowdRisk.set(sp.id, risk);
+      else this.crowdRisk.delete(sp.id);
+      if (n > 600 && !sp.crowded) {
+        sp.crowded = true;
+        this.log(`🦠 «${sp.name}» слишком расплодились — среди них гуляют болезни`, 'disaster');
+      } else if (n < 300) sp.crowded = false;
       if (!sp.announced && n >= 8) {
         sp.announced = true;
         if (this.tick > 100) {
