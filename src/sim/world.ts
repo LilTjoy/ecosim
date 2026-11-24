@@ -4,6 +4,26 @@ import { clamp } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
 import { B, BIOMES, Terrain } from './terrain';
 
+/**
+ * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
+ * 1.0 при T = 0.5 (≈15 °C), потолок 3 (≈31 °C, оптимум ферментов). Мороз 0.05..0.25 — плавный разгон.
+ */
+const Q10T = new Float32Array(128);
+for (let k = 0; k < 128; k++) {
+  const T = k / 127;
+  Q10T[k] = T < 0.05 ? 0 : Math.min(3, Math.pow(2, (T - 0.5) / 0.125)) * Math.min(1, (T - 0.05) * 5);
+}
+/**
+ * Почва: разложение, выветривание, вымывание, усвоение, отмирание травы, туши → опад, навоз, потолки;
+ * TAU — время сглаживания нормировки плодородия (тактов).
+ * UN = 0.15 (а не 0.25): иначе под стадами луга истощаются так, что четверть суши упирается в границы множителя.
+ * SG = 0: опад от старения — это отмирающие корни (питание из почвы), надземный корм не убывает;
+ * со SG = 1 стада гигантов заметно уступали мелким травоядным (стенд, 32 прогона).
+ */
+export const SOIL = { KD: 4.6e-4, KR: 1 / 6000, KL: 2e-5, UN: 0.15, KS: 2e-4, CN: 9e-4, DUNG: 0.8, SMAX: 2.5, LMAX: 6, TAU: 3000, SG: 0 };
+/** Границы множителя роста от плодородия (суша, вода; суженные — запасная ручка №1) и множителя скорости разложения туш. */
+export const NUT_CLAMP: { land: [number, number]; water: [number, number]; corpse: [number, number] } = { land: [0.75, 1.2], water: [0.7, 1.25], corpse: [0.5, 1.8] };
+
 export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest';
 
 export interface Creature {
@@ -43,6 +63,8 @@ export interface Creature {
   activations: Float32Array | null;
   player: boolean;
   cause: string | null;
+  /** Навоз в кишечнике — выпадает раз в 32 такта. */
+  dung: number;
 }
 
 export interface Corpse {
@@ -52,6 +74,11 @@ export interface Corpse {
   size: number;
   hue: number;
   age: number;
+  /** Клетка, начальная энергия (для стадий разложения), вид, был ли болен. */
+  idx: number;
+  e0: number;
+  sp: number;
+  sick: boolean;
 }
 
 export interface Ancestor {
@@ -67,7 +94,7 @@ export interface Ancestor {
 export interface WorldEvent {
   tick: number;
   text: string;
-  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player';
+  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player' | 'micro';
   x?: number;
   y?: number;
 }
@@ -85,6 +112,13 @@ export interface Sample {
   counts: Map<number, number>;
   means: Map<number, Record<GeneKey, number>>;
   grass: number;
+  /** Почва (суша): плодородие (1 = норма), опад, редуценты, азотфиксаторы; микориза (лес/болото); планктон (вода). */
+  soil: number;
+  litter: number;
+  mic: number;
+  fix: number;
+  myc: number;
+  plankton: number;
 }
 
 export type BrainMode = 'rules' | 'neural';
@@ -117,6 +151,8 @@ export interface Settings {
   mutationRate: number;
   grassGrowth: number;
   seasons: boolean;
+  /** Почва и микробы: круговорот питательных веществ. */
+  soil: boolean;
 }
 
 export const DAY = 150;
@@ -160,7 +196,7 @@ export class World {
   history: Sample[] = [];
   events: WorldEvent[] = [];
   fx: Fx[] = [];
-  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true };
+  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true, soil: true };
   brainMode: BrainMode = 'rules';
   env: SurfaceEnv = EARTH_ENV;
   drought = 0;
@@ -180,6 +216,34 @@ export class World {
   private shiftNow = 0;
   /** Риск болезни для видов (обновляется раз в 20 тактов). */
   private crowdRisk = new Map<number, number>();
+  // ---- почва и микробы (по клеткам) ----
+  soil!: Float32Array;
+  litter!: Float32Array;
+  mic!: Float32Array;
+  fix!: Float32Array;
+  myc!: Float32Array;
+  /** Кэш: активность микробов и множитель роста травы. */
+  act!: Float32Array;
+  nut!: Float32Array;
+  private microBase!: Float32Array;
+  private leachK!: Float32Array;
+  private s0!: Float32Array;
+  /** 0 — суша, 1 — вода, 2 — суша с микоризой (лес, болото). */
+  private isWater!: Uint8Array;
+  /** Взвешенное по росту среднее «сырого» плодородия — нормировка, чтобы общая продуктивность не дрейфовала. */
+  nutRef = { land: 1, water: 1 };
+  private nutAcc = { wl: 0, fl: 0, ww: 0, fw: 0, nl: 0, nw: 0 };
+  /** Средний множитель роста там, где трава растёт (за последние 20 тактов) — диагностика. */
+  nutGrow = { land: 1, water: 1 };
+  private corpseRef = 1;
+  /** Эффект Бёрча: всплеск дыхания почвы после засухи. */
+  private birch = 0;
+  /** Потоки за окно в 20 тактов и их сглаженные значения (для схемы круговорота). */
+  flux = { decomp: 0, gpp: 0, uptake: 0, litterIn: 0, dungIn: 0, carrionIn: 0, runoff: 0, corpseDecay: 0, resp: 0 };
+  fluxEma = { decomp: 0, gpp: 0, uptake: 0, litterIn: 0, dungIn: 0, carrionIn: 0, runoff: 0, corpseDecay: 0, resp: 0 };
+  micro = { corpsesRecycled: 0, lastGiantLog: -1e9, lastMeteor: null as null | { x: number; y: number; tick: number } };
+  /** Кости на месте разложившихся туш (только для вида, не более 400). */
+  boneMarks: { x: number; y: number; size: number; t: number }[] = [];
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -207,6 +271,7 @@ export class World {
       this.browse[i] = b.browse * (0.5 + Math.random() * 0.5);
       this.forage[i] = b.forage * Math.random();
     }
+    this.initSoil();
     this.creatures = [];
     this.corpses = [];
     this.species.clear();
@@ -229,6 +294,145 @@ export class World {
       mode === 'neural' ? 'Мир создан. Мозги случайные — посмотрим, кто научится выживать.' : 'Мир создан. Жизнь начинается.',
       'info',
     );
+  }
+
+  /** Почва без случайностей: тёплый старт около равновесия (поток случайных чисел основателей не меняется). */
+  private initSoil(): void {
+    const t = this.terrain;
+    const N = this.grass.length;
+    const land = this.env.landLife;
+    this.soil = new Float32Array(N);
+    this.litter = new Float32Array(N);
+    this.mic = new Float32Array(N);
+    this.fix = new Float32Array(N).fill(0.25);
+    this.myc = new Float32Array(N);
+    this.act = new Float32Array(N);
+    this.nut = new Float32Array(N).fill(1);
+    this.microBase = new Float32Array(N);
+    this.leachK = new Float32Array(N);
+    this.s0 = new Float32Array(N);
+    this.isWater = new Uint8Array(N);
+    const o2k = Math.min(1, Math.max(0.3, this.env.o2 / 0.1));
+    for (let i = 0; i < N; i++) {
+      const b = t.biome[i];
+      const info = BIOMES[b];
+      const w = info.water;
+      const mycCap = b === B.Forest || b === B.Swamp;
+      this.isWater[i] = w ? 1 : mycCap ? 2 : 0;
+      this.microBase[i] = w ? 1 : Math.min(1.2, Math.max(0.15, t.moist[i] * 2)) * (b === B.Swamp ? 0.35 : 1);
+      this.leachK[i] = w ? 0 : SOIL.KL * 16 * t.moist[i] * (t.river[i] >= 1 ? 3 : 1);
+      this.s0[i] = b === B.Shallow ? 1.1 : b === B.Deep ? 0.9 : land ? 1 : 0.4;
+      this.soil[i] = b === B.Shallow ? 1.1 : b === B.Deep ? 0.9 : land ? 1 : 0.3;
+      const T = t.baseTemp[i];
+      const a0 = Q10T[T <= 0 ? 0 : T >= 1 ? 127 : (T * 127) | 0] * this.microBase[i] * o2k;
+      const L = w ? 0.05 : Math.min(4, (0.065 * info.fert) / Math.max(0.03, a0));
+      this.litter[i] = L;
+      this.mic[i] = Math.max(0.03, Math.min(1, a0 / 1.5) * (L / (L + 0.3)));
+      this.myc[i] = mycCap ? 1 : 0;
+      this.act[i] = a0;
+    }
+    this.nutRef = { land: 1, water: 1 };
+    this.nutAcc = { wl: 0, fl: 0, ww: 0, fw: 0, nl: 0, nw: 0 };
+    this.nutGrow = { land: 1, water: 1 };
+    this.corpseRef = 1;
+    this.birch = 0;
+    for (const k in this.flux) {
+      this.flux[k as keyof World['flux']] = 0;
+      this.fluxEma[k as keyof World['flux']] = 0;
+    }
+    this.micro = { corpsesRecycled: 0, lastGiantLog: -1e9, lastMeteor: null };
+    this.boneMarks = [];
+  }
+
+  /**
+   * Почва и микробы: каждый такт — 1/16 клеток (dt = 16).
+   * Опад → (редуценты, Q10) → минеральное плодородие → трава; азотфиксаторы растут только там, где голодно;
+   * с суши вещества вымываются вниз по стоку — к устьям рек; в море зимой перемешивание поднимает их к поверхности.
+   */
+  private soilPass(): void {
+    const t = this.terrain;
+    const N = this.grass.length;
+    const cols = t.cols;
+    const A = this.act, S = this.soil, Lt = this.litter, M = this.mic, F = this.fix, MY = this.myc, NU = this.nut;
+    const MB = this.microBase, LK = this.leachK, S0 = this.s0, W = this.isWater, D = t.drain, bt = t.baseTemp, G = this.grass;
+    const fl = this.flux;
+    const shift = this.shiftNow;
+    const o2k = Math.min(1, Math.max(0.3, this.env.o2 / 0.1));
+    const dryF = this.drought > 0 ? 0.3 : 1 + (0.5 * this.birch) / 1500;
+    const wint = Math.max(0, -shift / Math.max(0.01, this.env.seasonAmp));
+    const refL = this.nutRef.land, refW = this.nutRef.water;
+    const [lo, hi] = NUT_CLAMP.land, [wlo, whi] = NUT_CLAMP.water;
+    const KD = SOIL.KD * 16, KR = SOIL.KR * 16, KS = SOIL.KS * 16, UN = SOIL.UN, SG = SOIL.SG, SMAX = SOIL.SMAX, LMAX = SOIL.LMAX;
+    let decS = 0, runS = 0, senS = 0;
+    // непрерывный кусок из N/16 клеток (а не каждая 16-я): так массивы читаются целыми строками кэша
+    const blk = Math.ceil(N / 16);
+    const i0 = (this.tick & 15) * blk, i1 = Math.min(N, i0 + blk);
+    for (let i = i0; i < i1; i++) {
+      const w = W[i] === 1;
+      const T = bt[i] + shift;
+      const a = Q10T[T <= 0 ? 0 : T >= 1 ? 127 : (T * 127) | 0] * MB[i] * o2k * (w ? 1 : dryF);
+      A[i] = a;
+      let l = Lt[i], s = S[i], m = M[i], f = F[i];
+      // старение: часть травы (там, где не мороз) отмирает и становится опадом;
+      // доля SG — из надземной травы, остальное — отмирающие корни (питание берётся из почвы, корм не трогаем)
+      if (T >= 0.03) {
+        const sen = KS * G[i];
+        G[i] -= sen * SG;
+        const u = UN * sen;
+        l += u;
+        s -= u * (1 - SG);
+        senS += u;
+      }
+      // редуценты следуют за едой и теплом (отклик ≈ 2 дня)
+      const mt = (a > 1.5 ? 1 : a / 1.5) * (l / (l + 0.3));
+      m += 0.06 * (mt - m);
+      if (m < 0.03) m = 0.03;
+      // разложение: полураспад опада ≈ четверть года при a = 1, m = 0.5
+      let dec = KD * a * l * (0.5 + m);
+      if (dec > l) dec = l;
+      l -= dec;
+      s += 0.85 * dec; // 15% уходит в воздух как CO₂
+      decS += dec;
+      // азотфиксаторы: процветают только там, где не хватает питания (гомеостат)
+      let ft = 1.25 - s;
+      ft = ft < 0.03 ? 0.03 : ft > 1 ? 1 : ft;
+      f += 0.02 * (ft - f);
+      if (w) {
+        // вода: сезонное перемешивание (зимой питательные вещества поднимаются) и диффузия между соседями
+        s += 2 * KR * (S0[i] * (1 + 0.35 * wint) - s);
+        const x = i % cols;
+        let sum = 0, k = 0;
+        if (x > 0 && W[i - 1] === 1) { sum += S[i - 1]; k++; }
+        if (x < cols - 1 && W[i + 1] === 1) { sum += S[i + 1]; k++; }
+        if (i >= cols && W[i - cols] === 1) { sum += S[i - cols]; k++; }
+        if (i + cols < N && W[i + cols] === 1) { sum += S[i + cols]; k++; }
+        if (k) s += 0.1 * (sum / k - s);
+      } else {
+        // выветривание + фиксация азота (если бедно) / денитрификация (если богато)
+        s += KR * (S0[i] - s) * (s < S0[i] ? 0.6 + 1.6 * f : 1);
+        const lch = LK[i] * s;
+        s -= lch;
+        const d = D[i];
+        if (d >= 0) {
+          const v = S[d] + lch;
+          S[d] = v > SMAX ? SMAX : v;
+          if (W[d] === 1) runS += lch;
+        }
+        if (W[i] === 2 && MY[i] < 1) MY[i] += 16 * 0.0003 * (1 - MY[i]);
+      }
+      s = s < 0 ? 0 : s > SMAX ? SMAX : s;
+      Lt[i] = l > LMAX ? LMAX : l;
+      S[i] = s;
+      M[i] = m;
+      F[i] = f;
+      // закон Моно, нормированный так, что f(1) = 1, затем — на взвешенное среднее
+      const nu = (1.5 * s) / (s + 0.5) / (w ? refW : refL);
+      NU[i] = w ? (nu < wlo ? wlo : nu > whi ? whi : nu) : nu < lo ? lo : nu > hi ? hi : nu;
+    }
+    fl.litterIn += senS;
+    fl.decomp += decS;
+    fl.resp += decS;
+    fl.runoff += runS;
   }
 
   /** Поселить группу одинаковых особей туда, где им комфортно. */
@@ -359,6 +563,7 @@ export class World {
       activations: g.brain ? new Float32Array(IN + HID + OUT) : null,
       player: false,
       cause: null,
+      dung: 0,
     };
     this.creatures.push(c);
     this.ancestors.set(c.id, { id: c.id, mother: null, sp, g, generation: 0, born: this.tick, died: null });
@@ -588,12 +793,16 @@ export class World {
   step(): void {
     this.tick++;
     this.shiftNow = this.season.shift;
-    if (this.drought > 0 && --this.drought === 0) this.log('🌧 Засуха закончилась.', 'info');
+    if (this.drought > 0 && --this.drought === 0) {
+      this.log('🌧 Засуха закончилась.', 'info');
+      this.birch = 1500; // эффект Бёрча: после дождя почва «вздыхает»
+    } else if (this.birch > 0) this.birch--;
     this.growGrass();
     this.buildHash();
     this.updateCorpses();
 
     const born: Creature[] = [];
+    const soilOn = this.settings.soil;
     for (const c of this.creatures) {
       if (!c.alive) continue;
       const idx = this.terrain.index(c.x, c.y);
@@ -611,6 +820,12 @@ export class World {
       if (c.cooldown > 0) c.cooldown--;
       if (c.cooldownHunt > 0) c.cooldownHunt--;
       this.feed(c, idx2, p.prey);
+      // навоз выпадает порциями: в воде — сразу в «почву», на суше — в опад
+      if (soilOn && ((c.id + this.tick) & 31) === 0 && c.dung > 0) {
+        if (this.isWater[idx2] === 1) this.soil[idx2] = Math.min(SOIL.SMAX, this.soil[idx2] + c.dung);
+        else this.litter[idx2] = Math.min(SOIL.LMAX, this.litter[idx2] + c.dung);
+        c.dung = 0;
+      }
 
       // спаривание при касании
       if (p.mate && p.mate.alive && this.ready(c) && this.ready(p.mate)) {
@@ -635,7 +850,10 @@ export class World {
     this.creatures = this.creatures.filter((c) => c.alive);
     this.creatures.push(...born);
 
-    if (this.tick % 20 === 0) this.record();
+    if (this.tick % 20 === 0) {
+      this.updateNutRef();
+      this.record();
+    }
     if (this.tick % 500 === 0) this.migrantsFromAfar();
     if (this.tick % 1000 === 0) this.pruneAncestors();
   }
@@ -648,19 +866,90 @@ export class World {
     c.cause = cause;
     const a = this.ancestors.get(c.id);
     if (a) a.died = this.tick;
-    if (corpse) this.corpses.push({ x: c.x, y: c.y, energy: this.maxEnergy(c.g) * 0.35 + Math.max(0, c.energy), size: c.g.size, hue: c.g.hue, age: 0 });
+    const idx = this.terrain.index(c.x, c.y);
+    if (corpse) {
+      const e = this.maxEnergy(c.g) * 0.35 + Math.max(0, c.energy);
+      this.corpses.push({ x: c.x, y: c.y, energy: e, size: c.g.size, hue: c.g.hue, age: 0, idx, e0: e, sp: c.sp, sick: false });
+    }
+    if (c.dung > 0 && this.settings.soil) {
+      if (this.isWater[idx] === 1) this.soil[idx] = Math.min(SOIL.SMAX, this.soil[idx] + c.dung);
+      else this.litter[idx] = Math.min(SOIL.LMAX, this.litter[idx] + c.dung);
+      c.dung = 0;
+    }
     if (c.player) {
       this.playerStats.deaths++;
       this.log(`👑 Ваше существо погибло (${cause}). Выберите потомка, чтобы продолжить династию.`, 'player', c.x, c.y);
     }
   }
 
+  /**
+   * Туши разлагаются быстрее в тепле и там, где много микробов (нормировано на среднее, чтобы падальщикам
+   * доставалось столько же); съеденное и сгнившее мясо возвращается в почву.
+   */
   private updateCorpses(): void {
+    const soilOn = this.settings.soil;
+    const A = this.act, Lt = this.litter;
+    let ms = 0, mn = 0;
+    const [clo, chi] = NUT_CLAMP.corpse;
     for (const k of this.corpses) {
       k.age++;
-      k.energy -= 0.3 + k.energy * 0.001;
+      let m = 1;
+      if (soilOn) {
+        const a = A[k.idx];
+        const raw = 0.5 + 0.5 * (a < 2.6 ? a : 2.6);
+        ms += raw;
+        mn++;
+        m = raw / this.corpseRef;
+        m = m < clo ? clo : m > chi ? chi : m;
+      }
+      let d = (0.3 + 0.001 * k.energy) * m;
+      if (d > k.energy) d = k.energy;
+      k.energy -= d;
+      if (soilOn && d > 0) {
+        const v = Lt[k.idx] + SOIL.CN * d;
+        Lt[k.idx] = v > SOIL.LMAX ? SOIL.LMAX : v;
+        this.flux.carrionIn += SOIL.CN * d;
+        this.flux.corpseDecay += d;
+        this.flux.resp += d * 0.01;
+      }
     }
-    if (this.tick % 10 === 0) this.corpses = this.corpses.filter((k) => k.energy > 0 && k.age < 1500);
+    if (mn) this.corpseRef += (ms / mn - this.corpseRef) * 0.002;
+    if (this.tick % 10 === 0) {
+      const keep: Corpse[] = [];
+      for (const k of this.corpses) {
+        if (k.energy > 0 && k.age < 1500) {
+          keep.push(k);
+          continue;
+        }
+        if (!soilOn) continue;
+        if (k.energy > 0) Lt[k.idx] = Math.min(SOIL.LMAX, Lt[k.idx] + SOIL.CN * k.energy);
+        this.boneMarks.push({ x: k.x, y: k.y, size: k.size, t: this.tick });
+        if (this.boneMarks.length > 400) this.boneMarks.shift();
+        this.micro.corpsesRecycled++;
+        if (k.size >= 8 && this.tick - this.micro.lastGiantLog > 2000) {
+          this.micro.lastGiantLog = this.tick;
+          const r = this.terrain.regionAt(k.x, k.y)?.name ?? 'неизвестные земли';
+          this.log(`🍄 Останки гиганта в «${r}» разложились — скоро здесь вырастет самая густая трава`, 'micro', k.x, k.y);
+        }
+      }
+      this.corpses = keep;
+    }
+  }
+
+  /** Раз в 20 тактов: обновляем нормировку плодородия (τ = 3000 тактов) по взвешенному росту. */
+  private updateNutRef(): void {
+    const acc = this.nutAcc;
+    // в начале τ короче (как у среднего с поправкой на старт): нормировка сразу догоняет оседающую почву
+    const k = 20 / Math.min(SOIL.TAU, Math.max(200, this.tick / 2));
+    if (acc.wl > 0) {
+      this.nutRef.land += (acc.fl / acc.wl - this.nutRef.land) * k;
+      this.nutGrow.land = acc.nl / acc.wl;
+    }
+    if (acc.ww > 0) {
+      this.nutRef.water += (acc.fw / acc.ww - this.nutRef.water) * k;
+      this.nutGrow.water = acc.nw / acc.ww;
+    }
+    acc.wl = acc.fl = acc.ww = acc.fw = acc.nl = acc.nw = 0;
   }
 
   private growGrass(): void {
@@ -670,22 +959,90 @@ export class World {
     const fo = this.forage;
     const shift = this.shiftNow;
     const g = this.grass;
+    const soilOn = this.settings.soil;
+    if (soilOn) this.soilPass();
     // трава обновляется частями: каждый тик — каждая 4-я клетка (×4 рост), так в 4 раза дешевле
     const phase = this.tick & 3;
+    if (!soilOn) {
+      for (let i = phase; i < g.length; i += 4) {
+        const temp = t.baseTemp[i] + shift;
+        const max = BIOMES[t.biome[i]].fert;
+        if (temp < 0.03) {
+          g[i] *= 0.997; // сильный мороз — трава вянет
+          continue;
+        }
+        const warm = clamp((temp - 0.03) * 4, 0, 1) * clamp((1.05 - temp) * 4, 0, 1);
+        if (g[i] < max) g[i] = Math.min(max, g[i] + rate * 4 * max * warm);
+        const info = BIOMES[t.biome[i]];
+        // листва растёт медленно, но её много; ягоды и насекомые — только в тёплое время
+        if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
+        if (temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
+      }
+      return;
+    }
+    // с почвой: рост × плодородие, усвоение, старение травы → опад (суммы — в локальных переменных)
+    const S = this.soil, Lt = this.litter, NU = this.nut, W = this.isWater, MY = this.myc, bt = t.baseTemp, bi = t.biome;
+    const UN = SOIL.UN;
+    let wl = 0, flS = 0, nl = 0, ww = 0, fw = 0, nw = 0, lit = 0, gpp = 0, upt = 0;
     for (let i = phase; i < g.length; i += 4) {
-      const temp = t.baseTemp[i] + shift;
-      const max = BIOMES[t.biome[i]].fert;
+      const temp = bt[i] + shift;
+      const info = BIOMES[bi[i]];
+      const max = info.fert;
+      let gi = g[i];
+      // (старение травы → опад — в soilPass)
       if (temp < 0.03) {
-        g[i] *= 0.997; // сильный мороз — трава вянет
+        // сильный мороз — трава вянет и уходит в опад
+        const w0 = 0.003 * gi;
+        g[i] = gi - w0;
+        Lt[i] += UN * w0;
+        lit += UN * w0;
         continue;
       }
-      const warm = clamp((temp - 0.03) * 4, 0, 1) * clamp((1.05 - temp) * 4, 0, 1);
-      if (g[i] < max) g[i] = Math.min(max, g[i] + rate * 4 * max * warm);
-      const info = BIOMES[t.biome[i]];
-      // листва растёт медленно, но её много; ягоды и насекомые — только в тёплое время
-      if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
-      if (temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
+      const w1 = (temp - 0.03) * 4, w2 = (1.05 - temp) * 4;
+      const warm = (w1 > 1 ? 1 : w1) * (w2 > 1 ? 1 : w2 < 0 ? 0 : w2);
+      const nu = NU[i];
+      if (gi < max) {
+        const pot = rate * 4 * max * warm;
+        let s = S[i];
+        const fr = (1.5 * s) / (s + 0.5);
+        if (W[i] === 1) {
+          ww += pot;
+          fw += pot * fr;
+          nw += pot * nu;
+        } else {
+          wl += pot;
+          flS += pot * fr;
+          nl += pot * nu;
+        }
+        let add = pot * nu;
+        if (add > max - gi) add = max - gi;
+        gi += add;
+        const u = UN * add;
+        S[i] = s > u ? s - u : 0;
+        g[i] = gi;
+        gpp += add;
+        upt += u;
+      }
+      // листва (микориза помогает деревьям: после метеорита лес восстанавливается медленнее)
+      if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm * (W[i] === 2 ? 0.6 + 0.4 * MY[i] : 1));
+      if (temp > 0.25 && fo[i] < info.forage) {
+        const addF = Math.min(info.forage - fo[i], rate * 3 * info.forage * warm * (0.5 + 0.5 * nu));
+        fo[i] += addF;
+        const u = 0.5 * UN * addF;
+        S[i] = S[i] > u ? S[i] - u : 0;
+        upt += u;
+      }
     }
+    const acc = this.nutAcc, fl = this.flux;
+    acc.wl += wl;
+    acc.fl += flS;
+    acc.nl += nl;
+    acc.ww += ww;
+    acc.fw += fw;
+    acc.nw += nw;
+    fl.litterIn += lit;
+    fl.gpp += gpp;
+    fl.uptake += upt;
   }
 
   /** Лучшее направление: трава × съедобность − неуютная температура. */
@@ -928,6 +1285,7 @@ export class World {
         const digest = 42 * Math.pow(c.g.size / 4, 0.3);
         c.energy += bite * digest * plant;
         this.bump(c.sp, 0, bite * 0.2);
+        if (this.settings.soil) this.eatDung(c, bite);
       }
     }
     // листва: грубая пища, но её много — ниша гигантов
@@ -937,6 +1295,7 @@ export class World {
       this.browse[idx] -= bite;
       c.energy += bite * 26 * Math.pow(c.g.size / 4, 0.3);
       this.bump(c.sp, -3, bite * 0.2);
+      if (this.settings.soil) this.eatDung(c, bite * 0.5);
     }
     // ягоды и насекомые: ценная пища для всеядных
     const fe = this.forageEff(c);
@@ -945,6 +1304,7 @@ export class World {
       this.forage[idx] -= bite;
       c.energy += bite * 28 * fe;
       this.bump(c.sp, -2, bite * 0.2);
+      if (this.settings.soil) this.eatDung(c, bite);
     }
     if (c.g.diet < 0.3) return;
     // цена универсальности: всеядный переваривает мясо хуже настоящего хищника
@@ -976,6 +1336,13 @@ export class World {
       c.energy += bite * meat * 0.8;
       this.bump(c.sp, -1, bite * 0.01);
     }
+  }
+
+  /** Съеденное растение → будущий навоз (большая часть питательных веществ возвращается). */
+  private eatDung(c: Creature, bite: number): void {
+    const d = bite * SOIL.UN * SOIL.DUNG;
+    c.dung += d;
+    this.flux.dungIn += d;
   }
 
   private bump(pred: number, prey: number, v: number): void {
@@ -1067,9 +1434,19 @@ export class World {
     const t = this.terrain;
     for (let cy = Math.max(0, Math.floor((y - R * 1.3) / this.cell)); cy <= Math.min(t.rows - 1, (y + R * 1.3) / this.cell); cy++) {
       for (let cx = Math.max(0, Math.floor((x - R * 1.3) / this.cell)); cx <= Math.min(t.cols - 1, (x + R * 1.3) / this.cell); cx++) {
-        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < R * 1.3) this.grass[cy * t.cols + cx] = 0;
+        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < R * 1.3) {
+          const i = cy * t.cols + cx;
+          this.grass[i] = 0;
+          // пепел и сгоревшая биомасса; микробы и микориза погибли — первыми вернутся азотфиксаторы
+          this.soil[i] *= 0.5;
+          this.litter[i] = Math.min(SOIL.LMAX, this.litter[i] + 0.4);
+          this.mic[i] = 0.03;
+          this.fix[i] = 0.03;
+          this.myc[i] = 0;
+        }
       }
     }
+    this.micro.lastMeteor = { x, y, tick: this.tick };
     this.fx.push({ kind: 'meteor', x, y, hue: 30 });
     this.log(`☄️ Метеорит упал на «${t.regionAt(x, y)?.name ?? 'море'}». Погибло: ${killed}`, 'disaster', x, y);
   }
@@ -1098,7 +1475,10 @@ export class World {
     for (let cy = Math.max(0, Math.floor((y - r) / this.cell)); cy <= Math.min(t.rows - 1, (y + r) / this.cell); cy++) {
       for (let cx = Math.max(0, Math.floor((x - r) / this.cell)); cx <= Math.min(t.cols - 1, (x + r) / this.cell); cx++) {
         const i = cy * t.cols + cx;
-        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < r) this.grass[i] = Math.min(1, this.grass[i] + 0.3);
+        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < r) {
+          this.grass[i] = Math.min(1, this.grass[i] + 0.3);
+          this.soil[i] = Math.min(SOIL.SMAX, this.soil[i] + 0.15); // сажаем с удобрением
+        }
       }
     }
   }
@@ -1237,7 +1617,46 @@ export class World {
     for (const id of sums.keys()) means.set(id, { ...this.species.all.get(id)!.mean });
     let grass = 0;
     for (let i = 0; i < this.grass.length; i++) grass += this.grass[i];
-    this.history.push({ tick: this.tick, counts, means, grass: grass / this.grass.length });
+    // почва — по каждой 4-й клетке
+    const S = this.soil, W = this.isWater, t = this.terrain;
+    let sl = 0, ll = 0, ml = 0, fl = 0, nl = 0, my = 0, nm = 0, pl = 0, nw = 0;
+    for (let i = this.tick & 3; i < S.length; i += 4) {
+      if (W[i] === 1) {
+        pl += (this.grass[i] / BIOMES[t.biome[i]].fert) * this.nut[i];
+        nw++;
+        continue;
+      }
+      const s = S[i];
+      sl += (1.5 * s) / (s + 0.5);
+      ll += this.litter[i];
+      ml += this.mic[i];
+      fl += this.fix[i];
+      nl++;
+      if (W[i] === 2) {
+        my += this.myc[i];
+        nm++;
+      }
+    }
+    const nl1 = Math.max(1, nl);
+    // потоки круговорота: сглаживаем окно в 20 тактов
+    const fe = this.fluxEma;
+    for (const k in this.flux) {
+      const key = k as keyof World['flux'];
+      fe[key] += (this.flux[key] - fe[key]) * 0.05;
+      this.flux[key] = 0;
+    }
+    this.history.push({
+      tick: this.tick,
+      counts,
+      means,
+      grass: grass / this.grass.length,
+      soil: sl / nl1 / this.nutRef.land,
+      litter: ll / nl1,
+      mic: ml / nl1,
+      fix: fl / nl1,
+      myc: nm ? my / nm : 0,
+      plankton: nw ? pl / nw : 0,
+    });
     if (this.history.length > 900) this.history.shift();
   }
 }
