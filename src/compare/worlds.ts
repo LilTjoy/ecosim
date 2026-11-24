@@ -42,7 +42,7 @@ export interface CompareWorld {
  * азота 1 бар (даёт ~0,4 бар в начале), динамо по намагниченной коре угасло ~4,1 млрд лет назад.
  */
 export const MARS: PlanetParams = { ...EARTH, seed: 1976, orbit: 1.524, ecc: 0.093, mass: 0.107, water: 0.1, moon: 0, giant: true, nitrogen: 1, tectonics: false, rotation: 1.03, dynamoGyr: 0.45 };
-/** Венера: столько же воды, сколько у Земли; азота 4,5 бар (сегодня ~3 бар N₂); сутки 243 земных. */
+/** Венера: столько же воды, сколько у Земли; азота 4,5 бар (сегодня ~3 бар N₂); оборот вокруг оси 243 земных дня. */
 export const VENUS: PlanetParams = { ...EARTH, seed: 1970, orbit: 0.723, ecc: 0.007, mass: 0.815, water: 1, moon: 0, giant: true, nitrogen: 4.5, tectonics: false, rotation: 243 };
 
 export const SOLAR: CompareWorld[] = [
@@ -69,7 +69,7 @@ export const SOLAR: CompareWorld[] = [
     icon: '🟡',
     color: '#ffd54f',
     params: VENUS,
-    real: { T: 464, P: 92, o2: 0, water: 'почти нет (следы пара)', flux: 1.91, g: 0.9, day: '243 сут, обратное', vesc: 10.4 },
+    real: { T: 464, P: 92, o2: 0, water: 'почти нет (следы пара)', flux: 1.91, g: 0.9, day: 'оборот 243 дня, обратный; солнечные сутки 117 дней', vesc: 10.4 },
   },
 ];
 

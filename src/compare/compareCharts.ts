@@ -82,7 +82,7 @@ function cursor(ctx: CanvasRenderingContext2D, x: number, h: number): void {
   ctx.fillRect(Math.round(x) - 0.5, 0, 1.5, h);
 }
 
-/** Одна величина для всех миров. Вода: пунктир — лёд, точки — пар. */
+/** Одна величина для всех миров. Вода: пунктир — лёд, точки — пар, бледная — воды нет. */
 export function drawCompareMetric(canvas: HTMLCanvasElement, rows: Row[], now: number, end: number, m: Metric): void {
   const [ctx, w, h] = prep(canvas);
   if (!w || !h) return;
@@ -110,7 +110,9 @@ export function drawCompareMetric(canvas: HTMLCanvasElement, rows: Row[], now: n
 
   for (const row of rows) {
     const r = row.res;
-    const style = (s: Sample) => (m.key !== 'water' ? 0 : s.T > 373 ? 2 : s.ice > 0.5 || s.T < 273 ? 1 : 0);
+    // 0 — сплошная, 1 — лёд (штрих), 2 — пар (точки), 3 — воды нет (бледная сплошная по «полу»)
+    const style = (s: Sample) =>
+      m.key !== 'water' ? 0 : m.get(s, r) <= 0.001 ? 3 : s.T > 373 ? 2 : s.ice > 0.5 || s.T < 273 ? 1 : 0;
     ctx.strokeStyle = row.color;
     ctx.lineWidth = 2;
     ctx.lineJoin = 'round';
@@ -119,6 +121,7 @@ export function drawCompareMetric(canvas: HTMLCanvasElement, rows: Row[], now: n
     while (i < n - 1) {
       const st = style(r.samples[i]);
       ctx.setLineDash(st === 1 ? [5, 3] : st === 2 ? [1.5, 3] : []);
+      ctx.globalAlpha = st === 3 ? 0.3 : 1;
       ctx.beginPath();
       ctx.moveTo(timeToX(r.samples[i].t, end, w), Y(m.get(r.samples[i], r)));
       let j = i + 1;
@@ -131,6 +134,7 @@ export function drawCompareMetric(canvas: HTMLCanvasElement, rows: Row[], now: n
       i = j;
     }
     ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
     // точка «сейчас»
     if (now <= r.end) {
       const s = sampleAt(r, now);

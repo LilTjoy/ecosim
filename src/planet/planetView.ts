@@ -238,8 +238,12 @@ export class PlanetView {
     // массу меняем, только если двигали её ползунок (у Марса 0,107 — точнее шага ползунка);
     // реальная длительность динамо (Марс) не годится для планеты другой массы
     if (v('mass').value !== this.massSynced) {
-      delete p.dynamoGyr;
-      p.mass = Number(v('mass').value);
+      const m = Number(v('mass').value);
+      if (p.mass !== m) delete p.dynamoGyr;
+      p.mass = m;
+      // запоминаем сразу: иначе в одном непрерывном перетаскивании возврат к исходному
+      // значению совпадёт со старым massSynced и масса застрянет на промежуточной
+      this.massSynced = v('mass').value;
     }
     p.water = Math.pow(10, Number(v('water').value));
     p.moon = Number(v('moon').value);

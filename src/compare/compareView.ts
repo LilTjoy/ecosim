@@ -80,7 +80,7 @@ const TEMPLATE = /* html */ `
   <div class="cmp-cols"></div>
   <div class="cmp-tablewrap"><table class="cmp-table"></table></div>
   <section class="cmp-charts">
-    ${METRICS.map((m) => `<figure><figcaption>${m.label}${m.key === 'water' ? ' <small>— сплошная: жидкая, штрихи: лёд, точки: пар</small>' : m.key === 'T' ? ' <small>— зелёная полоса: 0…+50 °C</small>' : m.key === 'P' ? ' <small>— Земля сегодня: 1 бар</small>' : ''}</figcaption><canvas class="cmp-chart" data-m="${m.key}" title="Перетащите, чтобы перемотать историю"></canvas></figure>`).join('')}
+    ${METRICS.map((m) => `<figure><figcaption>${m.label}${m.key === 'water' ? ' <small>— сплошная: жидкая, штрихи: лёд, точки: пар, бледная по низу: воды нет</small>' : m.key === 'T' ? ' <small>— зелёная полоса: 0…+50 °C</small>' : m.key === 'P' ? ' <small>— Земля сегодня: 1 бар</small>' : ''}</figcaption><canvas class="cmp-chart" data-m="${m.key}" title="Перетащите, чтобы перемотать историю"></canvas></figure>`).join('')}
   </section>
   <section class="cmp-whatif">
     <h3>🧪 Что если…</h3>
@@ -317,6 +317,9 @@ export class CompareView {
     const r = this.root;
     const play = $<HTMLButtonElement>(r, '.cmp-play');
     play.onclick = () => {
+      // наступившие, но ещё не показанные карточки не теряем: ▶ / пробел листают их, как «Дальше»
+      const next = !$(r, '.cmp-fact').hidden && this.factQueue.shift();
+      if (next) return this.showFact(next);
       if (this.now >= this.end - 0.01) this.now = 0;
       this.playing = !this.playing;
       if (this.playing) this.hideFact(true);
@@ -339,7 +342,7 @@ export class CompareView {
     };
     $<HTMLInputElement>(r, '.cmp-explain input').onchange = (e) => {
       this.explain = (e.target as HTMLInputElement).checked;
-      if (!this.explain) this.factQueue = [];
+      if (!this.explain) this.dropQueue();
     };
 
     // перемотка по шкале и всем графикам
@@ -409,7 +412,6 @@ export class CompareView {
     $(r, '.cmp-why-grid').addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest('[data-fact]') as HTMLElement | null;
       if (b) {
-        this.factQueue = [];
         this.showFact(b.dataset.fact!);
       }
     });
@@ -424,7 +426,9 @@ export class CompareView {
         this.hideFact();
         if (this.now < this.end - 0.01) this.playing = true;
       } else {
-        this.factQueue = [];
+        // ✕ закрывает эту карточку, но не теряет уже наступившие события — покажем следующую из очереди
+        const next = this.factQueue.shift();
+        if (next) return this.showFact(next);
         this.hideFact();
       }
       this.renderDynamic(true);
@@ -454,7 +458,6 @@ export class CompareView {
       this.now = Number(li.dataset.t);
       this.playing = false;
       if (li.dataset.fact) {
-        this.factQueue = [];
         this.showFact(li.dataset.fact);
       }
       this.renderDynamic(true);
@@ -462,7 +465,6 @@ export class CompareView {
     }
     const f = t.closest('[data-fact]') as HTMLElement | null;
     if (f) {
-      this.factQueue = [];
       this.showFact(f.dataset.fact!);
     }
   }
@@ -618,7 +620,7 @@ export class CompareView {
       out.push(`<div class="cmp-wi-res" style="--wc:${w.color}">
         <div class="cmp-wi-q"><b>${wi.label}</b> — ${wi.question}</div>
         <div>Итог к сегодняшнему дню (${fmtGyr(TODAY)}): <b>${o.now}</b>${o.story ? `<br><span class="muted">${o.story}</span>` : ''}</div>
-        <div class="muted">Для сравнения, ${SOLAR[wi.base].name.toLowerCase() === 'земля' ? 'настоящая Земля' : `настоящ${SOLAR[wi.base].name === 'Марс' ? 'ий' : 'ая'} ${SOLAR[wi.base].name}`}: ${base.now}</div>
+        <div class="muted">Для сравнения, ${SOLAR[wi.base].name} без изменений, в той же модели: ${base.now}</div>
       </div>`);
     });
     $(r, '.cmp-wi-out').innerHTML = out.length
@@ -653,8 +655,10 @@ export class CompareView {
       this.playing = false;
       this.showFact(this.factQueue.shift()!);
     } else {
+      // карточка уже открыта (например, из «Почему») — новые ждут в очереди, показываем их число
       this.now = hits[0].t;
       this.playing = false;
+      this.setGoLabel();
     }
   }
 
@@ -685,6 +689,7 @@ export class CompareView {
   private showFact(id: string): void {
     const f: Fact | undefined = COMPARE_FACTS[id] ?? FACTS[id];
     if (!f) return;
+    this.factQueue = this.factQueue.filter((x) => x !== id);
     const cf = COMPARE_FACTS[id];
     const vals = cf?.vals
       ? `<div class="cmp-vals">${cf.valLabel ? `<span class="cmp-vl">${cf.valLabel}</span>` : ''}${cf.vals.map((v, k) => `<span style="--wc:${SOLAR[k].color}"><i></i>${SOLAR[k].name}: <b>${v}</b></span>`).join('')}</div>`
@@ -697,13 +702,28 @@ export class CompareView {
       ${vals}
       ${this.factExtra(id)}
       ${f.earth ? `<p class="earth">🌍 ${f.earth}</p>` : ''}
-      <div class="btns"><button data-go="1">${this.factQueue.length ? 'Дальше ▶ (ещё ' + this.factQueue.length + ')' : 'Дальше ▶'}</button><button aria-label="Закрыть">✕</button></div>`;
+      <div class="btns"><button data-go="1">${this.goLabel()}</button><button aria-label="Закрыть">✕</button></div>`;
     el.hidden = false;
     el.scrollTop = 0;
   }
 
+  /** Отбросить очередь автокарточек: непоказанные снова считаем непоказанными (появятся при повторном проигрыше). */
+  private dropQueue(): void {
+    for (const id of this.factQueue) this.shownFacts.delete(id);
+    this.factQueue = [];
+  }
+
+  private setGoLabel(): void {
+    const b = this.root.querySelector<HTMLButtonElement>('.cmp-fact [data-go]');
+    if (b) b.textContent = this.goLabel();
+  }
+
+  private goLabel(): string {
+    return this.factQueue.length ? `Дальше ▶ (ещё ${this.factQueue.length})` : 'Дальше ▶';
+  }
+
   private hideFact(clearQueue = false): void {
-    if (clearQueue) this.factQueue = [];
+    if (clearQueue) this.dropQueue();
     $(this.root, '.cmp-fact').hidden = true;
   }
 
