@@ -233,7 +233,12 @@ $('lineage').addEventListener('click', (e) => {
 const chart = $<HTMLCanvasElement>('chart');
 const geneChart = $<HTMLCanvasElement>('gene-chart');
 let frame = 0;
+const ecoView = document.getElementById('view-eco');
 function loop(): void {
+  if (ecoView?.hidden) {
+    requestAnimationFrame(loop);
+    return;
+  }
   if (!paused) for (let i = 0; i < speed; i++) world.step();
   if (selected && !selected.alive) family = new Set([...family].filter((c) => c.alive));
   renderer.draw(selected, family);

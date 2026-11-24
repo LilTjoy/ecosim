@@ -3,9 +3,21 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>EcoSim — эволюция в браузере</title>
+    <title>EcoSim — жизнь во Вселенной</title>
+    <meta name="description" content="Симуляция вероятности жизни и разума: звёзды, планеты, климат, эволюция и уравнение Дрейка." />
   </head>
   <body>
+    <nav class="tabs">
+      <div class="brand">EcoSim</div>
+      <button data-view="planet" class="active">🪐 Планета</button>
+      <button data-view="mc">🎲 10 000 миров</button>
+      <button data-view="drake">🌌 Уравнение Дрейка</button>
+      <button data-view="eco">🦊 Экосистема</button>
+    </nav>
+    <div id="view-planet" class="view"></div>
+    <div id="view-mc" class="view" hidden></div>
+    <div id="view-drake" class="view" hidden></div>
+    <div id="view-eco" class="view" hidden>
     <main>
       <section class="stage">
         <div class="hud">
@@ -79,6 +91,7 @@
         <ol id="events"></ol>
       </aside>
     </main>
-    <script type="module" src="/src/main.ts"></script>
+    </div>
+    <script type="module" src="/src/app.ts"></script>
   </body>
 </html>
