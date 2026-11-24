@@ -8,49 +8,75 @@
   <body>
     <main>
       <section class="stage">
+        <div class="hud">
+          <span id="season"></span>
+          <span id="tick"></span>
+          <span id="drought" hidden>🔥 Засуха</span>
+        </div>
         <canvas id="world"></canvas>
       </section>
+
       <aside>
         <header>
           <h1>EcoSim</h1>
-          <span id="tick" class="muted"></span>
+          <select id="mode" title="Как существа принимают решения (применяется к новому миру)">
+            <option value="rules">⚙️ Правила</option>
+            <option value="neural">🧠 Нейросети</option>
+          </select>
         </header>
 
         <div class="row">
           <button id="pause">⏸ Пауза</button>
-          <button id="reset">↻ Заново</button>
+          <button id="reset">↻ Новый мир</button>
         </div>
 
         <div class="tools">
           <button data-tool="inspect" class="active" title="Выбрать существо">🔍</button>
           <button data-tool="grass" title="Сажать траву">🌱</button>
           <button data-tool="herb" title="Добавить травоядное">🐇</button>
+          <button data-tool="omni" title="Добавить всеядное">🐗</button>
           <button data-tool="carn" title="Добавить хищника">🦊</button>
+          <button data-tool="meteor" title="Метеорит: кликните по карте">☄️</button>
+        </div>
+        <div class="row">
+          <button id="drought-btn" title="Полгода трава почти не растёт">🔥 Засуха</button>
+          <button id="epidemic-btn" title="Болезнь бьёт по самому многочисленному виду">🦠 Эпидемия</button>
         </div>
 
-        <label>Скорость <output id="speed-val"></output>
-          <input id="speed" type="range" min="1" max="20" value="1" />
-        </label>
-        <label>Мутации <output id="mutation-val"></output>
-          <input id="mutation" type="range" min="0" max="30" value="8" />
-        </label>
-        <label>Рост травы <output id="growth-val"></output>
-          <input id="growth" type="range" min="10" max="300" value="100" />
-        </label>
+        <details open>
+          <summary>Параметры</summary>
+          <label>Скорость <output id="speed-val"></output>
+            <input id="speed" type="range" min="1" max="20" value="1" />
+          </label>
+          <label>Мутации <output id="mutation-val"></output>
+            <input id="mutation" type="range" min="0" max="30" value="8" />
+          </label>
+          <label>Рост травы <output id="growth-val"></output>
+            <input id="growth" type="range" min="10" max="300" value="100" />
+          </label>
+          <label class="check"><input id="seasons" type="checkbox" checked /> Смена сезонов</label>
+        </details>
 
         <h2>Популяция</h2>
-        <canvas id="chart"></canvas>
-        <div class="legend">
-          <span class="herb">● травоядные</span>
-          <span class="carn">● хищники</span>
-          <span class="grass">■ трава</span>
-        </div>
+        <canvas id="chart" class="chart"></canvas>
+        <div class="legend" id="legend"></div>
+
+        <h2>
+          Эволюция гена
+          <select id="gene-select"></select>
+        </h2>
+        <canvas id="gene-chart" class="chart"></canvas>
 
         <h2>Средние гены</h2>
         <div id="stats"></div>
 
         <h2>Инспектор</h2>
         <div id="inspector"></div>
+        <canvas id="brain" hidden></canvas>
+        <div id="lineage"></div>
+
+        <h2>Летопись</h2>
+        <ol id="events"></ol>
       </aside>
     </main>
     <script type="module" src="/src/main.ts"></script>
