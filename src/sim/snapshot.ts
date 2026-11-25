@@ -67,7 +67,7 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); + 'climate' на этапе 7
+  'experiment', 'blocked', 'climate'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
 export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
@@ -125,6 +125,15 @@ function copyCells(src: Float32Array): Float32Array {
     }
   }
   return src.slice();
+}
+
+/** Буферы снимка — передать в postMessage без копирования (воркер → страница). */
+export function snapBuffers(s: WorldSnap): ArrayBuffer[] {
+  const out = new Set<ArrayBuffer>();
+  const add = (a: ArrayBufferView) => out.add(a.buffer as ArrayBuffer);
+  for (const k in s.cells) add(s.cells[k]);
+  for (const a of [s.claim.idx, s.claim.val, s.claim.t, s.cre.f64, s.cre.i32, s.gen.f64, s.gen.brain, s.gen.brains, s.anc, s.corpses]) add(a);
+  return [...out];
 }
 
 // ---------------- отпечаток ----------------

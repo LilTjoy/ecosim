@@ -305,6 +305,8 @@ export class World {
    * (потом крошатся в опад, который не гниёт; не больше 2500 туш); нормировки плодородия заморожены.
    */
   experiment = { noDecomposers: false };
+  /** ⏪ «Что если» климата: сдвиг температуры сверх сезона (идёт к target со скоростью rate за такт). */
+  climate = { shift: 0, target: 0, rate: 0 };
   /** Эффект Бёрча: всплеск дыхания почвы после засухи. */
   private birch = 0;
   /** Потоки за окно в 20 тактов и их сглаженные значения (для схемы круговорота). */
@@ -428,6 +430,7 @@ export class World {
     this.nutGrow = { land: 1, water: 1 };
     this.corpseRef = 1;
     this.experiment = { noDecomposers: false };
+    this.climate = { shift: 0, target: 0, rate: 0 };
     this.birch = 0;
     for (const k in this.flux) {
       this.flux[k as keyof World['flux']] = 0;
@@ -588,6 +591,11 @@ export class World {
   }
 
   // ---------------- климат ----------------
+
+  /** Сдвиг температуры сейчас: сезон плюс изменение климата (то, что читают трава, почва и звери). */
+  get tempShift(): number {
+    return this.shiftNow;
+  }
 
   get season(): { name: string; icon: string; shift: number; phase: number } {
     const phase = (this.tick % YEAR) / YEAR;
@@ -922,7 +930,9 @@ export class World {
 
   step(): void {
     this.tick++;
-    this.shiftNow = this.season.shift;
+    const cl = this.climate;
+    if (cl.shift !== cl.target) cl.shift += clamp(cl.target - cl.shift, -cl.rate, cl.rate);
+    this.shiftNow = cl.shift === 0 ? this.season.shift : this.season.shift + cl.shift;
     if (this.drought > 0 && --this.drought === 0) {
       this.log('🌧 Засуха закончилась.', 'info');
       this.birch = 1500; // эффект Бёрча: после дождя почва «вздыхает»
@@ -1851,6 +1861,14 @@ export class World {
       case 'restoreRes':
         this.restoreResource(a.kind);
         break;
+      case 'climate': {
+        const cl = this.climate;
+        cl.target = a.target;
+        cl.rate = Math.abs(a.target - cl.shift) / Math.max(1, a.ramp);
+        const dC = Math.round(a.target * 80);
+        this.log(dC === 0 ? '🌡 Климат возвращается к прежнему' : `🌡 Климат меняется: ${dC > 0 ? '+' : '−'}${Math.abs(dC)} °C за год (растительность пока прежняя)`, 'player');
+        break;
+      }
       case 'undo':
         break;
     }

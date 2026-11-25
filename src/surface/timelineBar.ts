@@ -19,6 +19,11 @@ export interface BarHost {
   rescue(name: string, tEnd: number): void;
   setOpen(on: boolean): void;
   toast(text: string): void;
+  /** 🎲 Плёнка жизни и 🦋 Эффект бабочки. */
+  openTape(): void;
+  openFly(): void;
+  /** Что считается в фоне (подпись в углу шкалы). */
+  bgText(): string;
 }
 
 /** Значок группы отметок — самого «важного» вида события. */
@@ -54,6 +59,8 @@ export class TimelineBar {
         <button data-tl="prev" title="Назад к прошлому снимку ( [ )">⏪</button>
         <button data-tl="next" class="tl-wide" title="Вперёд ( ] )">⏩</button>
         <button data-tl="menu" title="Что если… — вмешаться и пустить историю по новой ветке">🌿</button>
+        <button data-tl="tape" class="tl-wide" title="Плёнка жизни: перемотать и запустить снова">🎲</button>
+        <button data-tl="fly" class="tl-wide" title="Эффект бабочки">🦋</button>
         <button data-tl="range" class="tl-wide" title="Вся история / последние 2 года">↔</button>
         <button data-tl="more" class="tl-narrow" title="Ещё">⋯</button>
       </div>
@@ -62,6 +69,8 @@ export class TimelineBar {
       <div class="tl-tip" hidden></div>
       <div class="tl-more" hidden>
         <button data-tl="next">⏩ Вперёд</button>
+        <button data-tl="tape">🎲 Плёнка жизни</button>
+        <button data-tl="fly">🦋 Эффект бабочки</button>
         <button data-tl="range">↔ Вся история / 2 года</button>
         <button data-tl="hide">▾ Свернуть шкалу</button>
       </div>`;
@@ -80,6 +89,8 @@ export class TimelineBar {
       if (k === 'prev') this.host.stepSnap(-1);
       else if (k === 'next') this.host.stepSnap(1);
       else if (k === 'menu') this.host.openMenu();
+      else if (k === 'tape') this.host.openTape();
+      else if (k === 'fly') this.host.openFly();
       else if (k === 'range') {
         this.recent = !this.recent;
         this.draw();
@@ -275,6 +286,16 @@ export class TimelineBar {
     }
     ctx.textAlign = 'left';
     ctx.textBaseline = 'alphabetic';
+    // фоновая работа — в правом верхнем углу
+    const bg = this.host.bgText();
+    if (bg) {
+      ctx.font = '9px system-ui';
+      const tw = ctx.measureText(bg).width;
+      ctx.fillStyle = 'rgba(10,12,16,0.8)';
+      ctx.fillRect(W - tw - 8, 0, tw + 8, 12);
+      ctx.fillStyle = '#9ecbff';
+      ctx.fillText(bg, W - tw - 4, 9);
+    }
   }
 
   // ---------------- мышь и палец ----------------

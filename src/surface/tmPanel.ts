@@ -2,13 +2,23 @@
 import { DAY, type World } from '../sim/world';
 import { GUILD, type Branch, type SeriesRow, type Timeline } from '../sim/timeline';
 import { comparePair, commonPoint, rowAt } from '../sim/tmCompare';
+import type { TmRunner } from './tmRunner';
 
 export interface PanelHost {
   readonly tl: Timeline;
   readonly world: World;
+  readonly runner: TmRunner;
   switchTo(id: number): void;
   showFact(id: string): void;
   toast(text: string): void;
+  /** ⏩ Досчитать ветку в фоне (до дня day или до дня активной ветки). */
+  count(b: Branch, day?: number): void;
+  /** 🔁 Точно так же — пересчитать с развилки. */
+  verify(b: Branch): void;
+  /** Прервать фон ветки. */
+  stop(b: Branch): void;
+  /** Удалить ветку (фон — прервать). */
+  del(id: number): boolean;
 }
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
@@ -20,6 +30,8 @@ export class TmPanel {
   /** Ветка, для которой открыты действия под деревом. */
   private sel: number | null = null;
   private confirmDel = false;
+  /** День в поле «⏩ Досчитать до дня» (ставится при выборе ветки, чтобы набранное не стиралось). */
+  private countDay: number | null = null;
   private renaming = false;
   private rowsY: { id: number; y: number }[] = [];
   private tree: HTMLCanvasElement;
@@ -29,12 +41,23 @@ export class TmPanel {
 
   constructor(el: HTMLElement, private host: PanelHost) {
     el.innerHTML = `<p class="muted small">Каждая линия — своя история мира. Ветка появляется, когда вы вмешиваетесь в прошлое (перетащите шкалу внизу ⏪) или нажимаете 🌿 «Что если…». Нажмите на линию, чтобы сравнить ветки.</p>
+      <label class="small tm-follow"><input type="checkbox" checked> Основная ветка идёт дальше в фоне — сравнивать с ней <span class="muted">(параллельная вселенная)</span></label>
       <canvas class="tm-tree"></canvas>
       <div class="tm-acts"></div>
       <div class="tm-cmp"></div>`;
     this.tree = el.querySelector('.tm-tree')!;
     this.actsEl = el.querySelector('.tm-acts')!;
     this.cmpEl = el.querySelector('.tm-cmp')!;
+    const fol = el.querySelector<HTMLInputElement>('.tm-follow input')!;
+    fol.onchange = () => {
+      const { tl } = this.host;
+      tl.followOnFork = fol.checked;
+      if (!fol.checked && tl.follow !== null) {
+        const F = tl.branches.find((b) => b.id === tl.follow);
+        if (F) this.host.stop(F);
+        tl.follow = null;
+      }
+    };
     this.tree.addEventListener('click', (e) => {
       const r = this.tree.getBoundingClientRect();
       const y = e.clientY - r.top;
@@ -43,6 +66,7 @@ export class TmPanel {
       if (!best || Math.abs(best.y - y) > 13) return;
       const id = best.id;
       this.sel = id;
+      this.countDay = null;
       this.confirmDel = false;
       this.renaming = false;
       const cur = this.compareSet();
@@ -56,7 +80,14 @@ export class TmPanel {
       if (!b || this.sel === null) return;
       const { tl } = this.host;
       const k = b.dataset.tm;
+      const br = tl.branches.find((x) => x.id === this.sel);
       if (k === 'go') this.host.switchTo(this.sel);
+      else if (k === 'same' && br) this.host.verify(br);
+      else if (k === 'count' && br) {
+        this.host.count(br, Number(this.actsEl.querySelector<HTMLInputElement>('.tm-day')?.value) || undefined);
+        this.countDay = null;
+      }
+      else if (k === 'stop' && br) this.host.stop(br);
       else if (k === 'ren') this.renaming = true;
       else if (k === 'save') {
         const v = this.actsEl.querySelector<HTMLInputElement>('input')?.value.trim();
@@ -66,7 +97,7 @@ export class TmPanel {
       } else if (k === 'del') {
         if (!this.confirmDel) this.confirmDel = true;
         else {
-          if (tl.deleteBranch(this.sel)) {
+          if (this.host.del(this.sel)) {
             this.host.toast('🗑 Ветка удалена');
             this.cmp = this.cmp.filter((x) => x !== this.sel);
             this.sel = null;
@@ -83,7 +114,16 @@ export class TmPanel {
     this.cmpEl.addEventListener('pointerdown', (e) => {
       const f = (e.target as HTMLElement).closest('[data-fact]') as HTMLElement | null;
       if (f) this.host.showFact(f.dataset.fact!);
+      const c = (e.target as HTMLElement).closest('[data-count]') as HTMLElement | null;
+      const b = c && this.host.tl.branches.find((x) => x.id === Number(c.dataset.count));
+      if (b) this.host.count(b);
     });
+  }
+
+  /** Сравнить эти ветки (первая — главная). */
+  setCompare(ids: number[]): void {
+    this.cmp = ids.slice(0, 4);
+    this.render();
   }
 
   /** Ветки в сравнении: выбранные или активная с предком (или с первой другой). */
@@ -136,7 +176,7 @@ export class TmPanel {
     const ctx = cv.getContext('2d')!;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.clearRect(0, 0, cw, ch);
-    const maxT = Math.max(1, ...tl.branches.map((b) => b.headTick));
+    const maxT = Math.max(1, ...tl.branches.map((b) => (b.bg ? Math.max(b.headTick, Math.min(b.bg.target, b.headTick + 1e6)) : b.headTick)));
     const X = (t: number) => 34 + (t / maxT) * (cw - 46);
     const cmp = new Set(this.compareSet());
     const Y = new Map<number, number>();
@@ -177,6 +217,25 @@ export class TmPanel {
       ctx.moveTo(X(b.forkTick), y);
       ctx.lineTo(Math.max(X(b.forkTick) + 2, X(b.headTick)), y);
       ctx.stroke();
+      // считается в фоне: пунктир до цели и проценты
+      if (b.bg) {
+        const fin = Number.isFinite(b.bg.target) ? b.bg.target : b.bg.tick;
+        ctx.setLineDash([3, 3]);
+        ctx.lineWidth = 2;
+        ctx.globalAlpha = 0.7;
+        ctx.beginPath();
+        ctx.moveTo(X(b.headTick), y);
+        ctx.lineTo(X(Math.min(maxT, fin)), y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.globalAlpha = 1;
+        const p = Math.max(0, Math.min(99, Math.round((100 * (b.bg.tick - b.bg.from)) / Math.max(1, b.bg.target - b.bg.from))));
+        ctx.font = '9px system-ui';
+        ctx.fillStyle = '#9ecbff';
+        ctx.textAlign = 'right';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(this.host.runner.kindOf(b) === 'follow' ? '⚙ идёт' : `⚙ ${p}%`, cw - 2, y + 8);
+      }
       // крупные события ветки
       ctx.font = '9px system-ui';
       ctx.textAlign = 'center';
@@ -215,9 +274,11 @@ export class TmPanel {
     const name = this.renaming
       ? `<input class="tm-name" value="${esc(b.name)}" maxlength="40"><button data-tm="save">✔</button>`
       : `<b style="color:${b.color}">${b.letter} · ${esc(b.name)}</b>`;
-    const info = `<div class="muted small">${b.parent === null ? 'с сотворения мира' : `от ветки ${tl.branch(b.parent).letter}, день ${day(b.forkTick)}`} · сейчас день ${day(b.headTick)}${b.exact ? '' : ' · запись неполная'}</div>`;
+    const info = `<div class="muted small">${b.parent === null ? 'с сотворения мира' : `от ветки ${tl.branch(b.parent).letter}, день ${day(b.forkTick)}`} · сейчас день ${day(b.headTick)}${b.exact ? '' : ' · запись неполная'}${b.bg ? ` · ⚙ считается в фоне (день ${day(b.bg.tick)})` : ''}</div>`;
     this.setHtml(this.actsEl, `<div class="tm-acthead">${name}<button data-tm="close" class="x" title="Закрыть">✕</button></div>${info}<div class="tm-actbtns">
       <button data-tm="go" ${b === tl.active && !tl.visiting ? 'disabled' : ''}>▶ Перейти</button>
+      <button data-tm="same" ${b.bg ? 'disabled' : ''} title="Пересчитать ветку с развилки теми же действиями и костями — получится ли то же самое?">🔁 Точно так же</button>
+      ${b !== tl.active ? (b.bg ? `<button data-tm="stop">⏹ Остановить фон</button>` : `<span class="tm-countrow"><button data-tm="count" title="Досчитать ветку в фоне">⏩ Досчитать до дня</button><input class="tm-day" type="number" min="${day(b.headTick) + 1}" value="${(this.countDay ??= Math.max(day(b.headTick) + 1, day(Math.max(tl.active.headTick, this.host.world.tick))))}"></span>`) : ''}
       <button data-tm="ren">✏️ Переименовать</button>
       ${canDel ? `<button data-tm="del" class="${this.confirmDel ? 'danger' : ''}">${this.confirmDel ? '🗑 Точно удалить?' : '🗑 Удалить'}</button>` : ''}
     </div>`);
@@ -244,7 +305,8 @@ export class TmPanel {
     const head = `<h4>${tag(p.A)} · ${esc(p.A.name)} <span>vs</span> ${tag(p.B)} · ${esc(p.B.name)}</h4>
       <div class="small">Общий предок: день ${day(p.td)}</div>
       ${pairs.map((q) => q && `<div class="tm-bc">Разошлись на <b>${q.pct}%</b> ${br.length > 2 ? `(${tag(q.A)}–${tag(q.B)}) ` : ''}к дню ${day(q.tc)} <a data-fact="tm_braycurtis" title="Как считается">?</a></div>`).join('')}
-      ${br.some((b) => b.headTick < Math.max(...br.map((x) => x.headTick))) ? `<div class="muted small">Заштриховано время, до которого ветка ещё не дожила — перейдите на неё, чтобы она шла дальше.</div>` : ''}`;
+      ${br.filter((b) => b.headTick < Math.max(...br.map((x) => x.headTick))).map((b) => `<div class="muted small">Заштриховано время, до которого ветка ${tag(b)} ещё не дожила${
+        b.bg ? ' — она считается в фоне…' : b === tl.active ? '.' : ` <button class="tm-cnt" data-count="${b.id}">⏩ Досчитать</button>`}</div>`).join('')}`;
     const leaders = `<h4>Кто правит в день ${day(p.tc)}</h4><div class="tm-lead">${br
       .map((b) => {
         const r = rowAt(tl.lineageRows(b), p.tc);

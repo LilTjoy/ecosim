@@ -746,7 +746,7 @@ export class SurfaceRenderer {
     const w = this.world;
     const t = w.terrain;
     const b = BIOMES[t.biome[i]];
-    const temp = t.baseTemp[i] + w.season.shift;
+    const temp = t.baseTemp[i] + w.tempShift;
     const snow = clamp((0.1 - temp) / 0.08, 0, 1);
     const soilOn = w.settings.soil;
     if (b.water) {
@@ -902,7 +902,7 @@ export class SurfaceRenderer {
     const w = this.world;
     const t = w.terrain;
     const cell = w.cell;
-    const shift = w.season.shift;
+    const shift = w.tempShift;
     if (!w.env.landLife) return; // на безжизненной суше травинок нет
     ctx.lineWidth = 0.35;
     ctx.lineCap = 'round';
@@ -945,7 +945,7 @@ export class SurfaceRenderer {
   private glowAt(i: number, night: number): number {
     const w = this.world;
     const t = w.terrain;
-    const T = t.baseTemp[i] + w.season.shift;
+    const T = t.baseTemp[i] + w.tempShift;
     if (T <= 0.35) return 0;
     const nu = (w.nut[i] - 0.9) / 0.4 + 0.3;
     return night * Math.min(1, w.grass[i] / BIOMES[t.biome[i]].fert) * Math.min(1, (T - 0.35) * 3) * (nu < 0 ? 0 : nu > 1 ? 1 : nu);
@@ -957,7 +957,7 @@ export class SurfaceRenderer {
     if (!w.mic || !w.env.landLife) return;
     const t = w.terrain;
     const cell = w.cell;
-    const sh = w.season.shift;
+    const sh = w.tempShift;
     const ctx = this.ctx;
     const M = this.mushBuf;
     const max = Math.floor(BUDGET.mush * this.bk);
@@ -1189,7 +1189,7 @@ export class SurfaceRenderer {
         const cx = c0 + Math.floor(rnd() * (c1 - c0 + 1));
         const cy = r0 + Math.floor(rnd() * (r1 - r0 + 1));
         const i = cy * t.cols + cx;
-        if (t.biome[i] !== B.Swamp || t.baseTemp[i] + w.season.shift < 0.06) continue;
+        if (t.biome[i] !== B.Swamp || t.baseTemp[i] + w.tempShift < 0.06) continue;
         if (rnd() < w.litter[i] * w.act[i] * 0.06) {
           P.push({ x: (cx + rnd()) * cell, y: (cy + rnd()) * cell, vx: 0, vy: -0.02, life: 0, max: 40, kind: 'bubble', hue: 0.4 + rnd() * 0.5 });
           made++;
@@ -1290,7 +1290,7 @@ export class SurfaceRenderer {
     const ctx = this.ctx;
     const w = this.world;
     const t = w.terrain;
-    const sh = w.season.shift;
+    const sh = w.tempShift;
     const act = w.act;
     const tick = w.tick;
     // следы костей тают за 900 тактов

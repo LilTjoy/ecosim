@@ -50,7 +50,7 @@ for (const k in flags) {
 }
 if (flags.tm) {
   runTm(flags.tm, { seed, T, mode, salt, flags, mk: () => { const x = mkWorld(); x.reset(mode, seed, undefined, salt); return x; } });
-  process.exit(0);
+  process.exit();
 }
 w.reset(mode, seed, undefined, salt);
 // время soilPass отдельно (если он есть)

@@ -5,11 +5,14 @@ import { GENE_INFO, GENE_KEYS, type GeneKey, type Genome } from '../sim/genome';
 import type { Pathogen } from '../sim/microbes';
 import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
-import { DAY, DIS, EARTH_ENV, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
+import { DAY, DIS, EARTH_ENV, YEAR, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
 import { SNAP_DEV } from '../sim/snapshot';
 import { Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch } from '../sim/timeline';
 import { TimelineBar } from './timelineBar';
 import { TmPanel } from './tmPanel';
+import { TmRunner, type BgKind } from './tmRunner';
+import { TapeView, type ExpHost } from './tapeView';
+import { FlyView } from './flyView';
 import { Camera } from './camera';
 import { SURFACE_FACTS } from './facts';
 import { MICROBE_GUILDS } from './microbes';
@@ -66,6 +69,8 @@ const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; cap
   disease: { title: '☣️ Болезни', fact: 'sir', caption: '<b class="red">●</b> болеют · <b class="blue">●</b> защищены (переболели или иммунитет от матери) · остальные здоровы' },
 };
 
+/** Сколько процентов фоновой работы ветки сделано. */
+const bgPct = (b: Branch) => (b.bg ? Math.max(0, Math.min(99, Math.round((100 * (b.bg.tick - b.bg.from)) / Math.max(1, b.bg.target - b.bg.from)))) : 100);
 const pct = (v: number) => `${Math.round(v * 100)}%`;
 /**
  * Условная температура мира → °C, по порогам отрисовки и биомов: морской лёд (0.04) ≈ −3 °C, снег (0.1) ≈ 0 °C,
@@ -135,6 +140,7 @@ const TEMPLATE = /* html */ `
     <div class="s-player" hidden></div>
     <div class="p-fact s-fact" hidden></div>
     <div class="s-modal" hidden></div>
+    <div class="s-tmmodal" hidden></div>
   </section>
   <aside class="s-panel">
     <nav class="s-tabs">
@@ -222,6 +228,14 @@ export class SurfaceView {
   // ⏪ машина времени
   private bar!: TimelineBar;
   private tmPanel!: TmPanel;
+  /** Фоновые прогоны (воркеры): ветки и опыты. */
+  runner: TmRunner;
+  private tape!: TapeView;
+  private fly!: FlyView;
+  /** Открыто окно опыта (плёнка, бабочка): мир на паузе. */
+  private expOpen = false;
+  /** Дополнительная строка карточки (например, сроки в опыте с бабочкой). */
+  private factExtra = new Map<string, string>();
   /** С какой скоростью продолжить, когда вернёмся из прошлого. */
   private resume = 1;
   private wasPast = false;
@@ -243,6 +257,30 @@ export class SurfaceView {
     this.tl.reset(this.world);
     this.tl.onToast = (t) => this.toast(t);
     this.tl.onReplayEnd = (same) => same && this.queueFact('tm_seed', true);
+    this.runner = new TmRunner(this.tl);
+    this.runner.onError = (t) => this.toast(`⚠️ ${t}`);
+    this.runner.onBranchDone = (b, kind) => this.bgDone(b, kind);
+    const exp: ExpHost = {
+      tl: this.tl,
+      world: this.world,
+      runner: this.runner,
+      renderer: this.renderer,
+      queueFact: (id, now, extra) => this.queueFact(id, now, extra),
+      adopted: (b) => {
+        this.toast(`🌿 Новая ветка ${b.letter}: ${b.name}`, [
+          { label: '⏳ Сравнить', run: () => this.compareWith(b) },
+          { label: '▶ Перейти', run: () => this.switchBranch(b.id) },
+        ]);
+        this.bar.draw();
+      },
+      setOpen: (on) => {
+        this.expOpen = on;
+        if (!on) this.syncTime();
+      },
+    };
+    const modal = $(root, '.s-tmmodal');
+    this.tape = new TapeView(modal, exp);
+    this.fly = new FlyView(modal, exp);
     this.bar = new TimelineBar($(root, '.s-timeline'), $(root, '.s-tlopen'), {
       tl: this.tl,
       world: this.world,
@@ -253,15 +291,27 @@ export class SurfaceView {
       forkWithout: (ref) => this.forkWithoutUi(ref),
       intervene: (t) => this.seek(t, Infinity, () => this.openMenu()),
       rescue: (name, tEnd) => this.rescueUi(name, tEnd),
+      openTape: () => this.openTape(),
+      openFly: () => this.openFly(),
+      bgText: () => this.bgText(),
       setOpen: (on) => this.setBarOpen(on),
       toast: (t) => this.toast(t),
     });
     this.tmPanel = new TmPanel($(root, '.s-tab[data-tab=time]'), {
       tl: this.tl,
       world: this.world,
+      runner: this.runner,
       switchTo: (id) => this.switchBranch(id),
       showFact: (id) => this.showFact(id),
       toast: (t) => this.toast(t),
+      count: (b) => this.countBranch(b),
+      verify: (b) => this.verifyBranch(b),
+      stop: (b) => this.runner.stopBranch(b),
+      del: (id) => {
+        const b = this.tl.branches.find((x) => x.id === id);
+        if (b) this.runner.stopBranch(b);
+        return this.tl.deleteBranch(id);
+      },
     });
     if (DEV) Object.assign(window, { __surface: this }); // проверки машины времени из браузера (только dev-сборка)
     this.bindUi();
@@ -282,6 +332,9 @@ export class SurfaceView {
   }
 
   private afterReset(): void {
+    this.runner.reset();
+    if (this.tape.open) this.tape.close();
+    if (this.fly.open) this.fly.close();
     this.tl.reset(this.world);
     this.seenRestores = this.tl.restores;
     this.wasPast = false;
@@ -777,8 +830,15 @@ export class SurfaceView {
   // ---------------- карточки ----------------
 
   /** Показать карточку один раз. Если открыта другая — встаёт в очередь (now — показать сразу, а ту отложить). */
-  private queueFact(id: string, now = false): void {
+  private queueFact(id: string, now = false, extra?: string): void {
     if (!this.explain) return;
+    if (extra) {
+      // карточка с новыми цифрами опыта — показать, даже если её уже видели
+      this.factExtra.set(id, extra);
+      if (!$(this.root, '.s-fact').hidden && this.factNow && this.factNow !== id) this.factQueue.unshift(this.factNow);
+      this.showFact(id);
+      return;
+    }
     if (now) {
       // уже ждёт в очереди — показать сейчас
       const q = this.factQueue.indexOf(id);
@@ -807,8 +867,10 @@ export class SurfaceView {
     const el = $(this.root, '.s-fact');
     this.factNow = id;
     this.shownFacts.add(id); // прочитанную вручную не показываем ещё раз сами
+    const extra = this.factExtra.get(id);
     el.innerHTML = `<div class="tag">${FIELD_ICON[f.field]} ${f.field}</div><h4>${f.title}</h4><p>${f.text}</p>${
-      f.earth ? `<p class="earth">🌍 ${f.earth}</p>` : ''
+      extra ? `<p class="extra">🔬 ${extra}</p>` : ''
+    }${f.earth ? `<p class="earth">🌍 ${f.earth}</p>` : ''
     }<div class="btns">${f.action && f.action.lens !== this.renderer.lens ? `<button data-lens="${f.action.lens}" class="act">${f.action.label}</button>` : ''}<button>Понятно</button></div>`;
     el.hidden = false;
   }
@@ -1050,7 +1112,9 @@ export class SurfaceView {
       w.drought > 0 ? '<span>🔥 засуха</span>' : ''
     }${w.micro.sick > 0 ? `<span class="s-sick" title="Открыть «Микромир» и линзу болезней">🤒 больных ${w.micro.sick}</span>` : ''}${
       this.tl.branches.length > 1 ? `<span class="s-chip" style="border-color:${this.tl.active.color}">🌿 ветка ${this.tl.active.letter}</span>` : ''
-    }${this.tl.visiting || this.tl.replaying ? '<span class="s-chip past">⏳ прошлое</span>' : ''}`;
+    }${this.tl.visiting || this.tl.replaying ? '<span class="s-chip past">⏳ прошлое</span>' : ''}${
+      Math.round(w.climate.shift * 80) !== 0 || w.climate.target !== 0 ? `<span class="s-chip">${w.climate.target < 0 ? '❄️' : '🌡'} ${w.climate.shift >= 0 ? '+' : '−'}${Math.abs(Math.round(w.climate.shift * 80))} °C</span>` : ''
+    }`;
     const at = this.cursor ?? [this.cam.x, this.cam.y];
     const reg = w.terrain.regionAt(at[0], at[1]);
     const water = w.terrain.waterAt(at[0], at[1]);
@@ -1764,9 +1828,11 @@ export class SurfaceView {
     this.applyKeys();
     if (this.tl.replaying) this.tl.advance(this.world);
     else {
-      const steps = this.modalOpen ? 0 : this.speed;
+      const steps = this.modalOpen || this.expOpen ? 0 : this.speed;
       for (let i = 0; i < steps; i++) this.tl.step(this.world);
     }
+    // «параллельная вселенная»: предок идёт в фоне, не дальше 600 тактов впереди
+    if (this.frame % 30 === 0 && !this.tl.visiting && !this.tl.replaying) this.runner.pace(this.world.tick);
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
     const p = this.world.player;
@@ -1953,13 +2019,99 @@ export class SurfaceView {
     this.syncTime();
   }
 
-  private switchBranch(id: number): void {
+  private switchBranch(id: number, force = false): void {
     const tl = this.tl;
     if (tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
     const b = tl.branch(id);
+    if (b.bg) {
+      const kind = this.runner.kindOf(b);
+      if (kind !== 'follow' && !force) {
+        const p = bgPct(b);
+        this.toast(`Ветка ${b.letter} ещё считается (${p}%)`, [
+          { label: 'Прервать и перейти', run: () => this.switchBranch(id, true) },
+          { label: 'Подождать', run: () => {} },
+        ], 10000);
+        return;
+      }
+      this.runner.stopBranch(b);
+    }
     if (tl.switchTo(this.world, id)) this.toast(`↪ Ветка ${b.letter} · ${b.name}: день ${Math.floor(this.world.tick / DAY)}`);
     this.syncTime();
     this.renderPanel();
+  }
+
+  /** Ветка досчитана в фоне. */
+  private bgDone(b: Branch, kind: BgKind): void {
+    this.bar.draw();
+    if (this.tab === 'time') this.renderPanel();
+    if (kind === 'follow' || !this.tl.branches.includes(b)) return;
+    this.toast(`⏩ Ветка ${b.letter} досчитана до дня ${Math.floor(b.headTick / DAY)} — сравнение готово`, [{ label: 'Открыть', run: () => this.compareWith(b) }], 10000);
+  }
+
+  /** Открыть «⏳ Ветки» со сравнением активной ветки и b. */
+  private compareWith(b: Branch): void {
+    this.tmPanel.setCompare([this.tl.active.id, b.id]);
+    this.openTab('time');
+  }
+
+  /** ⏩ Досчитать ветку в фоне до дня активной ветки (или до дня day). */
+  private countBranch(b: Branch, day?: number): void {
+    const tl = this.tl;
+    if (!this.runner.ok) return this.toast('Фоновый расчёт недоступен в этом браузере — перейдите на ветку, чтобы она шла дальше');
+    const until = day !== undefined ? day * DAY : Math.max(tl.active.headTick, this.world.tick);
+    if (b === tl.active || until <= b.headTick) return this.toast('Ветке нечего досчитывать');
+    if (b.bg) this.runner.stopBranch(b);
+    if (this.runner.continueBranch(b, until, 'count')) this.toast(`⏩ Ветка ${b.letter} считается в фоне до дня ${Math.floor(until / DAY)}…`);
+    this.renderPanel();
+  }
+
+  /** 🔁 Точно так же: пересчитать ветку с развилки и сверить с её настоящим. */
+  private verifyBranch(b: Branch): void {
+    if (!this.runner.ok) return this.toast('Фоновый расчёт недоступен в этом браузере');
+    const ok = this.runner.verify(this.world, b, (same, ticks) => {
+      if (same === null) return;
+      if (same) {
+        this.toast(`🔁 Ветка ${b.letter} пересчитана с развилки (${Math.round(ticks / DAY)} ${plural(Math.round(ticks / DAY), 'день', 'дня', 'дней')}): до бита то же самое`);
+        this.queueFact('tm_seed');
+      } else this.toast(`⚠️ Ветка ${b.letter} пересчитана иначе — история разошлась с записью (другая версия игры или браузер)`);
+    });
+    if (ok) this.toast(`🔁 Пересчитываю ветку ${b.letter} с развилки теми же действиями и костями…`);
+    else this.toast('Эту ветку сейчас не пересчитать');
+  }
+
+  /** Что считается в фоне — для шкалы. */
+  private bgText(): string {
+    const parts: string[] = [];
+    for (const b of this.tl.branches) {
+      if (!b.bg) continue;
+      const kind = this.runner.kindOf(b);
+      if (kind === 'follow') parts.push(`${b.letter} идёт дальше`);
+      else parts.push(`${b.letter} ${bgPct(b)}%`);
+    }
+    return parts.length ? `⚙ ${parts.join(' · ')}` : '';
+  }
+
+  private openTape(): void {
+    if (this.tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    if (!this.runner.ok) return this.toast('Плёнке жизни нужен фоновый расчёт — в этом браузере его нет');
+    if (this.tl.replaying || this.tl.disabled) return;
+    this.closeMenu();
+    if (this.fly.open) this.fly.close();
+    this.tape.show();
+  }
+
+  private openFly(): void {
+    if (this.tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    if (this.tl.replaying || this.tl.disabled) return;
+    this.closeMenu();
+    if (!this.runner.ok) {
+      // без воркера — просто ветка с бабочкой
+      const c = this.selected?.alive ? this.selected : this.world.creatures[this.world.creatures.length >> 1];
+      if (c) this.branchAct({ k: 'nudge', id: c.id, dx: 1e-6 });
+      return;
+    }
+    if (this.tape.open) this.tape.close();
+    this.fly.show(this.selected?.alive ? this.selected.id : null);
   }
 
   private branchToast(b: Branch): void {
@@ -1995,15 +2147,20 @@ export class SurfaceView {
     const tl = this.tl;
     if (tl.locked || tl.disabled) return;
     const a = tl.actAt(tl.active, ref);
+    const parent = tl.active;
     const ok = tl.forkWithout(this.world, ref, true, (b) => {
-      if (b) {
+      if (b && this.runner.ok && b.scheduled !== null && tl.switchTo(this.world, parent.id) && this.runner.continueBranch(b, parent.headTick, 'catch')) {
+        // ветка «без этого» догоняет настоящее в фоне, а мы возвращаемся туда, где были
+        this.toast(`🌿 Ветка ${b.letter} «${b.name}» считается в фоне до дня ${Math.floor(parent.headTick / DAY)}…`, [{ label: '⏳ Ветки', run: () => this.compareWith(b) }]);
+        if (a.k === 'meteor') this.queueFact('tm_whatif', true);
+      } else if (b) {
         this.branchToast(b);
         if (a.k === 'meteor') this.queueFact('tm_whatif', true);
       }
       this.syncTime();
     });
     if (!ok) this.toast('Перед этим действием нет снимка поблизости — точно вернуться туда нельзя');
-    else this.toast('⏳ Перематываю к мигу перед действием…');
+    else if (tl.replaying) this.toast('⏳ Перематываю к мигу перед действием…');
     this.syncTime();
   }
 
@@ -2048,15 +2205,19 @@ export class SurfaceView {
       if (UNDOABLE.has(a.k) && (!tl.visiting || a.t >= w.tick)) undo.push(i);
     }
     const mr = w.settings.mutationRate;
+    const cl = w.climate;
     el.innerHTML = `<div class="row"><b>Что если… (день ${d})</b><button data-m="close" class="x">✕</button></div>
       <div class="muted small">Каждое вмешательство пускает историю новой веткой — прошлое не перезапишется.</div>
       ${row('reseed', '🎲', 'Бросить кости заново', 'всё то же, кроме случайности')}
       ${row('nudge', '🦋', 'Взмах крыла бабочки', 'сдвинуть одну особь на миллионную долю пикселя')}
+      ${row('tape', '🎲', 'Плёнка жизни…', 'перемотать и запустить снова 3–6 раз')}
       ${row('meteor', '☄️', 'Метеорит сюда', 'выберите место на карте')}
       ${PRESETS.map((p, i) => row('spawn', p.icon, p.name, '8 особей — нажмите на карту', `data-p="${i}"`)).join('')}
       ${doomed.length ? `<div class="tm-sub">🧬 ${tl.visiting ? 'Спасти вид (позже вымрет):' : 'Вернуть вымерший вид:'}</div>${doomed.map((sp) => row('rescue', '🧬', `Спасти «${sp.name}»`, '', `data-sp="${sp.id}"`)).join('')}` : ''}
       <div class="tm-sub">🚫 Убрать вид <em>а если бы их не было?</em></div>
       ${living.slice(0, 8).map((sp) => row('remove', '🚫', `«${sp.name}»`, `${sp.count}`, `data-sp="${sp.id}"`)).join('')}
+      ${row('warm', '🌡', 'Потепление +4 °C за год', cl.target ? `сейчас ${cl.target > 0 ? '+' : '−'}${Math.abs(Math.round(cl.target * 80))} °C` : 'растительность пока прежняя')}
+      ${row('cool', '❄️', 'Похолодание −4 °C за год')}
       ${row('mut2', '🧪', 'Мутации ×2', `сейчас ${Math.round(mr * 100)}% на ген`)}
       ${row('mut05', '🧪', 'Мутации ×½')}
       ${undo.length ? `<div class="tm-sub">✕ Отменить в новой ветке:</div>${undo.map((i) => {
@@ -2070,10 +2231,10 @@ export class SurfaceView {
       const k = b.dataset.m;
       this.closeMenu();
       if (k === 'reseed') this.branchAct({ k: 'reseed', salt: mix32(Date.now()) });
-      else if (k === 'nudge') {
-        const c = this.selected?.alive ? this.selected : w.creatures[w.creatures.length >> 1];
-        if (c) this.branchAct({ k: 'nudge', id: c.id, dx: 1e-6 });
-      } else if (k === 'meteor' || k === 'spawn') {
+      else if (k === 'nudge') this.openFly();
+      else if (k === 'tape') this.openTape();
+      else if (k === 'warm' || k === 'cool') this.branchAct({ k: 'climate', target: Math.round((cl.target + (k === 'warm' ? 0.05 : -0.05)) * 1000) / 1000, ramp: YEAR });
+      else if (k === 'meteor' || k === 'spawn') {
         // следующий клик по карте — вмешательство новой веткой
         if (k === 'spawn') {
           this.preset = Number(b.dataset.p);

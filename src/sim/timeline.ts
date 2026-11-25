@@ -30,6 +30,8 @@ export type Action = { t: number } & (
   /** Опыты уроков: убрать корм на время / вернуть его. */
   | { k: 'resource'; kind: 'browse' | 'forage'; ticks: number }
   | { k: 'restoreRes'; kind: 'browse' | 'forage' }
+  /** Климат: сдвиг температуры к target (единицы модели, 0,05 ≈ 4 °C) за ramp тактов. */
+  | { k: 'climate'; target: number; ramp: number }
   /** Только подпись на шкале, не применяется. */
   | { k: 'undo'; ref: number }
 );
@@ -40,7 +42,7 @@ export type ActionInput = DistOmit<Action, 't'>;
 /** Действия, которые можно отменить тостом «↶ Отменить». */
 export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue']);
 /** Разница, записанная машиной времени, а не поступок игрока. */
-const isDiff = (a: Action) => a.k === 'settings' || (a.k === 'experiment' && !!a.quiet);
+export const isDiff = (a: Action): boolean => a.k === 'settings' || (a.k === 'experiment' && !!a.quiet);
 
 /** Компактная запись ввода игрока: 13 байт на изменение (страница пишет Math.fround — запись точная). */
 export class InputLog {
@@ -144,7 +146,8 @@ export interface Branch {
   headTick: number;
   /** Запись полная: «Как было» повторит историю точно. */
   exact: boolean;
-  bg: null | { job: number; target: number; tick: number };
+  /** Ветка считается в фоне: задание, цель, откуда начали и докуда дошли. */
+  bg: null | { job: number; target: number; from: number; tick: number };
   /** Имена и цвета видов, которых ветка видела в рядах (для сравнения: у другой ветки свой реестр видов). */
   names: Map<number, { name: string; hue: number }>;
   // служебное
@@ -172,6 +175,8 @@ export const TM = {
   ACTIONS_CAP: 50_000, INPUT_CAP: 1_000_000, RESIM_MAX: 600, RESIM_BUDGET_MS: 20, HIST_FULL: 18_000, HIST_EVERY: 100,
   /** Телефон: давние записи истории и ряды шкалы реже (иначе за 200 000 тактов они съедают половину 24 МБ). */
   HIST_EVERY_SMALL: 500, ROW_EVERY_OLD_SMALL: 500,
+  /** Фон (воркер): снимок ветки раз в BG_SNAP тактов; «параллельная вселенная» — не дальше FOLLOW_AHEAD от живой ветки. */
+  BG_SNAP: 3000, FOLLOW_AHEAD: 600, FOLLOW_CHUNK: 1200,
 };
 
 type Tier = { age: number; every: number };
@@ -215,13 +220,65 @@ export function eventMark(e: WorldEvent, act?: number): Mark {
 }
 
 /** Сколько последних записей летописи сделано в такт t. */
-function trailing(ev: WorldEvent[], t: number): number {
+export function trailing(ev: WorldEvent[], t: number): number {
   let n = 0;
   for (let i = ev.length - 1; i >= 0 && ev[i].tick === t; i--) n++;
   return n;
 }
 
 const sampleBytes = (s: Sample) => 64 + 300 * s.counts.size;
+
+/** Отметки шкалы за действие, только что приложенное к миру (k0 — trailing до него): его записи летописи или подпись. */
+export function actMarks(w: World, a: Action, idx: number, k0: number): Mark[] {
+  const k1 = trailing(w.events, w.tick);
+  const out: Mark[] = [];
+  for (let i = w.events.length - Math.max(0, k1 - k0); i < w.events.length; i++) out.push(eventMark(w.events[i], idx));
+  if (k1 <= k0 && !isDiff(a) && a.k !== 'undo') {
+    const text = actionText(a);
+    out.push({ t: a.t, text, kind: 'player', icon: iconOf(text), major: a.k === 'reseed' || a.k === 'nudge', act: idx });
+  }
+  return out;
+}
+
+/** Отметки за шаг: записи летописи этого такта. */
+export function stepMarks(w: World): Mark[] {
+  const n = trailing(w.events, w.tick);
+  const out: Mark[] = [];
+  for (let i = w.events.length - n; i < w.events.length; i++) out.push(eventMark(w.events[i]));
+  return out;
+}
+
+/** Ввод для воркера: типизированные массивы ровно по длине записи. */
+export interface InputArrays { t: Int32Array; dx: Float32Array; dy: Float32Array; run: Uint8Array }
+export const inputArrays = (L: InputLog): InputArrays => ({ t: L.t.slice(0, L.n), dx: L.dx.slice(0, L.n), dy: L.dy.slice(0, L.n), run: L.run.slice(0, L.n) });
+
+/** Что нужно воркеру, чтобы продолжить или пересчитать ветку: снимок, действия и ввод (сквозные номера с actBase/inBase). */
+export interface BgSpec { snap: WorldSnap; acts: Action[]; actBase: number; input: InputLog; inBase: number; until: number }
+/** Начало опыта (плёнка жизни, бабочка): точка линии, откуда считают миры. */
+export interface ExpStart {
+  tick: number;
+  cur: [number, number];
+  /** Ветка, которой принадлежит точка; meta — снимок линии в этой точке (если есть). */
+  owner: number;
+  meta: SnapMeta | null;
+  snap: WorldSnap;
+  /** species.peekNextId в этой точке. */
+  nx: number;
+}
+/** Посчитанный в воркере мир, который становится веткой. */
+export interface Adopted {
+  acts: Action[];
+  applied: number;
+  input: InputLog;
+  inApplied: number;
+  head: WorldSnap;
+  rows: SeriesRow[];
+  marks: Mark[];
+  names: [number, string, number][];
+  name: string;
+  icon: string;
+  intervention: Action;
+}
 
 /** Подпись действия для отметки и отмены. */
 export function actionText(a: Action): string {
@@ -240,6 +297,7 @@ export function actionText(a: Action): string {
     case 'reseed': return '🎲 новый случай';
     case 'resource': return '🍂 корм убран';
     case 'restoreRes': return '🌿 корм возвращён';
+    case 'climate': return a.target > 0 ? '🌡 потепление' : a.target < 0 ? '❄️ похолодание' : '🌡 климат как был';
     case 'undo': return '↶ отмена';
   }
 }
@@ -265,6 +323,7 @@ export function branchName(a: Action | null, tick: number, without = false, past
     case 'rescue': return { name: `Спасти «${spName ?? '?'}»`, icon: '🧬' };
     case 'remove': return { name: `Без «${spName ?? '?'}»`, icon: '🚫' };
     case 'settings': return { name: a.s.mutationRate >= 0.1 ? 'Мутации ×2' : 'Мутации ×½', icon: '🧪' };
+    case 'climate': return a.target >= 0 ? { name: `Потепление +${Math.round(a.target * 80)} °C`, icon: '🌡' } : { name: `Похолодание −${Math.round(-a.target * 80)} °C`, icon: '❄️' };
     case 'possess': return { name: `Что если: я вмешался (день ${d})`, icon: '👑' };
     case 'grass': return { name: `Что если: я вмешался (день ${d})`, icon: '🌱' };
     default: return { name: `Что если: я вмешался (день ${d})`, icon: '🌿' };
@@ -318,6 +377,10 @@ export class Timeline {
   /** Счётчик восстановлений мира из снимка (страница по нему обновляет выбор, панели и шкалу). */
   restores = 0;
   onDrop: ((s: SnapMeta, why: DropWhy) => void) | null = null;
+  /** «Параллельная вселенная»: ветка, которая идёт дальше в фоне (воркер), пока игрок в её потомке. */
+  follow: number | null = null;
+  /** После развилки в настоящем предок идёт дальше в фоне («Сравнивать с основной веткой»). */
+  followOnFork = true;
   stats: TimelineStats = { captures: 0, captureMs: [], guardChecks: 0, desyncs: 0, dropped: { tier: 0, budget: 0, undo: 0, delete: 0 }, lastReplay: null };
   private seq = 0;
   private bseq = 0;
@@ -433,6 +496,7 @@ export class Timeline {
     this.branches = [];
     this.visiting = null;
     this.play = null;
+    this.follow = null;
     this.full = false;
     this.bseq = 0;
     this.snapEvery = TM.SNAP_EVERY;
@@ -489,9 +553,7 @@ export class Timeline {
     if (!isDiff(a)) this.preAnchor(w, b, idx, iconOf(actionText(a)));
     const k0 = trailing(w.events, w.tick);
     if (apply) this.trapped(() => w.apply(a));
-    const k1 = trailing(w.events, w.tick);
-    for (let i = w.events.length - Math.max(0, k1 - k0); i < w.events.length; i++) this.addMark(b, eventMark(w.events[i], idx));
-    if (k1 <= k0 && !isDiff(a)) this.addMark(b, { t: a.t, text: actionText(a), kind: 'player', icon: iconOf(actionText(a)), major: a.k === 'reseed' || a.k === 'nudge', act: idx });
+    for (const m of actMarks(w, a, idx, k0)) this.addMark(b, m);
     b.actions.push(a);
     if (a.k === 'settings') this.base.set = JSON.stringify(w.settings);
     if (a.k === 'experiment') this.base.exp = JSON.stringify(w.experiment);
@@ -595,6 +657,7 @@ export class Timeline {
       this.releaseHead(this.active);
       this.active.head = s;
       this.active.headTick = T;
+      if (this.followOnFork) this.follow = this.active.id;
     }
     const b = this.newBranch(owner.id, T, cur[0], cur[1], w.species.peekNextId, intervention);
     b.forkSnap = s.id;
@@ -653,8 +716,9 @@ export class Timeline {
       this.toPresent(w);
       return true;
     }
-    if (!t.head || this.disabled || this.locked) return false;
+    if (!t.head || t.bg || this.disabled || this.locked) return false;
     this.play = null;
+    if (this.follow === t.id) this.follow = null;
     this.restores++;
     if (!this.visiting) this.captureHead(w);
     const h = t.head;
@@ -709,6 +773,176 @@ export class Timeline {
     return true;
   }
 
+  // ---------------- фон: ветки считаются в воркере (§5) ----------------
+
+  /** Действия линии ветки [from, to) — копии (воркеру и новой ветке). */
+  lineageActsFrom(b: Branch, from: number, to = this.actLen(b)): Action[] {
+    const out: Action[] = [];
+    for (let i = from; i < to; i++) out.push(structuredClone(this.actAt(b, i)));
+    return out;
+  }
+
+  /** Ввод линии ветки [from, to) — копия. */
+  lineageInputFrom(b: Branch, from: number, to = this.inLen(b)): InputLog {
+    const L = new InputLog();
+    for (let j = from; j < to; j++) {
+      const [log, k] = this.inAt(b, j);
+      L.push(log.t[k], log.dx[k], log.dy[k], log.run[k] === 1);
+    }
+    return L;
+  }
+
+  /** Продолжить неактивную ветку в фоне от её головы до такта until (со своими отложенными действиями и вводом). */
+  bgSpec(b: Branch, until: number): BgSpec | null {
+    if (this.disabled || b === this.active || !b.head || b.bg || until <= b.headTick || !this.branches.includes(b)) return null;
+    const acts = b.scheduled ? b.scheduled.slice(b.schedA).map((a) => structuredClone(a)) : [];
+    const input = new InputLog();
+    const L = b.scheduledIn;
+    if (L) for (let j = b.schedI; j < L.n; j++) input.push(L.t[j], L.dx[j], L.dy[j], L.run[j] === 1);
+    return { snap: b.head.snap, acts, actBase: this.actLen(b), input, inBase: this.inLen(b), until };
+  }
+
+  bgBegin(b: Branch, job: number, until: number): void {
+    b.bg = { job, target: until, from: b.headTick, tick: b.headTick };
+  }
+
+  /** Ряды, отметки и записи истории из фона (до очередного снимка — предварительно). */
+  bgProgress(b: Branch, job: number, p: { tick: number; rows: SeriesRow[]; marks: Mark[]; samples: Sample[]; names: [number, string, number][] }): void {
+    if (!b.bg || b.bg.job !== job) return;
+    for (const [id, name, hue] of p.names) if (!b.names.has(id)) b.names.set(id, { name, hue });
+    for (const r of p.rows) {
+      b.rows.push(r);
+      this.guildMarks(b, r, true);
+    }
+    for (const m of p.marks) this.addMark(b, m);
+    for (const h of p.samples) this.pushSample(b, h);
+    b.bg.tick = p.tick;
+  }
+
+  /** Снимок из фона — новая голова ветки (на сетке BG_SNAP он же авто-снимок); исполненное переходит в запись ветки. */
+  bgSnap(b: Branch, job: number, snap: WorldSnap): void {
+    if (!b.bg || b.bg.job !== job) return;
+    const nA = snap.actN - this.actLen(b);
+    for (let i = 0; i < nA && b.scheduled && b.schedA < b.scheduled.length; i++) b.actions.push(b.scheduled[b.schedA++]);
+    if (b.scheduled && b.schedA >= b.scheduled.length) b.scheduled = null;
+    const nI = snap.inN - this.inLen(b);
+    const L = b.scheduledIn;
+    for (let i = 0; i < nI && L && b.schedI < L.n; i++, b.schedI++) b.input.push(L.t[b.schedI], L.dx[b.schedI], L.dy[b.schedI], L.run[b.schedI] === 1);
+    if (L && b.schedI >= L.n) b.scheduledIn = null;
+    const auto = snap.tick % TM.BG_SNAP === 0;
+    const s: SnapMeta = { id: ++this.seq, branch: b.id, tick: snap.tick, kind: auto ? 'auto' : 'head', snap, forks: new Set() };
+    this.releaseHead(b);
+    if (auto) this.insertSnap(b, s);
+    b.head = s;
+    b.headTick = snap.tick;
+    b.bg.tick = Math.max(b.bg.tick, snap.tick);
+    this.thin();
+  }
+
+  /** Фон кончился или прерван: всё, что пришло после последнего снимка (головы), убрать. */
+  bgEnd(b: Branch, job: number): void {
+    if (!b.bg || b.bg.job !== job) return;
+    b.bg = null;
+    const T = b.headTick;
+    if (b.rows.length && b.rows[b.rows.length - 1].t > T) {
+      b.rows = b.rows.filter((r) => r.t <= T);
+      b.rThin = Math.min(b.rThin, b.rows.length);
+    }
+    if (b.samples.length && b.samples[b.samples.length - 1].tick > T) {
+      b.samples = b.samples.filter((h) => h.tick <= T);
+      b.sampleBytes = b.samples.reduce((n, h) => n + sampleBytes(h), 0);
+      b.sThin = Math.min(b.sThin, b.samples.length);
+    }
+    b.marks = b.marks.filter((m) => m.t <= T);
+  }
+
+  /**
+   * 🔁 «Точно так же»: пересчитать ветку с её развилки (корень — с сотворения) её же действиями и вводом
+   * до головы (у активной — до «сейчас»); digest — с чем сверить конец.
+   */
+  verifySpec(w: World, b: Branch): { spec: BgSpec; digest: number } | null {
+    if (this.disabled || b.bg) return null;
+    let tick: number, actN: number, inN: number, digest: number;
+    if (b === this.active && !this.visiting && !this.play) {
+      (tick = w.tick), (actN = this.actLen(b)), (inN = this.inLen(b)), (digest = this.digestNow(w));
+    } else if (b.head) {
+      const h = b.head.snap;
+      (tick = h.tick), (actN = h.actN), (inN = h.inN), (digest = h.digest);
+    } else return null;
+    const L = this.lineageSnaps(b);
+    const from = b.parent === null ? L[0] : L.find((s) => s.id === b.forkSnap);
+    if (!from || tick <= from.tick) return null;
+    const f = from.snap;
+    return { spec: { snap: f, acts: this.lineageActsFrom(b, f.actN, actN), actBase: f.actN, input: this.lineageInputFrom(b, f.inN, inN), inBase: f.inN, until: tick }, digest };
+  }
+
+  /** Начало опыта — мир сейчас (в настоящем или в посещённом прошлом). Снимок в линию не кладётся, пока мир не станет веткой. */
+  expStart(w: World): ExpStart {
+    const cur: [number, number] = this.visiting ? [this.cur[0], this.cur[1]] : [this.actLen(), this.inLen()];
+    const owner = this.ownerOf(w.tick, cur);
+    const meta = this.lineageSnaps().find((x) => x.tick === w.tick && x.snap.actN === cur[0] && x.snap.inN === cur[1]) ?? null;
+    let snap = meta?.snap;
+    if (!snap) {
+      snap = w.captureState();
+      snap.actN = cur[0];
+      snap.inN = cur[1];
+    }
+    return { tick: w.tick, cur, owner: owner.id, meta, snap, nx: w.species.peekNextId };
+  }
+
+  /** Начало опыта — сотворение мира (корневой снимок). */
+  expRoot(): ExpStart | null {
+    const R = this.branches.find((b) => b.parent === null);
+    const s = R?.snaps.find((x) => x.kind === 'root');
+    if (!R || !s) return null;
+    return { tick: s.tick, cur: [0, 0], owner: R.id, meta: s, snap: s.snap, nx: R.nxFork };
+  }
+
+  /** Мир, посчитанный в воркере от начала опыта, — новая ветка (не активная). */
+  adopt(st: ExpStart, r: Adopted): Branch | null {
+    if (this.disabled) return null;
+    if (this.branches.length >= TM.MAX_BRANCHES) {
+      this.onToast('Слишком много веток — удалите ненужные во вкладке ⏳');
+      return null;
+    }
+    const owner = this.branches.find((x) => x.id === st.owner);
+    if (!owner) return null;
+    let meta = st.meta && this.branches.some((x) => x.snaps.includes(st.meta!)) ? st.meta : null;
+    if (!meta) {
+      meta = { id: ++this.seq, branch: owner.id, tick: st.tick, kind: 'pre', snap: st.snap, forks: new Set() };
+      this.insertSnap(owner, meta);
+      st.meta = meta;
+    } else if (meta.kind === 'auto' || meta.kind === 'event') meta.kind = 'pre';
+    const b = this.newBranch(owner.id, st.tick, st.cur[0], st.cur[1], st.nx, r.intervention);
+    b.exact = true;
+    b.forkSnap = meta.id;
+    meta.forks.add(b.id);
+    b.name = r.name;
+    b.icon = r.icon;
+    b.actions = r.acts.slice(0, r.applied);
+    const rest = r.acts.slice(r.applied);
+    b.scheduled = rest.length ? rest : null;
+    const L = r.input;
+    for (let j = 0; j < r.inApplied; j++) b.input.push(L.t[j], L.dx[j], L.dy[j], L.run[j] === 1);
+    if (r.inApplied < L.n) {
+      b.scheduledIn = new InputLog();
+      for (let j = r.inApplied; j < L.n; j++) b.scheduledIn.push(L.t[j], L.dx[j], L.dy[j], L.run[j] === 1);
+    }
+    for (const [id, name, hue] of r.names) if (!b.names.has(id)) b.names.set(id, { name, hue });
+    let prev: SeriesRow | null = null;
+    for (const x of this.lineageRows(owner)) if (x.t <= st.tick) prev = x;
+    b.gPrev = prev ? [...prev.g] : [0, 0, 0, 0];
+    for (const row of r.rows) {
+      b.rows.push(row);
+      this.guildMarks(b, row, true);
+    }
+    for (const m of r.marks) this.addMark(b, m);
+    b.head = { id: ++this.seq, branch: b.id, tick: r.head.tick, kind: 'head', snap: r.head, forks: new Set() };
+    b.headTick = r.head.tick;
+    this.thin();
+    return b;
+  }
+
   // ---------------- память ----------------
 
   /** Оценка памяти: уникальные снимки + архив графиков + ряды + записи. */
@@ -740,6 +974,7 @@ export class Timeline {
   deleteBranch(id: number): boolean {
     const b = this.branches.find((x) => x.id === id);
     if (!b || b === this.active || b.parent === null || this.branches.some((x) => x.parent === id)) return false;
+    if (this.follow === id) this.follow = null;
     for (const x of this.branches) for (const s of x.snaps) s.forks.delete(id);
     for (const s of b.snaps) this.drop(s, 'delete');
     this.releaseHead(b);
@@ -896,8 +1131,7 @@ export class Timeline {
       }
       this.guildMarks(b, row);
     }
-    const n = trailing(w.events, T);
-    for (let i = w.events.length - n; i < w.events.length; i++) this.addMark(b, eventMark(w.events[i]));
+    for (const m of stepMarks(w)) this.addMark(b, m);
     b.headTick = T;
     if (T % this.snapEvery === 0) {
       this.insertSnap(b, this.capture(w, 'auto'));
@@ -911,7 +1145,7 @@ export class Timeline {
   }
 
   /** Гильдия исчезла (не чаще раза в 1000 тактов) или вернулась — отметки только шкалы, не летописи мира. */
-  private guildMarks(b: Branch, row: SeriesRow): void {
+  private guildMarks(b: Branch, row: SeriesRow, silent = false): void {
     for (let g = 0; g < 4; g++) {
       const prev = b.gPrev[g], now = row.g[g], G = GUILD[g];
       if (prev > 0 && now === 0 && row.t - b.gMark[g] >= 1000) {
@@ -919,7 +1153,7 @@ export class Timeline {
         b.gGone[g] = true;
         const text = `${G.icon} На острове не осталось ${G.gen}`;
         this.addMark(b, { t: row.t, text, kind: 'guild', icon: G.icon, major: true });
-        this.onToast(text);
+        if (!silent) this.onToast(text);
       } else if (prev === 0 && now > 0 && b.gGone[g]) {
         b.gGone[g] = false;
         this.addMark(b, { t: row.t, text: `${G.icon} ${G.back}`, kind: 'guild', icon: G.icon, major: false });

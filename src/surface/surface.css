@@ -178,7 +178,7 @@
   display: flex; gap: 6px; padding: 4px 6px; box-sizing: border-box;
 }
 .s-timeline[hidden], .s-tlopen[hidden], .s-visit[hidden], .tm-menu[hidden], .s-toast[hidden], .tl-tip[hidden], .tl-more[hidden] { display: none; }
-.tl-btns { display: grid; grid-template-columns: repeat(2, 30px); grid-auto-rows: 25px; gap: 4px; flex: none; align-content: center; }
+.tl-btns { display: grid; grid-template-columns: repeat(3, 30px); grid-auto-rows: 25px; gap: 4px; flex: none; align-content: center; }
 .tl-btns button { padding: 0; font-size: 14px; display: grid; place-items: center; }
 .tl-btns .tl-narrow { display: none; }
 .tl-canvas { flex: 1; min-width: 0; height: 100%; cursor: ew-resize; touch-action: none; display: block; }
@@ -290,3 +290,45 @@
 /* семь вкладок: переносятся во вторую строку, а не уезжают за край */
 .s-tabs { flex-wrap: wrap; row-gap: 2px; }
 .s-tabs button { flex: 1 1 auto; padding: 6px 5px; }
+
+/* ⏪ опыты: плёнка жизни и эффект бабочки (мир на паузе) */
+.s-tmmodal { position: absolute; inset: 0; z-index: 5; background: rgba(0,0,0,0.5); display: grid; place-items: center; padding: 12px; box-sizing: border-box; overflow-y: auto; }
+.s-tmmodal[hidden] { display: none; }
+.s-stage:has(.s-tmmodal:not([hidden])) .s-fact { z-index: 6; }
+.s-stage:has(.s-tmmodal:not([hidden])) .s-toast { z-index: 7; }
+.tm-card { width: min(460px, 100%); max-height: calc(100% - 8px); overflow-y: auto; box-sizing: border-box; display: flex; flex-direction: column; gap: 8px;
+  background: rgba(16,19,24,0.98); border: 1px solid #39404a; border-radius: 12px; padding: 12px 14px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
+.tm-card.wide { width: min(780px, 100%); }
+.tm-card .row { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.tm-card p { margin: 0; line-height: 1.45; }
+.tm-card a { cursor: pointer; color: #9ecbff; }
+.tm-card h4 { margin: 4px 0 0; font-size: 14px; }
+.tm-card button.act { border-color: #5a6b3a; color: var(--accent); }
+.tm-opt { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 13px; }
+.tm-opt > span { min-width: 130px; color: var(--muted); }
+.tm-opt button { font-size: 12.5px; padding: 3px 10px; }
+.tm-opt button.active { border-color: #e8c547; color: #f3dc8a; }
+.tm-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(165px, 1fr)); gap: 8px; }
+.tm-world { background: #15181c; border-radius: 8px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; border: 1px solid transparent; }
+.tm-world.yours { border-color: #4a5566; }
+.tm-world button { font-size: 12px; padding: 3px 8px; align-self: flex-start; }
+.tm-wc { width: 100%; height: 44px; display: block; background: #0f1114; border-radius: 6px; }
+.tm-king { display: flex; align-items: center; gap: 6px; }
+.tm-pt { width: 38px; height: 38px; flex: none; border-radius: 6px; }
+.tm-verdict { font-size: 13px; color: #f3dc8a; }
+.fly-maps { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.fly-maps canvas { width: 100%; aspect-ratio: 8 / 5; display: block; border-radius: 6px; background: #0f1114; }
+.fly-chart { width: 100%; height: 60px; display: block; background: #121417; border-radius: 8px; }
+.p-fact .extra { color: #f3dc8a; }
+.tm-follow { display: flex; gap: 6px; align-items: baseline; margin: 2px 0 6px; }
+.tm-countrow { display: inline-flex; gap: 2px; align-items: center; }
+.tm-countrow input { width: 64px; font-size: 12px; padding: 2px 4px; }
+.tm-cnt { font-size: 11.5px; padding: 1px 7px; }
+@media (max-width: 600px) {
+  .s-tmmodal { padding: 8px; place-items: start center; }
+  .tm-card { max-height: none; padding: 10px; }
+  .tm-grid { grid-template-columns: 1fr 1fr; gap: 6px; }
+  .tm-opt > span { min-width: 0; flex-basis: 100%; }
+  .fly-maps { grid-template-columns: 1fr; }
+}
+.tm-follow input { width: auto; flex: none; margin: 0; }
