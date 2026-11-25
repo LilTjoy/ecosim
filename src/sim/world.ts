@@ -200,6 +200,11 @@ export interface Settings {
 
 export const DAY = 150;
 export const YEAR = DAY * 40;
+/**
+ * °C на единицу температуры модели — как в инспекторе клетки (TEMP_C страницы) в умеренном поясе 0,2…0,5:
+ * (15 − 5) / 0,3 ≈ 33. Сдвиг климата 0,05 ≈ +2 °C.
+ */
+export const CLIMATE_C = 100 / 3;
 const HASH = 80;
 
 /** Стартовые «предки». Каждый живёт в своём климате. */
@@ -1868,8 +1873,8 @@ export class World {
         const cl = this.climate;
         cl.target = a.target;
         cl.rate = Math.abs(a.target - cl.shift) / Math.max(1, a.ramp);
-        const dC = Math.round(a.target * 80);
-        this.log(dC === 0 ? '🌡 Климат возвращается к прежнему' : `🌡 Климат меняется: ${dC > 0 ? '+' : '−'}${Math.abs(dC)} °C за год (растительность пока прежняя)`, 'player');
+        const dC = Math.round(a.target * CLIMATE_C);
+        this.log(dC === 0 ? '🌡 Климат возвращается к прежнему' : `🌡 Климат меняется: ${dC > 0 ? '+' : '−'}${Math.abs(dC)} °C за год — трава и звери это почувствуют`, 'player');
         break;
       }
       case 'undo':

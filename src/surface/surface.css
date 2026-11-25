@@ -13,6 +13,7 @@
 .s-speed { display: flex; background: rgba(10,12,16,0.8); border: 1px solid #2a2f37; border-radius: 10px; overflow: hidden; }
 .s-speed button { border: none; border-radius: 0; background: none; padding: 6px 10px; }
 .s-speed button.active { background: #333a24; color: var(--accent); }
+.s-speed.held button:not(.active) { opacity: 0.55; }
 .s-top select, .s-top > button { background: rgba(10,12,16,0.8); }
 .s-tools { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; }
 .s-tools button, .s-explain { width: 42px; height: 42px; padding: 0; font-size: 19px; display: grid; place-items: center; background: rgba(10,12,16,0.8); border: 1px solid #2a2f37; border-radius: 10px; }
@@ -288,7 +289,7 @@
   .s-stage.tm-past .tm-menu { bottom: 154px; max-height: calc(100% - 174px); }
 }
 /* открыта научная карточка — тост уходит наверх, чтобы не закрыть её кнопки */
-.s-stage:has(.s-fact:not([hidden])) .s-toast { bottom: auto; top: 58px; }
+.s-stage:has(.s-fact:not([hidden])) .s-toast { bottom: auto; top: var(--toast-top, 58px); }
 /* 🔢 сид мира (меню у «↻ Новый мир») и 📌 закладки во вкладке «⏳ Ветки» */
 .s-resetgrp { display: flex; }
 .s-resetgrp .s-reset { border-top-right-radius: 0; border-bottom-right-radius: 0; background: rgba(10,12,16,0.8); }

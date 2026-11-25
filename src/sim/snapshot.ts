@@ -145,7 +145,21 @@ function fnv(h: number, a: ArrayBufferView): number {
   return h;
 }
 
-/** Отпечаток снимка — только по колонкам снимка (не по «сырым» массивам мира). */
+/** Скаляры снимка одной строкой (Map и Set — списком пар, NaN и ±∞ — словами): для отпечатка. */
+const scalText = (scal: Record<string, unknown>): string =>
+  JSON.stringify(scal, (_k, v: unknown) =>
+    v instanceof Map ? ['Map', ...v] : v instanceof Set ? ['Set', ...v] : typeof v === 'number' && !Number.isFinite(v) ? String(v) : v);
+
+/** FNV-1a по символам строки. */
+function fnvText(h: number, t: string): number {
+  for (let i = 0; i < t.length; i++) h = Math.imul(h ^ t.charCodeAt(i), 16777619);
+  return h;
+}
+
+/**
+ * Отпечаток снимка — по колонкам снимка (не по «сырым» массивам мира) и по всем скалярам: засуха, климат,
+ * настройки, опыт, ввод, болезни, реестр видов… — иначе расхождение в них сторож заметил бы лишь через сотни тактов.
+ */
 export function snapDigest(s: WorldSnap): number {
   let h = 0x811c9dc5 | 0;
   h = fnv(h, s.cre.f64);
@@ -159,6 +173,7 @@ export function snapDigest(s: WorldSnap): number {
   h = fnv(h, s.claim.val);
   h = fnv(h, s.claim.t);
   h = fnv(h, new Float64Array([s.tick, (s.scal.rng as number) ?? 0]));
+  h = fnvText(h, scalText(s.scal));
   return h >>> 0;
 }
 
@@ -307,6 +322,9 @@ let genTpl: Genome | null = null;
 export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = []): void {
   if (s.v !== SNAP_VERSION) throw new Error(`Снимок версии ${s.v}, а нужна ${SNAP_VERSION}`);
   if (!sameWorld(w as unknown as World, s)) throw new Error('Снимок из другого мира (seed, условия или размеры): сначала reset');
+  // снимок, чьи буферы уже отданы в пул (recycleSnap), молча оставил бы клетки текущего мира
+  const lost = SNAP_CELLS.filter((k) => !s.cells[k]);
+  if (lost.length) throw new Error(`Снимок такта ${s.tick} без клеток (${lost.join(', ')}): он был выброшен`);
   const W = w as unknown as Record<string, unknown>;
   // 1. скаляры: простые объекты — на месте (ссылки settings/input у страницы и уроков остаются верными)
   const c = structuredClone(s.scal);

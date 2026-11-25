@@ -100,17 +100,27 @@ export function blountRepeated(P: BlountPlan, sum: TapeSummary, rows: SeriesRow[
 
 export interface BlountRow { tick: number; yes: number; of: number }
 
-/** Вывод по строкам «с дня a: k из n» (§10.3). */
-export function blountVerdict(rows: BlountRow[]): string {
+/**
+ * Вывод по строкам «с дня a: k из n» (§10.3). Миров на точку мало (BLOUNT_REPEATS), поэтому «как у Блаунта» —
+ * только если от «ни разу» дошло до «всегда»; у вымирания рост к событию — отчасти просто инерция (вид уже редок).
+ */
+export function blountVerdict(rows: BlountRow[], kind: BlountKind = 'birth'): string {
   const R = rows.filter((r) => r.of > 0);
   if (!R.length) return 'Не с чем сравнить: в начале прогонов этого вида ещё не было.';
   const rate = R.map((r) => r.yes / r.of);
-  const rising = rate.every((x, i) => i === 0 || x >= rate[i - 1]) && rate[rate.length - 1] > rate[0];
-  if (rising) {
-    const j = rate.findIndex((x) => x > rate[0]);
-    return `К дню ${Math.floor(R[j].tick / DAY)} уже случилось то, что сделало событие возможным — историческая случайность, как у Блаунта.`;
+  const first = rate[0], last = rate[rate.length - 1];
+  if (rate.every((x) => x === 1)) return 'Событие повторяется, откуда ни начни: похоже на закономерность.';
+  if (rate.every((x) => x === 0)) return 'Событие не повторилось ни разу: похоже на редкую случайность — ваша история прошла необычным путём.';
+  const up = rate.every((x, i) => i === 0 || x >= rate[i - 1]) && last > first;
+  const down = rate.every((x, i) => i === 0 || x <= rate[i - 1]) && last < first;
+  const few = `при ${BLOUNT_REPEATS} мирах на точку разброс большой — попробуйте ещё раз`;
+  if (up) {
+    const j = rate.findIndex((x) => x > first);
+    const d = Math.floor(R[j].tick / DAY);
+    if (kind !== 'birth') return `Чем ближе к событию, тем чаще оно повторяется: к дню ${d} судьба уже во многом решена. Но отчасти это просто инерция — незадолго до вымирания животных уже мало (у Блаунта «подготовка» была незаметной), а ${few}.`;
+    if (first === 0 && last === 1) return `К дню ${d} уже случилось то, что сделало событие возможным, — историческая обусловленность, как у Блаунта.`;
+    return `Ближе к событию оно повторяется чаще — возможно, к дню ${d} что-то его подготовило, как у Блаунта. Но ${few}.`;
   }
-  if (rate.every((x) => x === 1)) return 'Событие повторяется, откуда ни начни, — оно не зависит от того, откуда начать: это закономерность.';
-  if (rate.every((x) => x === 0)) return 'Событие не повторилось ни разу — оно не зависит от того, откуда начать: похоже на редкую случайность.';
-  return 'Событие не зависит от того, откуда начать (при двух мирах на точку разброс большой — попробуйте ещё раз).';
+  if (down) return `Ближе к событию оно повторяется реже: от пути оно зависит, но не так, как у Блаунта — похоже, ранним мирам просто повезло (${few}).`;
+  return `Событие повторяется то чаще, то реже — явной зависимости от того, откуда начать, не видно (${few}).`;
 }

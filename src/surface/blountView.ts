@@ -2,7 +2,7 @@
 // событию — и смотрим, с какого момента оно начинает повторяться.
 import { DAY } from '../sim/world';
 import type { GeneKey } from '../sim/genome';
-import type { Mark, SeriesRow } from '../sim/timeline';
+import { GUILD, type Mark, type SeriesRow } from '../sim/timeline';
 import type { DoneMsg } from '../sim/tmJob';
 import { blountJobs, blountPlan, blountRepeated, blountVerdict, type BlountPlan, type BlountRow } from '../sim/tmBlount';
 import type { ExpHost } from './tapeView';
@@ -54,7 +54,7 @@ export class BlountView {
   private what(P: BlountPlan): string {
     if (P.kind === 'birth') return `появится ли снова вид, похожий на «${esc(P.name!)}»`;
     if (P.kind === 'extinct') return `вымрет ли снова «${esc(P.name!)}»`;
-    return esc(P.text.replace(/^\S+\s*/, '').replace('На острове не осталось', 'исчезнут ли снова все'));
+    return `исчезнут ли снова все ${GUILD[P.guild]?.name ?? 'звери этой гильдии'}`;
   }
 
   private setup(): void {
@@ -141,7 +141,7 @@ export class BlountView {
       if (P.kind === 'birth') refOk = !!ref.done.summary.watch?.found;
       else refOk = blountRepeated(P, ref.done.summary, ref.rows, Xmean);
     }
-    return { rows, ref: refOk, verdict: blountVerdict(rows) };
+    return { rows, ref: refOk, verdict: blountVerdict(rows, P.kind) };
   }
 
   private render(): void {

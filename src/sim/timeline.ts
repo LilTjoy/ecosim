@@ -5,7 +5,7 @@
 // и снова приложить записанные действия и ввод в те же такты. Ветка — своя запись действий и ввода поверх
 // общего начала (линии предков); снимки прореживаются по возрасту и укладываются в бюджет памяти.
 import { GENE_KEYS, type Genome } from './genome';
-import { DAY, guildOf, type Sample, type Settings, type World, type WorldEvent } from './world';
+import { CLIMATE_C, DAY, guildOf, type Sample, type Settings, type World, type WorldEvent } from './world';
 import { recycleSnap, snapshotProblems, type WorldSnap } from './snapshot';
 
 // ---------------- действия ----------------
@@ -303,7 +303,8 @@ export function actionText(a: Action): string {
 }
 
 /** Имя и значок ветки по вмешательству (§3.7). `without` — ветка «что если бы этого не было». */
-export function branchName(a: Action | null, tick: number, without = false, past = true, spName?: string): { name: string; icon: string } {
+/** prev — настройки мира до вмешательства (имя «Мутации ×2/×½» — по отношению к ним). */
+export function branchName(a: Action | null, tick: number, without = false, past = true, spName?: string, prev?: Settings): { name: string; icon: string } {
   const d = Math.floor(tick / DAY);
   if (!a) return { name: `Что если: я вмешался (день ${d})`, icon: '🌿' };
   if (without) {
@@ -322,8 +323,15 @@ export function branchName(a: Action | null, tick: number, without = false, past
     case 'epidemic': return { name: past ? `Что если: эпидемия, день ${d}` : `Эпидемия, день ${d}`, icon: '🦠' };
     case 'rescue': return { name: `Спасти «${spName ?? '?'}»`, icon: '🧬' };
     case 'remove': return { name: `Без «${spName ?? '?'}»`, icon: '🚫' };
-    case 'settings': return { name: a.s.mutationRate >= 0.1 ? 'Мутации ×2' : 'Мутации ×½', icon: '🧪' };
-    case 'climate': return a.target >= 0 ? { name: `Потепление +${Math.round(a.target * 80)} °C`, icon: '🌡' } : { name: `Похолодание −${Math.round(-a.target * 80)} °C`, icon: '❄️' };
+    case 'settings': {
+      const r = a.s.mutationRate / (prev?.mutationRate || 0.08);
+      const x = r >= 1 ? `×${Math.round(r * 10) / 10}`.replace('.', ',') : Math.abs(r - 0.5) < 0.01 ? '×½' : `×${Math.round(r * 100) / 100}`.replace('.', ',');
+      return { name: `Мутации ${x}`, icon: '🧪' };
+    }
+    case 'climate': {
+      const c = Math.round(a.target * CLIMATE_C);
+      return c > 0 ? { name: `Потепление +${c} °C`, icon: '🌡' } : c < 0 ? { name: `Похолодание −${-c} °C`, icon: '❄️' } : { name: 'Климат как был', icon: '🌡' };
+    }
     case 'possess': return { name: `Что если: я вмешался (день ${d})`, icon: '👑' };
     case 'grass': return { name: `Что если: я вмешался (день ${d})`, icon: '🌱' };
     default: return { name: `Что если: я вмешался (день ${d})`, icon: '🌿' };
@@ -386,9 +394,15 @@ export class Timeline {
   private bseq = 0;
   private base = { dx: 0, dy: 0, run: false, set: '', exp: '' };
   private full = false;
+  /** Последнее действие — мазок травы, в который ещё можно дописывать точки этого такта (после снимка — нельзя). */
+  private grassOpen: Action | null = null;
 
   get replaying(): boolean {
     return this.play !== null;
+  }
+  /** Что за пересчёт идёт: точный переход (seek) или «Как было» до настоящего (asWas). */
+  get replayKind(): Play['kind'] | null {
+    return this.play?.kind ?? null;
   }
 
   /** Урок: заблокировать шкалу (из прошлого — сначала в настоящее). */
@@ -560,9 +574,11 @@ export class Timeline {
       if (apply) this.trapped(() => w.apply(a));
       return;
     }
+    if (!isDiff(a)) this.flush(w);
     const b = this.active;
     const last = b.actions.at(-1);
-    if (a.k === 'grass' && last && last.k === 'grass' && last.t === a.t && last.r === a.r) {
+    // мазок травы того же такта дописывается в прошлое действие, только пока его конец не вошёл в снимок или развилку
+    if (a.k === 'grass' && last && last.k === 'grass' && last.t === a.t && last.r === a.r && this.grassOpen === last) {
       if (apply) this.trapped(() => w.apply(a));
       last.pts.push(...a.pts);
       return;
@@ -573,15 +589,16 @@ export class Timeline {
     if (apply) this.trapped(() => w.apply(a));
     for (const m of actMarks(w, a, idx, k0)) this.addMark(b, m);
     b.actions.push(a);
+    this.grassOpen = a.k === 'grass' ? a : null;
     if (a.k === 'settings') this.base.set = JSON.stringify(w.settings);
     if (a.k === 'experiment') this.base.exp = JSON.stringify(w.experiment);
     if (this.actLen(b) > TM.ACTIONS_CAP) b.exact = false;
   }
 
-  /** Пересчёт (перемотка вперёд по записи) — шаги, пока не кончится бюджет времени кадра. */
-  advance(w: World, budgetMs = TM.RESIM_BUDGET_MS): void {
+  /** Пересчёт (перемотка вперёд по записи) — шаги, пока не кончится бюджет времени кадра (или maxSteps шагов). */
+  advance(w: World, budgetMs = TM.RESIM_BUDGET_MS, maxSteps = Infinity): void {
     const t0 = performance.now();
-    while (this.play) {
+    for (let n = 0; this.play && n < maxSteps; n++) {
       const p = this.play;
       if (w.tick >= p.until) {
         this.arrive(w);
@@ -607,7 +624,10 @@ export class Timeline {
   visit(w: World, s: SnapMeta): void {
     if (this.disabled || this.locked) return;
     this.restores++;
-    if (!this.visiting && !this.play) this.captureHead(w);
+    if (!this.visiting && !this.play) {
+      this.flush(w);
+      this.captureHead(w);
+    }
     this.play = null;
     w.loadState(s.snap, this.lineageHistory(this.active, s.tick));
     this.visiting = { tick: s.tick, snap: s };
@@ -661,6 +681,7 @@ export class Timeline {
       this.onToast('Слишком много веток — удалите ненужные во вкладке ⏳');
       return null;
     }
+    if (!this.visiting && !this.play) this.flush(w);
     this.play = null;
     const T = w.tick;
     const past = !!this.visiting;
@@ -681,7 +702,7 @@ export class Timeline {
     b.forkSnap = s.id;
     s.forks.add(b.id);
     const sp = intervention && (intervention.k === 'rescue' || intervention.k === 'remove') ? w.species.all.get(intervention.sp)?.name : undefined;
-    Object.assign(b, name ?? branchName(intervention, T, false, past, sp));
+    Object.assign(b, name ?? branchName(intervention, T, false, past, sp, w.settings));
     this.active = b;
     this.visiting = null;
     this.resetBase(w);
@@ -738,7 +759,10 @@ export class Timeline {
     this.play = null;
     if (this.follow === t.id) this.follow = null;
     this.restores++;
-    if (!this.visiting) this.captureHead(w);
+    if (!this.visiting) {
+      this.flush(w);
+      this.captureHead(w);
+    }
     const h = t.head;
     w.loadState(h.snap, this.lineageHistory(t, h.tick));
     this.active = t;
@@ -882,6 +906,7 @@ export class Timeline {
     if (this.disabled || b.bg) return null;
     let tick: number, actN: number, inN: number, digest: number;
     if (b === this.active && !this.visiting && !this.play) {
+      this.flush(w);
       (tick = w.tick), (actN = this.actLen(b)), (inN = this.inLen(b)), (digest = this.digestNow(w));
     } else if (b.head) {
       const h = b.head.snap;
@@ -896,10 +921,13 @@ export class Timeline {
 
   /** Начало опыта — мир сейчас (в настоящем или в посещённом прошлом). Снимок в линию не кладётся, пока мир не станет веткой. */
   expStart(w: World): ExpStart {
+    this.flush(w);
+    this.grassOpen = null;
     const cur: [number, number] = this.visiting ? [this.cur[0], this.cur[1]] : [this.actLen(), this.inLen()];
     const owner = this.ownerOf(w.tick, cur);
     const meta = this.lineageSnaps().find((x) => x.tick === w.tick && x.snap.actN === cur[0] && x.snap.inN === cur[1]) ?? null;
-    let snap = meta?.snap;
+    // копия: снимок линии может быть вытеснен (и его буферы отданы в пул), пока опыт идёт или ждёт «Сделать веткой»
+    let snap = meta ? structuredClone(meta.snap) : undefined;
     if (!snap) {
       snap = w.captureState();
       snap.actN = cur[0];
@@ -913,7 +941,7 @@ export class Timeline {
     const R = this.branches.find((b) => b.parent === null);
     const s = R?.snaps.find((x) => x.kind === 'root');
     if (!R || !s) return null;
-    return { tick: s.tick, cur: [0, 0], owner: R.id, meta: s, snap: s.snap, nx: R.nxFork };
+    return { tick: s.tick, cur: [0, 0], owner: R.id, meta: s, snap: structuredClone(s.snap), nx: R.nxFork };
   }
 
   /** Мир, посчитанный в воркере от начала опыта, — новая ветка (не активная). */
@@ -1093,8 +1121,17 @@ export class Timeline {
   }
 
   private resetBase(w: World): void {
+    this.grassOpen = null;
     const i = w.input;
     this.base = { dx: i.dx, dy: i.dy, run: i.run, set: JSON.stringify(w.settings), exp: JSON.stringify(w.experiment) };
+  }
+
+  /**
+   * В настоящем: записать ввод и настройки, изменённые после шага (на паузе), прежде чем мир попадёт в снимок,
+   * развилку или опыт — иначе снимок хранит то, чего нет в записи, и повтор из прошлого разойдётся.
+   */
+  private flush(w: World): void {
+    if (!this.visiting && !this.play && !this.disabled) this.diff(w);
   }
 
   /** Перед шагом: записать изменившийся ввод и настройки. */
@@ -1220,6 +1257,7 @@ export class Timeline {
   }
 
   private capture(w: World, kind: SnapKind, cur?: [number, number], b: Branch = this.active): SnapMeta {
+    this.grassOpen = null;
     const t0 = performance.now();
     const snap = w.captureState();
     const ms = performance.now() - t0;
@@ -1391,6 +1429,7 @@ export class Timeline {
     this.play = null;
     this.restores++;
     if (p.kind === 'asWas') {
+      this.replayInput(w); // ввод такта головы (записанный на паузе) — до сверки, как в самой голове
       const h = this.active.head!;
       const same = this.digestNow(w) === h.snap.digest;
       this.stats.lastReplay = same ? 'same' : 'diverged';

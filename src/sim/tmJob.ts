@@ -298,6 +298,7 @@ export class JobRunner {
       if (++n % 50 === 0) yield;
     }
     C.acts0(); // действия самого такта until — до снимка (как у головы ветки)
+    C.in0(); // и ввод этого такта, записанный на паузе (голова и «сейчас» страницы его уже держат)
     flush();
     const d = m.final ? this.sendSnap(w, m.job, m.run, m.actBase + C.ai, m.inBase + C.ii, true) : this.digest(w);
     this.post({ type: 'done', job: m.job, run: m.run, tick: w.tick, digest: [d], applied: C.ai, inApplied: C.ii, summary: m.summary !== undefined ? this.summary(w, m, m.summary < 0 ? nx0 : m.summary, atStart, byName()) : undefined });
@@ -395,7 +396,10 @@ export class JobRunner {
       }
       if (++n % 25 === 0) yield;
     }
-    for (let i = 0; i < K; i++) C[i].acts0();
+    for (let i = 0; i < K; i++) {
+      C[i].acts0();
+      C[i].in0();
+    }
     if (rows.length || marks.length) this.post({ type: 'progress', job: m.job, run: m.keep, tick: w0.tick, rows, marks, samples: [], names });
     const digest = W.map((w, i) => (i === m.keep ? 0 : this.digest(w)));
     const k = C[m.keep];

@@ -434,6 +434,14 @@ export class TimelineBar {
     const tw = Math.min(300, W - 8);
     this.tip.style.width = `${tw}px`;
     this.tip.style.left = `${Math.max(4, Math.min(W - tw - 4, left - tw / 2))}px`;
+    // в прошлом над шкалой — баннер с «▶ Как было»: подсказка встаёт над ним, а не поверх его кнопок
+    const vis = this.el.parentElement?.querySelector<HTMLElement>('.s-visit');
+    let up = 6;
+    if (vis && !vis.hidden) {
+      const v = vis.getBoundingClientRect(), b = this.el.getBoundingClientRect();
+      if (v.height && v.bottom <= b.top + 2) up = b.top - v.top + 6;
+    }
+    this.tip.style.bottom = `calc(100% + ${Math.round(up)}px)`;
   }
 
   private hideTipSoon(): void {

@@ -23,8 +23,10 @@ export interface ExpHost {
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const day = (t: number) => Math.floor(t / DAY);
-/** «в 3 из 4 мирах» */
-const inN = (n: number, K: number) => `в ${n} из ${K} ${K % 10 === 1 && K % 100 !== 11 ? 'мире' : 'мирах'}`;
+/** «в 3 из 4 миров» (после «из K» — родительный падеж) */
+const inN = (n: number, K: number) => `в ${n} из ${K} ${K % 10 === 1 && K % 100 !== 11 ? 'мира' : 'миров'}`;
+/** Хищников меньше — гильдия почти вымерла (так считают и карточки миров, и итог). */
+const PRED_ALIVE = 5;
 
 /** Короткое описание вида по средним генам (§10.1). */
 export function describe(m: Record<GeneKey, number>): string {
@@ -190,7 +192,7 @@ export class TapeView {
     const pctDone = Math.round((100 * this.runs.reduce((n, r) => n + (r.tick - st.tick), 0)) / Math.max(1, N * this.horizon));
     const cards = this.runs.map((r) => {
       const s = r.sum;
-      const C = s ? (s.g[2] > 0 ? 'есть' : '✝ вымерли') : '…';
+      const C = s ? (s.g[2] >= PRED_ALIVE ? 'есть' : s.g[2] > 0 ? `почти вымерли (${s.g[2]})` : '✝ вымерли') : '…';
       return `<div class="tm-world${r.k === 0 ? ' yours' : ''}" data-k="${r.k}">
         <div class="small"><b>${r.k === 0 ? '🌍 Ваш мир' : `🎲 Мир ${r.k}`}</b> ${r.done ? '' : `<span class="muted tm-pct">${Math.round((100 * (r.tick - st.tick)) / this.horizon)}%</span>`}</div>
         <canvas class="tm-wc"></canvas>
@@ -313,13 +315,13 @@ export class TapeView {
     const [g1, n1] = mode(top);
     lines.push({ text: `Больше всех — ${GUILD[g1].icon} ${GUILD[g1].name}: ${inN(n1, K)}`, n: n1 });
     // 2. хищники есть
-    const pred = S.filter((s) => s.g[2] >= 5).length;
-    lines.push({ text: pred >= K - pred ? `🍖 Хищники выжили ${inN(pred, K)}` : `🍖 Хищники вымерли ${inN(K - pred, K)}`, n: Math.max(pred, K - pred) });
+    const pred = S.filter((s) => s.g[2] >= PRED_ALIVE).length;
+    lines.push({ text: pred >= K - pred ? `🍖 Хищники выжили ${inN(pred, K)}` : `🍖 Хищники вымерли или почти вымерли ${inN(K - pred, K)}`, n: Math.max(pred, K - pred) });
     // 3. тот же царь горы (общий вид — родился до начала)
     const lead = S.map((s, i) => (s.top[0] && s.top[0].id < st.nx ? s.top[0].id : -1 - i));
     const [lid, ln] = mode(lead);
     const lname = S.flatMap((s) => s.top).find((x) => x.id === lid)?.name;
-    lines.push({ text: lid >= 0 && ln > 1 ? `👑 Царь горы тот же — «${esc(lname ?? '?')}»: ${inN(ln, K)}` : '👑 Царь горы везде свой', n: lid >= 0 ? ln : 1 });
+    lines.push({ text: lid >= 0 && ln > 1 ? `👑 Царь горы тот же — «${esc(lname ?? '?')}» (он жил ещё до начала): ${inN(ln, K)}` : '👑 Царь горы везде свой', n: lid >= 0 ? ln : 1 });
     // 4. новые виды
     const fr = S.map((s) => s.fresh);
     const lo = Math.min(...fr), hi = Math.max(...fr);
@@ -328,13 +330,17 @@ export class TapeView {
     // 5. пловцы ≥ 30%
     const sw = S.filter((s) => s.g[3] >= 0.3 * Math.max(1, s.n)).length;
     lines.push({ text: sw >= K - sw ? `🐟 Пловцов не меньше трети ${inN(sw, K)}` : `🐟 Пловцов меньше трети ${inN(K - sw, K)}`, n: Math.max(sw, K - sw) });
+    // строки 2 и 5 сами по себе не меньше K/2, а строка 1 — во многом пирамида питания: «многое повторяется» ещё не
+    // значит «отбор»; а короткий прогон с этого момента во многом наследует настоящее
     const strong = lines.filter((l) => l.n >= 0.75 * K).length >= 4;
+    const inherited = !this.fromRoot && this.horizon <= YEAR;
     const conv = this.converge();
     return `<h4>Что повторилось, а что нет</h4><ul class="tm-sum">${lines.map((l) => `<li>${l.text}</li>`).join('')}${
       conv ? `<li>🔁 Похожие виды возникли независимо ${inN(conv[0], K)}: ${esc(conv[1])} <a data-fact="tm_convergence">?</a></li>` : ''
     }</ul><p class="tm-verdict">${strong
-      ? 'Здесь отбор сильнее случая: многое повторяется (как рост приспособленности во всех 12 колбах Ленски).'
-      : 'Случай решает многое: перемотайте плёнку — получится другой мир (Гулд).'} <a data-fact="tm_lenski">?</a></p>`;
+      ? 'Многое повторяется: мир устойчив — или отбор сильнее случая (как рост приспособленности во всех 12 колбах Ленски).'
+      : 'Случай решает многое: перемотайте плёнку — получится другой мир (Гулд).'} <a data-fact="tm_lenski">?</a></p>${
+      strong && inherited ? '<p class="small muted">Год с этого момента — короткий срок: миры во многом наследуют настоящее (тех же зверей и те же виды). Чтобы проверить отбор, перематывайте с сотворения мира.</p>' : ''}`;
   }
 
   private adopt(r: Run): void {

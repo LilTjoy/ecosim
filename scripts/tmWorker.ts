@@ -313,7 +313,7 @@ export function blountGate({ seed, T, mode, mk }: Ctx): void {
     const ok = refOk && differ && det && errs === 0;
     all &&= ok;
     console.log(`TM G9 ${kind}: ${ok ? 'ok' : 'FAIL'} «${plan.text}» @${plan.t} starts ${plan.starts.map((s) => s.tick).join('/')} → ${plan.until}: ${jobs.length} runs in ${(ms / 1000).toFixed(1)}s ref=${+refOk} differ=${+differ} det=${+det}${errs ? ' errors=' + errs : ''}`);
-    console.log(`  ${table.map((r) => `с ${r.tick}: ${r.of ? `${r.yes} из ${r.of}` : '—'}`).join(' · ')} → ${blountVerdict(table)}`);
+    console.log(`  ${table.map((r) => `с ${r.tick}: ${r.of ? `${r.yes} из ${r.of}` : '—'}`).join(' · ')} → ${blountVerdict(table, plan.kind)}`);
   }
   if (!chosen.length) console.log('TM G9: FAIL — в линии нет подходящих событий');
   console.log(`TM blount: ${all ? 'ok' : 'FAIL'} kinds=${chosen.map(([k]) => k).join(',')}`);

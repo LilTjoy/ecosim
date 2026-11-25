@@ -104,15 +104,15 @@ export class FlyView {
     if (this.half === null && !this.done) return;
     this.shown = true;
     const extra = this.half !== null
-      ? `В этом опыте разница стала видна через ${d1} дн., а полострова разошлось за ${Math.round((this.half - st.tick) / DAY)} дн.`
+      ? `В этом опыте разница стала видна через ${d1} дн., а половина заселённой карты разошлась за ${Math.round((this.half - st.tick) / DAY)} дн.`
       : `В этом опыте разница стала видна через ${d1} дн.`;
     this.host.queueFact('tm_butterfly', true, extra);
   }
 
   private status(): string {
     const f = this.frame;
-    if (!f || f.cells === 0) return 'Миры совпадают — разница меньше пикселя, но она растёт';
-    if (this.half !== null) return `День ${Math.floor(this.half / DAY)}: различается полострова`;
+    if (!f || f.cells === 0) return 'На карте разницы пока не видно — но она растёт';
+    if (this.half !== null) return `День ${Math.floor(this.half / DAY)}: различается половина заселённых клеток`;
     return `День ${Math.floor(this.first! / DAY)}: первые различия — рядом с бабочкой`;
   }
 
@@ -128,7 +128,7 @@ export class FlyView {
       <p class="small">Два одинаковых мира — с теми же «костями». В правом особь #${this.target.id} сдвинута на миллионную долю пикселя. Красное — где миры различаются. <a data-fact="tm_butterfly">?</a></p>
       <div class="fly-maps"><div><div class="small">Без бабочки</div><canvas class="fly-a"></canvas></div><div><div class="small">С бабочкой 🦋</div><canvas class="fly-b"></canvas></div></div>
       <div class="small"><b class="fly-status">${this.status()}</b> · <span class="muted fly-day">${f ? `день ${Math.floor(f.tick / DAY)} (+${Math.floor((f.tick - st.tick) / DAY)})` : ''}</span></div>
-      <div class="small">Сколько острова различается, %</div><canvas class="fly-chart"></canvas>
+      <div class="small">Доля заселённых клеток карты, где миры различаются, %</div><canvas class="fly-chart"></canvas>
       <div class="row"><span class="small muted">${this.done ? (this.done.error ? 'Не удалось досчитать' : `Готово: ${Math.round((this.done.tick - st.tick) / DAY)} дн.`) : 'считаю…'}</span>${btn}</div>
     </div>`;
     this.el.onclick = (e) => {

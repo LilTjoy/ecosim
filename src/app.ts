@@ -21,7 +21,8 @@ const drake = new DrakeView(el('view-drake'));
 const surface = new SurfaceView(el('view-eco'));
 surface.onBack = () => show('planet');
 planet.onDescend = (env, seed) => {
-  surface.setEnv(env, seed);
+  if (!surface.confirmNewWorld()) return; // ветки этого мира пропали бы — игрок передумал
+  surface.setEnv(env, seed, true);
   show('eco');
 };
 

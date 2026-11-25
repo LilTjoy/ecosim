@@ -60,6 +60,23 @@ export interface PairCmp {
   bullets: { text: string; fact?: string }[];
 }
 
+/**
+ * Совпадают ли миры веток до бита: отпечатки снимков (и голов) в самый поздний общий такт после развилки.
+ * null — общего такта нет. Одинаковые численности в рядах этого не доказывают: позиции и кости в рядах не видны.
+ */
+export function sameWorlds(tl: Timeline, A: Branch, B: Branch, td: number): boolean | null {
+  const pts = (b: Branch) => {
+    const m = new Map<number, number>();
+    for (const s of tl.lineageSnaps(b)) if (s.tick > td) m.set(s.tick, s.snap.digest);
+    if (b.head && b.head.tick > td) m.set(b.head.tick, b.head.snap.digest);
+    return m;
+  };
+  const ma = pts(A), mb = pts(B);
+  let best = -1;
+  for (const t of ma.keys()) if (mb.has(t) && t > best) best = t;
+  return best < 0 ? null : ma.get(best) === mb.get(best);
+}
+
 const dec = (x: number) => x.toFixed(1).replace('.', ',');
 const cap = (s: string) => s[0].toUpperCase() + s.slice(1);
 
@@ -93,7 +110,14 @@ export function comparePair(tl: Timeline, A: Branch, B: Branch): PairCmp | null 
     seen++;
     if (q.n === r.n && q.g.every((v, i) => v === r.g[i]) && q.ids.length === r.ids.length && q.ids.every((v, i) => v === r.ids[i] && q.cnt[i] === r.cnt[i])) same++;
   }
-  if (seen >= 6 && same === seen) bullets.push({ text: '🔁 История повторилась в точности: те же кости — то же будущее.', fact: 'tm_seed' });
+  let countsSame = false;
+  if (seen >= 6 && same === seen) {
+    if (sameWorlds(tl, A, B, td)) bullets.push({ text: '🔁 История повторилась в точности: те же кости — то же будущее.', fact: 'tm_seed' });
+    else {
+      countsSame = true;
+      bullets.push({ text: '≈ Численности пока совпадают во всех рядах, но миры уже не те же: разница ещё не дошла до счёта зверей.' });
+    }
+  }
   // 2–3. гильдии
   for (let g = 0; g < 4; g++) {
     const G = GUILD[g];
@@ -123,7 +147,7 @@ export function comparePair(tl: Timeline, A: Branch, B: Branch): PairCmp | null 
   const fresh = (r: SeriesRow) => [...r.ids].filter((id) => id >= nx).length;
   if (nx !== Infinity && tc > td) bullets.push({ text: `🧬 Новых видов после развилки: ${X} — ${fresh(a)}, ${Y} — ${fresh(b)}.` });
   // 7. почти одинаковы
-  if (pct < 5 && !bullets.some((x) => x.fact === 'tm_seed')) bullets.push({ text: '≈ Миры пока почти не различаются — подождите или посмотрите «Эффект бабочки».' });
+  if (pct < 5 && !countsSame && !bullets.some((x) => x.fact === 'tm_seed')) bullets.push({ text: '≈ Миры пока почти не различаются — подождите или посмотрите «Эффект бабочки».' });
   return { A, B, td, nx, tc, pct, leaders, bullets: bullets.slice(0, 4) };
 }
 
