@@ -76,6 +76,8 @@ export interface SpeciesSave {
   all: [number, Species][];
   nextId: number;
   names: [string, number][];
+  /** ♾️ Вес тела в расстоянии (0 — без открытой эволюции). */
+  bodyW?: number;
 }
 
 export class SpeciesRegistry {
@@ -84,6 +86,8 @@ export class SpeciesRegistry {
   private names = new Map<string, number>();
   /** Поток случайных чисел для имён: мир подставляет свой (имя берётся из «костей» того, кто родил вид). */
   rand: Rand = mulberry32(1);
+  /** ♾️ Вес тела в генетическом расстоянии: мир ставит EVO.BODY_W при открытой эволюции, иначе 0. */
+  bodyW = 0;
 
   get peekNextId(): number {
     return this.nextId;
@@ -91,13 +95,14 @@ export class SpeciesRegistry {
 
   /** ЖИВЫЕ ссылки — вызывающий обязан клонировать (одним structuredClone вместе с остальным). */
   save(): SpeciesSave {
-    return { all: [...this.all], nextId: this.nextId, names: [...this.names] };
+    return { all: [...this.all], nextId: this.nextId, names: [...this.names], bodyW: this.bodyW };
   }
 
   load(s: SpeciesSave): void {
     this.all = new Map(s.all);
     this.nextId = s.nextId;
     this.names = new Map(s.names);
+    this.bodyW = s.bodyW ?? 0;
   }
 
   clear(): void {
@@ -147,7 +152,7 @@ export class SpeciesRegistry {
     for (const id of parents) {
       const sp = this.all.get(id);
       if (!sp) continue;
-      const d = distance(g, sp.founder);
+      const d = distance(g, sp.founder, this.bodyW);
       if (d < bestD) {
         bestD = d;
         best = sp;
@@ -158,7 +163,7 @@ export class SpeciesRegistry {
     // а не плодим по виду на каждую особь.
     for (const sp of this.all.values()) {
       if (sp.extinct !== null || sp.parent !== best?.id) continue;
-      if (distance(g, sp.founder) < SPECIES_LIMIT * 0.75) return { species: sp, isNew: false };
+      if (distance(g, sp.founder, this.bodyW) < SPECIES_LIMIT * 0.75) return { species: sp, isNew: false };
     }
     return { species: this.create(g, best?.id ?? null, tick, origin), isNew: true };
   }
@@ -169,7 +174,7 @@ export class SpeciesRegistry {
     let bestD = SPECIES_LIMIT * 0.5;
     for (const sp of this.all.values()) {
       if (sp.extinct !== null) continue;
-      const d = distance(g, sp.founder);
+      const d = distance(g, sp.founder, this.bodyW);
       if (d < bestD) {
         bestD = d;
         best = sp;

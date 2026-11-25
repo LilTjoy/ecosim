@@ -4,10 +4,15 @@
 // --trap=1 — Math.random внутри симуляции бросает исключение (по умолчанию для --tm=*)
 // --tm=det|fly|load|thin — проверки машины времени (снимки, точная перемотка, эффект бабочки, ветки и память),
 //   см. scripts/tmBench.ts и scripts/tmTimeline.ts
+// ♾️ открытая эволюция: --oe=0|1 (= --openEvo), любая ручка EVO из src/sim/modules.ts (--P_DUP=0 --BENTHIC=1 …,
+//   логические — «!== '0'»), --benthic=0|1, --her=cold|dark|lowO2|bottle|young|murky (условия планеты).
+//   Строки OE:/modfreq/… печатаются только при включённой открытой эволюции; без неё вывод прежний (ворота O0,
+//   см. scripts/oe-o0.sh).
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';
 import { BIOMES } from '../src/sim/terrain';
+import * as MM from '../src/sim/modules';
 const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags: Record<string, string> = {};
 for (const a of process.argv.slice(2)) if (a.startsWith('--')) { const [k, v] = a.slice(2).split('='); flags[k] = v ?? '1'; }
@@ -28,7 +33,23 @@ const trapOn = flags.trap !== undefined ? flags.trap !== '0' : !!flags.tm;
 const applyFlags = (w: InstanceType<typeof World>) => {
   const W = w as any;
   for (const k in flags) if (k in w.settings) W.settings[k] = typeof W.settings[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
+  if (flags.oe !== undefined && 'openEvo' in w.settings) W.settings.openEvo = flags.oe !== '0';
 };
+// ручки открытой эволюции (и будущих таблиц: открытия, наследство) — по имени, в том же духе, что SOIL/DIS
+const KNOBS: Record<string, unknown>[] = [MM.EVO as unknown as Record<string, unknown>];
+for (const mod of KNOBS) for (const k in flags) if (k in mod) mod[k] = typeof mod[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
+if (flags.benthic !== undefined) MM.EVO.BENTHIC = flags.benthic !== '0';
+// --her=… — условия планеты (поля, которых мир пока не знает, он просто не читает)
+const HER: Record<string, Record<string, unknown>> = {
+  cold: { heritage: { cold: 0.8 } },
+  dark: { light: 0.4, heritage: { dark: 0.8, light: 0.4 } },
+  lowO2: { o2: 0.12, heritage: { lowO2: 0.8 } },
+  bottle: { heritage: { bottleneck: 0.9, crisis: { id: 'impact10', label: 'Удар астероида', agoMyr: 10, setback: true } } },
+  young: { heritage: { animalAge: 0.05 } },
+  murky: { murk: 0.6 },
+};
+if (flags.her && !HER[flags.her]) throw new Error(`--her=${flags.her}: есть ${Object.keys(HER).join(', ')}`);
+const herEnv = flags.her ? ({ ...WM.EARTH_ENV, light: 1, murk: 0, pressure: 1, magField: true, ...HER[flags.her] } as WM.SurfaceEnv) : undefined;
 /** Новый мир (конструктор вызывает reset() со случайным зерном — ловушку ставим только после него). */
 const mkWorld = () => {
   Math.random = lcg;
@@ -49,11 +70,27 @@ for (const k in flags) {
   if (NC && k === 'clampC') NC.corpse = flags[k].split(',').map(Number);
 }
 if (flags.tm) {
-  runTm(flags.tm, { seed, T, mode, salt, flags, mk: () => { const x = mkWorld(); x.reset(mode, seed, undefined, salt); return x; } });
+  runTm(flags.tm, { seed, T, mode, salt, flags, mk: () => { const x = mkWorld(); x.reset(mode, seed, herEnv, salt); return x; } });
   process.exit();
 }
-w.reset(mode, seed, undefined, salt);
-// время soilPass отдельно (если он есть)
+w.reset(mode, seed, herEnv, salt);
+// ♾️ только при открытой эволюции: счётчики строк журнала, первые такты событий, смерти хищников
+const OE = !!W.oe;
+const oe = { evoLines: 0, bottle: 0, first: {} as Record<string, number>, carnD: 0, poisonD: 0, creSum: 0, msSum: 0, cre0: 0 };
+if (OE) {
+  const log0 = W.log;
+  W.log = function (this: any, text: string, kind: string, ...rest: unknown[]) {
+    if (kind === 'evo') oe.evoLines++;
+    if (/бутылочн/i.test(text)) oe.bottle++;
+    for (const m of ['🧪', '🌱', '🌟', '💨', '🌳', '🪞']) if (text.startsWith(m) && oe.first[m] === undefined) oe.first[m] = this.tick;
+    return log0.call(this, text, kind, ...rest);
+  };
+  const die0 = W.die;
+  W.die = function (this: any, c: any, cause: string, ...rest: unknown[]) {
+    if (c.alive && guildOf(c.g) === 2) { oe.carnD++; if (cause === 'отравился') oe.poisonD++; }
+    return die0.call(this, c, cause, ...rest);
+  };
+}// время soilPass отдельно (если он есть)
 let soilMs = 0;
 const sp0 = W.soilPass;
 if (typeof sp0 === 'function') W.soilPass = function (this: any) { const t = performance.now(); sp0.call(this); soilMs += performance.now() - t; };
@@ -95,6 +132,7 @@ const landN = tLand();
 let budget = 0;
 for (let t = 1; t <= T; t++) {
   w.step();
+  if (OE) oe.creSum += w.creatures.length;
   for (const sp of w.species.all.values()) if (sp.extinct === null && sp.count > 400) budget += sp.count * w.crowding(sp.id);
   if (t % 10 === 0) {
     const cur = new Set<any>(w.corpses);
@@ -169,9 +207,40 @@ for (let t = 1; t <= T; t++) {
       let pd = 0; for (const P of [...act, ...(W.outbreaks ?? [])]) pd += P.deaths;
       extra += ` sick=${W.micro.sick} outbreaks=${W.micro.outbreaksTotal ?? '-'} spills=${(W.nextPath ?? 1) - 1} pathD=${pd} active=${act.length} vir=${act.length ? f2(act.reduce((s: number, p: any) => s + p.virMean, 0) / act.length) : '-'}`;
     }
-    lines.push(`t=${t} n=${w.creatures.length} H${g.herb} O${g.omni} C${g.carn} S${g.swim} | herbSize p10/50/90=${q(herbs, .1)}/${q(herbs, .5)}/${q(herbs, .9)} carnSize=${q(carn, .1)}/${q(carn, .5)}/${q(carn, .9)} | sp=${w.species.living().length}/${w.species.all.size} ms=${ms.toFixed(2)}${sp0 ? ` soilMs=${((soilMs - soil0) / EV).toFixed(3)}` : ''}${extra}`);
+    const msK = OE ? ` msK=${((performance.now() - t0) / Math.max(1, (oe.creSum - oe.cre0) / 1000)).toFixed(3)}` : '';
+    if (OE) { oe.msSum += performance.now() - t0; oe.cre0 = oe.creSum; }
+    lines.push(`t=${t} n=${w.creatures.length} H${g.herb} O${g.omni} C${g.carn} S${g.swim} | herbSize p10/50/90=${q(herbs, .1)}/${q(herbs, .5)}/${q(herbs, .9)} carnSize=${q(carn, .1)}/${q(carn, .5)}/${q(carn, .9)} | sp=${w.species.living().length}/${w.species.all.size} ms=${ms.toFixed(2)}${sp0 ? ` soilMs=${((soilMs - soil0) / EV).toFixed(3)}` : ''}${msK}${extra}`);
     t0 = performance.now(); soil0 = soilMs; gN = gW = gNw = gWw = clSum = clN = rawSum = 0;
   }
+}
+// ♾️ итог открытой эволюции (только при --oe=1)
+let oeRep = '';
+if (OE) {
+  const S = W.evoStats ?? {}, B = W.bestiary;
+  const K = MM.KIND_NAMES.length, NG = 4;
+  // modfreq: % особей (не слотов), у которых накопленный уровень вида ≥ 0.3; в целом и по гильдиям (LIMB — пары ног / 2)
+  const cnt = Array.from({ length: NG + 1 }, () => new Float64Array(K)), gN = new Float64Array(NG + 1);
+  for (const c of w.creatures) {
+    const gi = guildOf(c.g), ph = c.g.ph as Float32Array;
+    gN[gi]++; gN[NG]++;
+    for (let k = 1; k < K; k++) {
+      const v = k === MM.M.LIMB ? ph[MM.P.LEGS] / 2 : ph[k - 1];
+      if (v >= 0.3) { cnt[gi][k]++; cnt[NG][k]++; }
+    }
+  }
+  const pc = (a: number, n: number) => (n ? (100 * a) / n : 0).toFixed(0);
+  const mf = (gi: number) => MM.KIND_NAMES.slice(1).map((nm, j) => `${nm}${pc(cnt[gi][j + 1], gN[gi])}`).join(' ');
+  const ft = (m: string) => oe.first[m] ?? '-';
+  const f = (v: unknown) => (v === undefined ? '-' : String(v));
+  oeRep =
+    `\n OE: found=${f(B?.found?.size ?? B?.found)} origins=${f(B?.origins)} parallel=${f(B?.parallel)} plans=${f(B?.plans?.size ?? B?.plans)} conv=${f(B?.conv?.length ?? B?.conv)} apo=${f(B?.apo)} mim=${f(B?.mim)}` +
+    ` 🧪=${f(B?.beats?.['🧪'])} 🌱=${f(B?.beats?.['🌱'])} 💨=${f(B?.beats?.['💨'])} births=${S.births} dup=${S.dup} neo=${S.neo} new=${S.nu} nextOrigin=${W.nextOrigin} metRef=${f2(W.metRef, 4)} upRef=${f2(W.upRef, 4)}` +
+    `\n OE first: 🧪@${ft('🧪')} 🌱@${ft('🌱')} 🌟@${ft('🌟')} 💨@${ft('💨')} 🌳@${ft('🌳')} 🪞@${ft('🪞')} evoLines=${oe.evoLines} bottleneckLogs=${oe.bottle}` +
+    `\n OE death: poisoned=${S.poisoned} poisonDeaths=${S.poisonDeaths} zaps=${S.zaps} carnDeaths=${oe.carnD} carnPoisoned=${oe.poisonD}` +
+    `\n OE perf: msK=${(oe.msSum / Math.max(1, oe.creSum / 1000)).toFixed(3)} (мс на 1000 особей·такт) heapMB=${(process.memoryUsage().heapUsed / 1048576).toFixed(1)}` +
+    (B?.convDiag ? `\n convdiag: ${B.convDiag}` : '') +
+    `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
+    ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('');
 }
 const rivers = t1.river ? (() => { let r2 = 0, r1 = 0; for (let i = 0; i < t1.river.length; i++) { if (t1.river[i] >= 2) r2++; else if (t1.river[i] === 1) r1++; } return ` rivers: ${t1.rivers?.length} named, river>=2 ${(100 * r2 / landN).toFixed(2)}% land, stream ${(100 * r1 / landN).toFixed(2)}%`; })() : '';
 console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n') +
@@ -179,4 +248,4 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
   (W.outbreaks ? `\n outbreaks: ` + [...W.outbreaks, ...W.pathogens.values()].filter((P: any) => P.announced).slice(-10).map((P: any) => `${P.born}-${P.ended ?? '…'} «${P.name}»@${w.species.all.get(P.host)?.name} cases${P.cases} d${P.deaths} pk${P.peak} v${P.vir0.toFixed(2)}→${P.virMean.toFixed(2)}`).join(' | ') : '') + toolRep +
   (tool ? `\n toolSpecies at end: n=${tool.sp.count} extinct=${tool.sp.extinct}` : '') +
   `\n extinct(guild first hit 0): ${JSON.stringify(extinct)} zeroSamples(of ${T / 500}): ${JSON.stringify(zero)} lastZero: ${JSON.stringify(lastZero)}${rivers}\n top: ` +
-  w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | '));
+  w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | ') + oeRep);

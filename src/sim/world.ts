@@ -2,6 +2,7 @@ import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
 import { clamp, mix32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
+import { ALL_KINDS, EARTH_EXPR, EVO, finish, newEvoStats, ORIGIN, type ExprCtx } from './modules';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
@@ -196,6 +197,8 @@ export interface Settings {
   disease: boolean;
   /** Хищники чаще ловят больных (отложено, пока не используется). */
   healthyHerd: boolean;
+  /** ♾️ Открытая эволюция: модули тела мутируют, удваиваются и изобретаются (применяется при reset). */
+  openEvo: boolean;
 }
 
 export const DAY = 150;
@@ -244,7 +247,7 @@ export class World {
   history: Sample[] = [];
   events: WorldEvent[] = [];
   fx: Fx[] = [];
-  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true, soil: true, disease: true, healthyHerd: false };
+  settings: Settings = { mutationRate: 0.08, grassGrowth: 1, seasons: true, soil: true, disease: true, healthyHerd: false, openEvo: false };
   brainMode: BrainMode = 'rules';
   env: SurfaceEnv = EARTH_ENV;
   drought = 0;
@@ -336,6 +339,15 @@ export class World {
   /** Весеннее цветение: минимум планктона за прошлую зиму и год последней записи. */
   private bloomMin = Infinity;
   private bloomYear = 0;
+  // ---- ♾️ открытая эволюция ----
+  /** Копия settings.openEvo, снятая в reset() (мир не меняет правила на ходу). */
+  oe = false;
+  /** Условия экспрессии тела в этом мире: гравитация, можно ли изобретать, что именно. */
+  expr: ExprCtx = EARTH_EXPR;
+  /** Следующее «новое» происхождение модуля (≥ 100). */
+  nextOrigin = ORIGIN.FRESH;
+  /** Счётчики эволюции тела. */
+  evoStats = newEvoStats();
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -387,6 +399,11 @@ export class World {
     // кэш сезона и ввод прошлого мира не должны попасть в основателей: тот же (seed, salt) — тот же мир
     this.shiftNow = 0;
     Object.assign(this.input, { dx: 0, dy: 0, run: false });
+    this.oe = this.settings.openEvo;
+    this.expr = { gravity: env.gravity, on: this.oe, allowed: ALL_KINDS };
+    this.species.bodyW = this.oe ? EVO.BODY_W : 0;
+    this.nextOrigin = ORIGIN.FRESH;
+    this.evoStats = newEvoStats();
     for (const f of FOUNDERS) {
       // до выхода на сушу живут только морские существа
       const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
@@ -553,7 +570,7 @@ export class World {
   /** Поселить группу одинаковых особей туда, где им комфортно. */
   colonize(base: Partial<Genome>, n: number, x?: number, y?: number): Species {
     const neural = this.brainMode === 'neural';
-    const g0 = genome(base, neural, this.r);
+    const g0 = genome(base, neural, this.r, this.expr);
     let cx = x;
     let cy = y;
     if (cx === undefined || cy === undefined) [cx, cy] = this.findHome(g0);
@@ -561,7 +578,7 @@ export class World {
     // основатели — всегда отдельный вид; пришельцы присоединяются к очень близкому родственнику
     const sp = this.tick === 0 ? this.species.create(g0, null, 0, region) : this.species.match(g0, this.tick, region);
     for (let i = 0; i < n; i++) {
-      const g = mutate(g0, 0.03, this.r);
+      const g = mutate(g0, 0.03, this.r, this.expr); // основатели никогда не «изобретают»
       if (neural) g.brain = genome({}, true, this.r).brain;
       g.hue = g0.hue + (this.r() - 0.5) * 10;
       const [px, py] = this.nearbyLand(cx, cy, 120, g);
@@ -765,7 +782,7 @@ export class World {
   }
 
   compatible(a: Creature, b: Creature): boolean {
-    return a.sp === b.sp && distance(a.g, b.g) < MATE_LIMIT;
+    return a.sp === b.sp && distance(a.g, b.g, this.species.bodyW) < MATE_LIMIT;
   }
 
   /**
@@ -1637,9 +1654,16 @@ export class World {
   }
 
   private breed(a: Creature, b: Creature | null): Creature {
-    let g = b ? crossover(a.g, b.g, this.r) : { ...a.g };
-    g = mutate(g, this.settings.mutationRate, this.r);
-    g.size = Math.min(g.size, this.maxSize);
+    const innov = this.oe
+      ? { boost: 1 /* ☢️ мутаген (×EVO.MUT_BOOST) — позже */, newOrigin: () => this.nextOrigin++, stats: this.evoStats }
+      : undefined;
+    let g = b ? crossover(a.g, b.g, this.r, this.expr) : { ...a.g };
+    g = mutate(g, this.settings.mutationRate, this.r, this.expr, innov);
+    if (g.size > this.maxSize) {
+      g.size = this.maxSize;
+      if (this.oe) finish(g, this.expr); // полёт зависит от размера
+    }
+    if (this.oe) this.evoStats.births++;
     const angle = this.r() * Math.PI * 2;
     let x = a.x + Math.cos(angle) * a.g.size * 2;
     let y = a.y + Math.sin(angle) * a.g.size * 2;
@@ -1891,7 +1915,7 @@ export class World {
     if (m.length) {
       for (let i = 0; i < n; i++) {
         const c = m[(this.r() * m.length) | 0];
-        const g = mutate(c.g, 0.02, this.r);
+        const g = mutate(c.g, 0.02, this.r, this.expr);
         const [px, py] = this.nearbyLand(c.x, c.y, 40, g);
         const ch = this.spawn(spId, g, px, py);
         ch.generation = c.generation;
@@ -1902,10 +1926,10 @@ export class World {
       }
       ({ x, y } = m[0]);
     } else {
-      const g0 = genome({ ...sp.mean, hue: sp.founder.hue, pattern: sp.founder.pattern }, this.brainMode === 'neural', this.r);
+      const g0 = genome({ ...sp.mean, hue: sp.founder.hue, pattern: sp.founder.pattern, body: sp.founder.body }, this.brainMode === 'neural', this.r, this.expr);
       [x, y] = this.findHome(g0);
       for (let i = 0; i < n; i++) {
-        const g = mutate(g0, 0.02, this.r);
+        const g = mutate(g0, 0.02, this.r, this.expr);
         const [px, py] = this.nearbyLand(x, y, 120, g);
         this.spawn(spId, g, px, py);
       }

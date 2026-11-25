@@ -4,6 +4,7 @@
 // и поля особи (открытая эволюция) добавляются в списки ниже, а старые снимки получают значения по умолчанию.
 import type { Ancestor, BrainMode, Corpse, Creature, CreatureInit, Sample, State, SurfaceEnv, World } from './world';
 import { GENE_KEYS, genome, type Genome } from './genome';
+import { finish, kitFor, NSLOT, type Body } from './modules';
 import { WEIGHTS } from './brain';
 import { mix32 } from '../lib/random';
 import type { SpeciesSave } from './species';
@@ -27,7 +28,11 @@ export interface WorldSnap {
   claim: { idx: Int32Array; val: Float32Array; t: Int32Array };
   cre: { n: number; f64cols: string[]; i32cols: string[]; f64: Float64Array; i32: Int32Array; cause: (string | null)[]; ghost: 0 | 1 };
   /** Геномы (cols по имени); brain — номер мозга или −1; brains — веса подряд по blen. */
-  gen: { cols: string[]; f64: Float64Array; brain: Int32Array; brains: Float32Array; blen: number };
+  gen: {
+    cols: string[]; f64: Float64Array; brain: Int32Array; brains: Float32Array; blen: number;
+    /** ♾️ Тела: номер тела генома (общие тела — один раз); km/lvl — по NSLOT подряд; shape — по телу. Нет в старых снимках → набор. */
+    body?: Int32Array; bkm?: Int32Array; blvl?: Float32Array; bshape?: Float64Array;
+  };
   /** 7 чисел на предка: id, mother|NaN, sp, номер генома, generation, born, died|NaN — в порядке Map. */
   anc: Float64Array;
   /** CORPSE_F.length чисел на тушу (sick → 0/1). */
@@ -58,7 +63,8 @@ export const CORPSE_F = ['x', 'y', 'energy', 'size', 'hue', 'age', 'idx', 'e0', 
 export const _corpseCheck: [Exclude<keyof Corpse, (typeof CORPSE_F)[number]>] extends [never] ? true : never = true;
 
 export const GEN_F = [...GENE_KEYS, 'hue', 'pattern'] as const satisfies readonly (keyof Genome)[];
-export const _genCheck: [Exclude<keyof Genome, (typeof GEN_F)[number] | 'brain'>] extends [never] ? true : never = true;
+// body — отдельными массивами gen.body/bkm/blvl/bshape; ph не хранится (finish(g, world.expr) при загрузке)
+export const _genCheck: [Exclude<keyof Genome, (typeof GEN_F)[number] | 'brain' | 'body' | 'ph'>] extends [never] ? true : never = true;
 
 export const ANC_F = 7;
 export const _ancCheck: [Exclude<keyof Ancestor, 'id' | 'mother' | 'sp' | 'g' | 'generation' | 'born' | 'died'>] extends [never] ? true : never = true;
@@ -67,7 +73,7 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked', 'climate'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
+  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
 export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
@@ -133,6 +139,7 @@ export function snapBuffers(s: WorldSnap): ArrayBuffer[] {
   const add = (a: ArrayBufferView) => out.add(a.buffer as ArrayBuffer);
   for (const k in s.cells) add(s.cells[k]);
   for (const a of [s.claim.idx, s.claim.val, s.claim.t, s.cre.f64, s.cre.i32, s.gen.f64, s.gen.brain, s.gen.brains, s.anc, s.corpses]) add(a);
+  for (const a of [s.gen.body, s.gen.bkm, s.gen.blvl, s.gen.bshape]) if (a) add(a);
   return [...out];
 }
 
@@ -166,6 +173,7 @@ export function snapDigest(s: WorldSnap): number {
   h = fnv(h, s.cre.i32);
   h = fnv(h, s.gen.f64);
   h = fnv(h, s.gen.brains);
+  for (const a of [s.gen.body, s.gen.bkm, s.gen.blvl, s.gen.bshape]) if (a) h = fnv(h, a);
   h = fnv(h, s.anc);
   h = fnv(h, s.corpses);
   for (const k of SNAP_CELLS) if (s.cells[k]) h = fnv(h, s.cells[k]);
@@ -246,12 +254,23 @@ export function captureWorld(w: WorldInternals): WorldSnap {
   }
   const NG = GEN_F.length;
   const gf = new Float64Array(genomes.length * NG);
+  const gbody = new Int32Array(genomes.length);
+  const bodyIdx = new Map<Body, number>();
+  const bodyList: Body[] = [];
   const gb = new Int32Array(genomes.length);
   const bIdx = new Map<Float32Array, number>();
   const brainList: Float32Array[] = [];
   for (let i = 0; i < genomes.length; i++) {
     const g = genomes[i] as unknown as Record<string, number>;
     for (let k = 0; k < NG; k++) gf[i * NG + k] = g[GEN_F[k]];
+    const body = genomes[i].body;
+    let bi = bodyIdx.get(body);
+    if (bi === undefined) {
+      bi = bodyList.length;
+      bodyIdx.set(body, bi);
+      bodyList.push(body);
+    }
+    gbody[i] = bi;
     const b = genomes[i].brain;
     if (b) {
       let j = bIdx.get(b);
@@ -262,6 +281,13 @@ export function captureWorld(w: WorldInternals): WorldSnap {
       }
       gb[i] = j;
     } else gb[i] = -1;
+  }
+  const nb = bodyList.length;
+  const bkm = new Int32Array(nb * NSLOT), blvl = new Float32Array(nb * NSLOT), bshape = new Float64Array(nb);
+  for (let j = 0; j < nb; j++) {
+    bkm.set(bodyList[j].km, j * NSLOT);
+    blvl.set(bodyList[j].lvl, j * NSLOT);
+    bshape[j] = bodyList[j].shape;
   }
   const blen = brainList.length ? brainList[0].length : WEIGHTS;
   const brains = new Float32Array(brainList.length * blen);
@@ -299,12 +325,12 @@ export function captureWorld(w: WorldInternals): WorldSnap {
     v: SNAP_VERSION, tick: w.tick, seed: w.seed, salt: w.salt, mode: w.brainMode, env: w.env, dims: [w.width, w.height, w.cell],
     scal, cells, claim,
     cre: { n, f64cols: [...CRE_F64], i32cols: [...CRE_I32], f64, i32, cause, ghost },
-    gen: { cols: [...GEN_F], f64: gf, brain: gb, brains, blen },
+    gen: { cols: [...GEN_F], f64: gf, brain: gb, brains, blen, body: gbody, bkm, blvl, bshape },
     anc, corpses, ext, actN: 0, inN: 0, digest: 0, bytes: 0,
   };
   s.digest = snapDigest(s);
   let bytes = 30_000 + 600 * w.species.all.size;
-  for (const a of [f64, i32, gf, gb, brains, anc, corpses, claim.idx, claim.val, claim.t]) bytes += a.byteLength;
+  for (const a of [f64, i32, gf, gb, brains, anc, corpses, claim.idx, claim.val, claim.t, gbody, bkm, blvl, bshape]) bytes += a.byteLength;
   for (const k in cells) bytes += cells[k].byteLength;
   s.bytes = bytes;
   return s;
@@ -353,10 +379,19 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
   const gcols = s.gen.cols, NG = gcols.length, ng = s.gen.brain.length, blen = s.gen.blen;
   const brainObj = new Map<number, Float32Array>();
   const genomes: Genome[] = new Array(ng);
+  const { body: gbody, bkm, blvl, bshape } = s.gen;
+  const bodyObj = new Map<number, Body>();
   for (let i = 0; i < ng; i++) {
     const g: Genome = { ...tpl };
     const G = g as unknown as Record<string, number>;
     for (let k = 0; k < NG; k++) G[gcols[k]] = s.gen.f64[i * NG + k];
+    if (gbody && bkm && blvl && bshape) {
+      const j = gbody[i];
+      let b = bodyObj.get(j);
+      if (!b) bodyObj.set(j, (b = { km: bkm.slice(j * NSLOT, (j + 1) * NSLOT), lvl: blvl.slice(j * NSLOT, (j + 1) * NSLOT), shape: bshape[j] }));
+      g.body = b;
+    } else g.body = kitFor(g); // снимок до открытой эволюции
+    finish(g, w.expr);
     const b = s.gen.brain[i];
     if (b >= 0) {
       let arr = brainObj.get(b);
