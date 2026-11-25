@@ -512,6 +512,24 @@ export class Timeline {
     if (!this.disabled) this.insertSnap(b, this.capture(w, 'root', [0, 0]));
   }
 
+  /**
+   * Мир открыт из закладки (уже восстановлен в w): новая история с корнем в этой точке. Ряды и крупные отметки
+   * закладки — её предыстория на шкале (номера действий у отметок снимаются: тех действий в новой линии нет).
+   */
+  fromBook(w: World, name: string, rows: SeriesRow[], marks: Mark[], names: [number, string, number][]): void {
+    this.reset(w);
+    const b = this.active;
+    b.name = `Закладка «${name}»`;
+    b.icon = '📌';
+    b.rows = rows.filter((r) => r.t <= w.tick);
+    b.marks = marks.filter((m) => m.t <= w.tick).map((m) => {
+      const { act: _act, ...rest } = m;
+      return rest;
+    });
+    for (const [id, nm, hue] of names) b.names.set(id, { name: nm, hue });
+    for (let g = 0; g < 4; g++) b.gGone[g] = b.gPrev[g] === 0 && b.rows.some((r) => r.g[g] > 0);
+  }
+
   /** Один шаг мира (единственное, что вызывают страница и стенд). В прошлом без пересчёта мир стоит. */
   step(w: World): void {
     if (this.play) {

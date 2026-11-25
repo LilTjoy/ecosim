@@ -6,7 +6,7 @@ import { SNAP_CELLS, SNAP_DEV, uncoveredKeys, type WorldSnap } from '../src/sim/
 import { mulberry32 } from '../src/lib/random';
 import { cpus, loadavg } from 'node:os';
 import { cmp, load, thin } from './tmTimeline';
-import { bgGate } from './tmWorker';
+import { bgGate, blountGate } from './tmWorker';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
 
@@ -68,7 +68,8 @@ export function runTm(kind: string, ctx: Ctx): void {
   if (kind === 'thin') return thin(ctx);
   if (kind === 'cmp') return cmp(ctx);
   if (kind === 'bg') return bgGate(ctx);
-  throw new Error(`--tm=${kind}: есть det, fly, load, thin, cmp и bg`);
+  if (kind === 'blount') return blountGate(ctx);
+  throw new Error(`--tm=${kind}: есть det, fly, load, thin, cmp, bg и blount`);
 }
 
 // ---------------- det ----------------

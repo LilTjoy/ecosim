@@ -28,8 +28,12 @@ export interface RunJob {
   marks: boolean;
   /** Прислать снимок в конце (голова ветки). */
   final: boolean;
-  /** Плёнка жизни: итог с видами, родившимися после nx. */
+  /** Плёнка жизни: итог с видами, родившимися после nx (−1 — после начала прогона). */
   summary?: number;
+  /** «🔬 Повторится ли?»: новые виды в итоге — с пиком не меньше bornPeak (по умолчанию 20). */
+  bornPeak?: number;
+  /** «🔬 Повторится ли?»: следить за видом с этим именем (был ли он в начале, жив ли в конце, его средние гены). */
+  watch?: string;
 }
 
 /** Эффект бабочки: несколько миров шаг в шаг от одного снимка; у каждого свои первые действия (pre). */
@@ -98,17 +102,19 @@ export interface TapeSummary {
   top: SpInfo[];
   /** Виды, родившиеся после начала, с пиком ≥ 20 (для конвергенции). */
   born: SpInfo[];
+  /** Вид, за которым следили (RunJob.watch): был ли в начале прогона и что с ним в конце. */
+  watch?: { atStart: boolean; found: boolean; count: number; extinct: boolean; mean: Record<GeneKey, number> | null };
 }
 
 const spInfo = (s: Species): SpInfo => ({
   id: s.id, name: s.name, hue: s.hue, pattern: s.founder.pattern, count: s.count, peak: s.peak, alive: s.extinct === null, mean: { ...s.mean },
 });
 
-export function tapeSummary(w: World, nx: number): TapeSummary {
+export function tapeSummary(w: World, nx: number, bornPeak = 20): TapeSummary {
   const g = [0, 0, 0, 0];
   for (const c of w.creatures) g[guildOf(c.g)]++;
   const live = w.species.living();
-  const born = [...w.species.all.values()].filter((s) => s.id >= nx && s.peak >= 20).sort((a, b) => b.peak - a.peak).slice(0, 30);
+  const born = [...w.species.all.values()].filter((s) => s.id >= nx && s.peak >= bornPeak).sort((a, b) => b.peak - a.peak).slice(0, 30);
   return {
     tick: w.tick, n: w.creatures.length, g, live: live.length, fresh: live.filter((s) => s.id >= nx).length,
     top: live.slice(0, 3).map(spInfo), born: born.map(spInfo),
@@ -248,6 +254,9 @@ export class JobRunner {
     let rows: SeriesRow[] = [], marks: Mark[] = [], samples: Sample[] = [], names: [number, string, number][] = [];
     const seen = new Set<number>();
     const C = new Cursor(w, m.acts, m.input, m.marks ? marks : null, m.actBase);
+    const nx0 = w.species.peekNextId;
+    const byName = () => (m.watch === undefined ? undefined : [...w.species.all.values()].find((s) => s.name === m.watch));
+    const atStart = !!byName();
     const flush = () => {
       this.post({ type: 'progress', job: m.job, run: m.run, tick: w.tick, rows, marks, samples, names });
       rows = [];
@@ -291,7 +300,13 @@ export class JobRunner {
     C.acts0(); // действия самого такта until — до снимка (как у головы ветки)
     flush();
     const d = m.final ? this.sendSnap(w, m.job, m.run, m.actBase + C.ai, m.inBase + C.ii, true) : this.digest(w);
-    this.post({ type: 'done', job: m.job, run: m.run, tick: w.tick, digest: [d], applied: C.ai, inApplied: C.ii, summary: m.summary !== undefined ? tapeSummary(w, m.summary) : undefined });
+    this.post({ type: 'done', job: m.job, run: m.run, tick: w.tick, digest: [d], applied: C.ai, inApplied: C.ii, summary: m.summary !== undefined ? this.summary(w, m, m.summary < 0 ? nx0 : m.summary, atStart, byName()) : undefined });
+  }
+
+  private summary(w: World, m: RunJob, nx: number, atStart: boolean, X: Species | undefined): TapeSummary {
+    const s = tapeSummary(w, nx, m.bornPeak);
+    if (m.watch !== undefined) s.watch = { atStart, found: !!X, count: X?.count ?? 0, extinct: !X || X.extinct !== null || X.count === 0, mean: X ? { ...X.mean } : null };
+    return s;
   }
 
   private *multi(m: MultiJob): Generator<void> {

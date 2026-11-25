@@ -12,6 +12,7 @@ import { Timeline, TM, inputArrays, type Action, type Branch, type ExpStart, typ
 import { JobRunner, type DoneMsg, type FrameMsg, type FromWorker, type ProgressMsg, type ToWorker } from '../src/sim/tmJob';
 import { recycleSnap } from '../src/sim/snapshot';
 import { mulberry32 } from '../src/lib/random';
+import { blountJobs, blountKind, blountPlan, blountRepeated, blountVerdict, type BlountKind, type BlountRow } from '../src/sim/tmBlount';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
 
@@ -252,3 +253,69 @@ export function bgGate({ seed, T, mode, mk, flags }: Ctx): void {
   if (!all) process.exitCode = 1;
 }
 
+
+// ---------------- «🔬 Повторится ли?» (Блаунт, этап 9) ----------------
+//  a) точный повтор с последней точки старта («ваша история») снова приводит к событию;
+//  b) миры с новыми костями — другие (digest), а тот же опыт с тем же зерном — до бита тот же (детерминизм);
+//  c) таблица «с дня a: k из 2» и вывод — для нового вида, вымирания и исчезновения гильдии (что нашлось в линии).
+export function blountGate({ seed, T, mode, mk }: Ctx): void {
+  const P = inproc(mk);
+  const w = mk();
+  const tl = new Timeline();
+  tl.trap = true;
+  tl.reset(w);
+  const R = mulberry32(seed * 977 + 3);
+  const meteors = new Set([Math.round(T * 0.35), Math.round(T * 0.6), Math.round(T * 0.62)]);
+  let t0 = now();
+  while (w.tick < T) {
+    if (meteors.has(w.tick)) tl.record(w, { k: 'meteor', x: 300 + R() * 2600, y: 300 + R() * 1400, t: w.tick });
+    tl.step(w);
+  }
+  console.log(`seed ${seed} ${mode} tm=blount T=${T} ${((now() - t0) / T).toFixed(2)} ms/tick marks=${tl.lineageMarks().length}`);
+  const marks = tl.lineageMarks().filter((m) => m.t >= 3000 && m.t <= T - 1300);
+  const kinds: Record<string, number[]> = {};
+  for (const m of tl.lineageMarks()) {
+    const k = blountKind(m);
+    if (k) (kinds[k] ??= []).push(m.t);
+  }
+  console.log(`  события для опыта: ${Object.entries(kinds).map(([k, ts]) => `${k} @${ts.join(',')}`).join(' · ') || 'нет'}`);
+  const pick = (k: BlountKind) => [...marks].reverse().find((m) => blountKind(m) === k && blountPlan(tl, m));
+  const chosen = (['birth', 'extinct', 'guild'] as BlountKind[]).map((k) => [k, pick(k)] as const).filter(([, m]) => m);
+  let all = chosen.length > 0;
+  for (const [kind, m] of chosen) {
+    const plan = blountPlan(tl, m!)!;
+    t0 = now();
+    const jobs = blountJobs(tl, plan, seed);
+    const res = jobs.map((j) => {
+      const out = P.run({ ...j.job, job: P.job() } as ToWorker);
+      const done = out.find((x): x is DoneMsg => x.type === 'done')!;
+      const rows = out.filter((x): x is ProgressMsg => x.type === 'progress').flatMap((x) => x.rows);
+      return { j, done, rows };
+    });
+    const ms = now() - t0;
+    const ref = res.find((r) => !r.j.reseed)!;
+    const Xmean = plan.kind === 'birth' ? ref.done.summary?.watch?.mean ?? null : null;
+    const refOk = plan.kind === 'birth' ? !!ref.done.summary?.watch?.found : blountRepeated(plan, ref.done.summary!, ref.rows, Xmean) === true;
+    const table: BlountRow[] = plan.starts.map((s) => ({ tick: s.tick, yes: 0, of: 0 }));
+    for (const r of res) {
+      if (!r.j.reseed) continue;
+      const rep = blountRepeated(plan, r.done.summary!, r.rows, Xmean);
+      if (rep === null) continue;
+      table[r.j.start].of++;
+      if (rep) table[r.j.start].yes++;
+    }
+    const last = res.filter((r) => r.j.start === plan.starts.length - 1);
+    const differ = last.filter((r) => r.j.reseed).every((r) => r.done.digest[0] !== ref.done.digest[0]);
+    // тот же опыт с тем же зерном — те же миры
+    const again = P.run({ ...res[0].j.job, job: P.job() } as ToWorker).find((x): x is DoneMsg => x.type === 'done')!;
+    const det = again.digest[0] === res[0].done.digest[0];
+    const errs = res.filter((r) => r.done.error).length;
+    const ok = refOk && differ && det && errs === 0;
+    all &&= ok;
+    console.log(`TM G9 ${kind}: ${ok ? 'ok' : 'FAIL'} «${plan.text}» @${plan.t} starts ${plan.starts.map((s) => s.tick).join('/')} → ${plan.until}: ${jobs.length} runs in ${(ms / 1000).toFixed(1)}s ref=${+refOk} differ=${+differ} det=${+det}${errs ? ' errors=' + errs : ''}`);
+    console.log(`  ${table.map((r) => `с ${r.tick}: ${r.of ? `${r.yes} из ${r.of}` : '—'}`).join(' · ')} → ${blountVerdict(table)}`);
+  }
+  if (!chosen.length) console.log('TM G9: FAIL — в линии нет подходящих событий');
+  console.log(`TM blount: ${all ? 'ok' : 'FAIL'} kinds=${chosen.map(([k]) => k).join(',')}`);
+  if (!all) process.exitCode = 1;
+}

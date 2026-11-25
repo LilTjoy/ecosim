@@ -6,13 +6,15 @@ import type { Pathogen } from '../sim/microbes';
 import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { DAY, DIS, EARTH_ENV, YEAR, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
-import { SNAP_DEV } from '../sim/snapshot';
-import { Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch } from '../sim/timeline';
+import { SNAP_DEV, SNAP_VERSION, recycleSnap, sameWorld } from '../sim/snapshot';
+import { Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch, type Mark } from '../sim/timeline';
 import { TimelineBar } from './timelineBar';
 import { TmPanel } from './tmPanel';
 import { TmRunner, type BgKind } from './tmRunner';
 import { TapeView, type ExpHost } from './tapeView';
 import { FlyView } from './flyView';
+import { BlountView } from './blountView';
+import { BOOK_CAP, BookShelf, BookStore, makeBook, type Bookmark } from './bookmarks';
 import { Camera } from './camera';
 import { SURFACE_FACTS } from './facts';
 import { MICROBE_GUILDS } from './microbes';
@@ -114,7 +116,7 @@ const TEMPLATE = /* html */ `
         <option value="rules">⚙️ Правила</option>
         <option value="neural">🧠 Нейросети</option>
       </select>
-      <button class="s-reset">↻ Новый мир</button>
+      <span class="s-resetgrp"><button class="s-reset">↻ Новый мир</button><button class="s-seedbtn" title="Сид мира · 🔢 Мир по сиду…">▾</button></span>
       <button class="s-back" hidden>↩ К планете</button>
       <button class="s-earth" hidden title="Мир урока или справочника — вернуться к обычной Земле">🌍 Обычная Земля</button>
     </div>
@@ -128,6 +130,7 @@ const TEMPLATE = /* html */ `
       <button data-act="lens" title="Микроскоп: невидимая жизнь (M)">🔬</button>
       <label class="s-explain" title="Научные карточки"><input type="checkbox" checked>💡</label>
     </div>
+    <div class="s-seedmenu" hidden></div>
     <div class="s-spawn" hidden></div>
     <div class="s-lenslegend" hidden></div>
     <canvas class="s-mini" title="Миникарта: нажмите, чтобы перейти"></canvas>
@@ -232,6 +235,7 @@ export class SurfaceView {
   runner: TmRunner;
   private tape!: TapeView;
   private fly!: FlyView;
+  private blountView!: BlountView;
   /** Открыто окно опыта (плёнка, бабочка): мир на паузе. */
   private expOpen = false;
   /** Дополнительная строка карточки (например, сроки в опыте с бабочкой). */
@@ -244,6 +248,10 @@ export class SurfaceView {
   private forkNext = false;
   private toastTimer: ReturnType<typeof setTimeout> | undefined;
   private bannerSig = '';
+  /** 📌 Закладки (IndexedDB) и их список во вкладке «⏳ Ветки». */
+  private books = new BookStore();
+  private shelf!: BookShelf;
+  private bookBusy = false;
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -281,6 +289,7 @@ export class SurfaceView {
     const modal = $(root, '.s-tmmodal');
     this.tape = new TapeView(modal, exp);
     this.fly = new FlyView(modal, exp);
+    this.blountView = new BlountView(modal, exp);
     this.bar = new TimelineBar($(root, '.s-timeline'), $(root, '.s-tlopen'), {
       tl: this.tl,
       world: this.world,
@@ -293,6 +302,9 @@ export class SurfaceView {
       rescue: (name, tEnd) => this.rescueUi(name, tEnd),
       openTape: () => this.openTape(),
       openFly: () => this.openFly(),
+      bookmark: () => void this.saveBook(),
+      canBlount: (m) => this.runner.ok && this.blountView.can(m),
+      blount: (m) => this.openBlount(m),
       bgText: () => this.bgText(),
       setOpen: (on) => this.setBarOpen(on),
       toast: (t) => this.toast(t),
@@ -313,6 +325,15 @@ export class SurfaceView {
         return this.tl.deleteBranch(id);
       },
     });
+    const shelfEl = document.createElement('div');
+    shelfEl.className = 'tm-shelf';
+    $(root, '.s-tab[data-tab=time]').append(shelfEl);
+    this.shelf = new BookShelf(shelfEl, {
+      store: this.books,
+      save: () => void this.saveBook(),
+      open: (id) => void this.openBook(id),
+      toast: (t) => this.toast(t),
+    });
     if (DEV) Object.assign(window, { __surface: this }); // проверки машины времени из браузера (только dev-сборка)
     this.bindUi();
     this.bindInput();
@@ -331,11 +352,14 @@ export class SurfaceView {
     if (env.o2 < 0.1) this.queueFact('o2decay'); // как в мире: гниение медленнее только ниже 10%
   }
 
-  private afterReset(): void {
+  private afterReset(book?: Bookmark): void {
     this.runner.reset();
     if (this.tape.open) this.tape.close();
     if (this.fly.open) this.fly.close();
-    this.tl.reset(this.world);
+    if (this.blountView.open) this.blountView.close();
+    if (book) this.tl.fromBook(this.world, book.name, book.rows, book.marks, book.names);
+    else this.tl.reset(this.world);
+    this.closeSeedMenu();
     this.seenRestores = this.tl.restores;
     this.wasPast = false;
     this.forkNext = false;
@@ -396,6 +420,16 @@ export class SurfaceView {
       this.world.reset(this.world.brainMode, undefined, this.world.env);
       this.afterReset();
     };
+    $(r, '.s-seedbtn').onclick = () => (($(r, '.s-seedmenu').hidden) ? this.openSeedMenu() : this.closeSeedMenu());
+    $(r, '.s-seedmenu').addEventListener('click', (e) => this.seedClick(e));
+    document.addEventListener('pointerdown', (e) => {
+      const t = e.target as HTMLElement;
+      if (!t.closest?.('.s-seedmenu, .s-seedbtn')) this.closeSeedMenu();
+    });
+    $(r, '.s-seedmenu').addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') this.seedGo();
+      if (e.key === 'Escape') this.closeSeedMenu();
+    });
     $(r, '.s-back').onclick = () => this.onBack?.();
     $(r, '.s-earth').onclick = () => {
       this.setEnv(EARTH_ENV);
@@ -466,6 +500,7 @@ export class SurfaceView {
         r.querySelectorAll('.s-tabs [data-tab]').forEach((x) => x.classList.toggle('active', x === b));
         r.querySelectorAll<HTMLElement>('.s-tab').forEach((t) => (t.hidden = t.dataset.tab !== this.tab));
         this.renderPanel();
+        if (this.tab === 'time') void this.shelf.refresh();
       };
     });
     const geneSel = $<HTMLSelectElement>(r, '.s-gene');
@@ -688,6 +723,7 @@ export class SurfaceView {
         return;
       }
       if (e.code === 'Escape') {
+        this.closeSeedMenu();
         this.select(null);
         this.focus(null);
         this.closeMenu();
@@ -700,6 +736,11 @@ export class SurfaceView {
       // ⏪ [ ] — по снимкам (не в this.keys: иначе applyKeys обнулит ввод вашего существа)
       if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
         if (!e.repeat) this.stepSnap(e.code === 'BracketLeft' ? -1 : 1);
+        return;
+      }
+      // 📌 B — закладка (тоже не в this.keys)
+      if (e.code === 'KeyB' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        if (!e.repeat) void this.saveBook();
         return;
       }
       this.keys.add(e.code);
@@ -1898,9 +1939,149 @@ export class SurfaceView {
     this.bar.draw();
   }
 
+  // ---------------- 🔢 сид мира и 📌 закладки ----------------
+
+  private seedText(): string {
+    const w = this.world;
+    return `${w.seed}${w.salt ? '-' + w.salt : ''}`;
+  }
+
+  private openSeedMenu(): void {
+    const el = $(this.root, '.s-seedmenu');
+    el.innerHTML = `<div class="sd-row">сид мира <b class="sd-val">${this.seedText()}</b><button data-sd="copy" title="Скопировать сид">📋</button><a data-sd="fact" title="Что такое сид">?</a></div>
+      <button data-sd="new">↻ Новый мир <em>случайный сид</em></button>
+      <button data-sd="same">🔁 Этот же мир с начала <em>тот же сид — та же история</em></button>
+      <button data-sd="form">🔢 Мир по сиду…</button>
+      <div class="sd-form" hidden><input class="sd-in" placeholder="например 42 или 42-7" inputmode="numeric" maxlength="23" aria-label="Сид мира"><button data-sd="go">Создать</button></div>
+      <div class="sd-err small" hidden></div>`;
+    const st = $(this.root, '.s-stage').getBoundingClientRect(), bt = $(this.root, '.s-seedbtn').getBoundingClientRect();
+    el.style.top = `${Math.round(bt.bottom - st.top + 6)}px`;
+    el.hidden = false;
+  }
+
+  private closeSeedMenu(): void {
+    const el = this.root.querySelector<HTMLElement>('.s-seedmenu');
+    if (el) el.hidden = true;
+  }
+
+  private seedClick(e: Event): void {
+    const b = (e.target as HTMLElement).closest('[data-sd]') as HTMLElement | null;
+    if (!b) return;
+    const k = b.dataset.sd;
+    const el = $(this.root, '.s-seedmenu');
+    if (k === 'copy') {
+      const t = this.seedText();
+      navigator.clipboard?.writeText(t).then(() => this.toast(`📋 Сид ${t} скопирован`), () => this.toast(`Сид мира: ${t}`));
+    } else if (k === 'fact') this.showFact('tm_seed');
+    else if (k === 'new') {
+      this.closeSeedMenu();
+      $(this.root, '.s-reset').click();
+    } else if (k === 'same') this.newBySeed(this.world.seed, this.world.salt);
+    else if (k === 'form') {
+      $(el, '.sd-form').hidden = false;
+      $<HTMLInputElement>(el, '.sd-in').focus();
+    } else if (k === 'go') this.seedGo();
+  }
+
+  /** «42» или «42-7» (сид-соль). */
+  private seedGo(): void {
+    const el = $(this.root, '.s-seedmenu');
+    const inp = el.querySelector<HTMLInputElement>('.sd-in');
+    if (!inp || $(el, '.sd-form').hidden) return;
+    const m = /^\s*(\d{1,10})\s*(?:[-–—]\s*(\d{1,10}))?\s*$/.exec(inp.value);
+    const seed = m ? Number(m[1]) : NaN, salt = m?.[2] ? Number(m[2]) : 0;
+    const err = $(el, '.sd-err');
+    if (!m || seed > 0x7fffffff || salt > 0x7fffffff) {
+      err.textContent = 'Сид — целое число от 0 до 2147483647, можно с солью через дефис: 42-7';
+      err.hidden = false;
+      return;
+    }
+    this.newBySeed(seed, salt);
+  }
+
+  private newBySeed(seed: number, salt: number): void {
+    if (!this.confirmReset()) return;
+    this.world.reset(this.world.brainMode, seed, this.world.env, salt);
+    this.afterReset();
+    this.toast(`🔢 Мир по сиду ${this.seedText()}`);
+  }
+
+  /** 📌 Закладка: мир сейчас (в настоящем или в посещённом прошлом) — в IndexedDB. */
+  private async saveBook(): Promise<void> {
+    const tl = this.tl;
+    if (tl.disabled) return this.toast('Машина времени выключена — закладку не сохранить');
+    if (tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    if (tl.replaying) return this.toast('Подождите — идёт перемотка');
+    if (this.bookBusy) return;
+    this.bookBusy = true;
+    // мир — в момент нажатия (дальше страница ждёт базу, а мир идёт)
+    const book = makeBook(tl, this.world, this.renderer.miniBase);
+    try {
+      const list = await this.books.list();
+      if (list.length >= BOOK_CAP) {
+        const old = list[list.length - 1];
+        if (!confirm(`Закладок уже ${BOOK_CAP}. Удалить самую старую («${old.name}»)?`)) return;
+        await this.books.remove(old.id);
+      }
+      const id = await this.books.put(book);
+      this.toast(`📌 Закладка сохранена: ${book.name}`, [
+        { label: '✏️ Переименовать', run: () => this.renameBook(id) },
+        { label: '📚 Все закладки', run: () => this.openTab('time') },
+      ]);
+      if (this.tab === 'time') void this.shelf.refresh();
+    } catch {
+      this.toast('Закладки недоступны в этом режиме браузера');
+    } finally {
+      recycleSnap(book.snap);
+      this.bookBusy = false;
+    }
+  }
+
+  private renameBook(id: number): void {
+    this.openTab('time');
+    const go = () => this.root.querySelector<HTMLElement>(`.tm-shelf [data-bk=ren][data-id="${id}"]`)?.click();
+    void this.shelf.refresh().then(go);
+  }
+
+  /** Открыть закладку: тот же мир (или перестроить рельеф), снимок, новая история с корнем здесь. */
+  private async openBook(id: number): Promise<void> {
+    const tl = this.tl;
+    if (tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    let b: Bookmark | null;
+    try {
+      b = await this.books.get(id);
+    } catch {
+      return this.toast('Закладки недоступны в этом режиме браузера');
+    }
+    if (!b) return this.toast('Закладка не найдена');
+    if (b.v !== SNAP_VERSION) return this.toast('Эта закладка из старой версии игры — открыть её нельзя');
+    if (!this.confirmReset()) return;
+    const w = this.world;
+    const env = JSON.stringify(b.env) === JSON.stringify(EARTH_ENV) ? EARTH_ENV : b.env;
+    const rebuilt = !sameWorld(w, b.snap) || w.brainMode !== b.mode;
+    if (rebuilt) w.reset(b.mode, b.seed, env, b.salt);
+    try {
+      w.loadState(b.snap, b.history);
+    } catch (e) {
+      console.warn(e);
+      w.reset(w.brainMode, undefined, w.env);
+      this.afterReset();
+      return this.toast('Не удалось открыть закладку — начат новый мир');
+    }
+    this.afterReset(b);
+    $<HTMLSelectElement>(this.root, '.s-mode').value = w.brainMode;
+    $(this.root, '.s-back').hidden = true;
+    $(this.root, '.s-earth').hidden = env === EARTH_ENV;
+    this.renderHud();
+    this.renderPanel();
+    this.bar.draw();
+    const other = b.ua !== navigator.userAgent;
+    this.toast(`📌 Открыта закладка «${b.name}» · день ${Math.floor(b.tick / DAY)}${rebuilt && env !== EARTH_ENV ? ` · ${env.name}` : ''}${other ? '. В другом браузере история может пойти чуть иначе' : ''}`);
+  }
+
   /** Новый мир сотрёт ветки — спросить, если их больше одной. */
   private confirmReset(): boolean {
-    return this.tl.branches.length <= 1 || confirm('Начать новый мир? Ветки и снимки этого мира пропадут.');
+    return this.tl.branches.length <= 1 || confirm('Начать новый мир? Ветки и снимки этого мира пропадут (закладки останутся).');
   }
 
   private afterAction(): void {
@@ -2097,7 +2278,19 @@ export class SurfaceView {
     if (this.tl.replaying || this.tl.disabled) return;
     this.closeMenu();
     if (this.fly.open) this.fly.close();
+    if (this.blountView.open) this.blountView.close();
     this.tape.show();
+  }
+
+  /** «🔬 Повторится ли?» для отметки линии (Блаунт). */
+  private openBlount(m: Mark): void {
+    if (this.tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    if (!this.runner.ok) return this.toast('Этому опыту нужен фоновый расчёт — в этом браузере его нет');
+    if (this.tl.replaying || this.tl.disabled) return;
+    this.closeMenu();
+    if (this.tape.open) this.tape.close();
+    if (this.fly.open) this.fly.close();
+    if (!this.blountView.show(m)) this.toast('Для этого события нет снимков раньше него');
   }
 
   private openFly(): void {
@@ -2111,6 +2304,7 @@ export class SurfaceView {
       return;
     }
     if (this.tape.open) this.tape.close();
+    if (this.blountView.open) this.blountView.close();
     this.fly.show(this.selected?.alive ? this.selected.id : null);
   }
 

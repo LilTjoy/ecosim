@@ -178,7 +178,7 @@
   display: flex; gap: 6px; padding: 4px 6px; box-sizing: border-box;
 }
 .s-timeline[hidden], .s-tlopen[hidden], .s-visit[hidden], .tm-menu[hidden], .s-toast[hidden], .tl-tip[hidden], .tl-more[hidden] { display: none; }
-.tl-btns { display: grid; grid-template-columns: repeat(3, 30px); grid-auto-rows: 25px; gap: 4px; flex: none; align-content: center; }
+.tl-btns { display: grid; grid-template-columns: repeat(4, 30px); grid-auto-rows: 25px; gap: 4px; flex: none; align-content: center; }
 .tl-btns button { padding: 0; font-size: 14px; display: grid; place-items: center; }
 .tl-btns .tl-narrow { display: none; }
 .tl-canvas { flex: 1; min-width: 0; height: 100%; cursor: ew-resize; touch-action: none; display: block; }
@@ -194,6 +194,8 @@
 .tl-tipbtns { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .tl-tipbtns button { font-size: 11.5px; padding: 3px 8px; }
 .tl-more { left: 6px; display: flex; flex-direction: column; gap: 4px; }
+/* подсказка и меню ⋯ — поверх баннера прошлого (он выше шкалы по z-index) */
+.s-timeline:has(.tl-tip:not([hidden])), .s-timeline:has(.tl-more:not([hidden])) { z-index: 4; }
 .tl-more button { text-align: left; font-size: 13px; }
 .s-tlopen { position: absolute; left: 12px; bottom: 12px; width: 42px; height: 42px; padding: 0; font-size: 18px; background: rgba(10,12,16,0.8); border: 1px solid #2a2f37; border-radius: 10px; z-index: 1; }
 .s-stage.tm-on .s-inspect, .s-stage.tm-on .s-player { bottom: 86px; max-height: calc(100% - 214px); }
@@ -287,6 +289,36 @@
 }
 /* открыта научная карточка — тост уходит наверх, чтобы не закрыть её кнопки */
 .s-stage:has(.s-fact:not([hidden])) .s-toast { bottom: auto; top: 58px; }
+/* 🔢 сид мира (меню у «↻ Новый мир») и 📌 закладки во вкладке «⏳ Ветки» */
+.s-resetgrp { display: flex; }
+.s-resetgrp .s-reset { border-top-right-radius: 0; border-bottom-right-radius: 0; background: rgba(10,12,16,0.8); }
+.s-seedbtn { border-top-left-radius: 0; border-bottom-left-radius: 0; border-left: none; padding: 4px 7px; background: rgba(10,12,16,0.8); }
+.s-seedmenu { position: absolute; top: 52px; right: 12px; width: 290px; z-index: 4; display: flex; flex-direction: column; gap: 4px; box-sizing: border-box;
+  background: rgba(16,19,24,0.97); border: 1px solid #39404a; border-radius: 12px; padding: 10px; box-shadow: 0 10px 40px rgba(0,0,0,0.6); }
+.s-seedmenu[hidden], .sd-form[hidden], .sd-err[hidden] { display: none; }
+.s-seedmenu > button { text-align: left; font-size: 13px; padding: 5px 8px; }
+.s-seedmenu em { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+.sd-row { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.sd-row b { color: var(--accent); font-variant-numeric: tabular-nums; user-select: all; }
+.sd-row button { padding: 1px 6px; }
+.sd-row a { cursor: pointer; color: #9ecbff; margin-left: auto; }
+.sd-form { display: flex; gap: 4px; }
+.sd-form input { flex: 1; min-width: 0; }
+.sd-err { color: #ffb3a8; }
+.tm-shelf { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.tm-books { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.tm-books li { display: flex; gap: 8px; background: #15181c; border-radius: 8px; padding: 6px; align-items: flex-start; }
+.tm-books img, .tm-bkimg { width: 80px; height: 50px; border-radius: 4px; flex: none; background: #0b0d10; object-fit: cover; }
+.tm-bkinfo { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; font-size: 13px; }
+.tm-bkinfo b { overflow-wrap: anywhere; }
+.tm-bkren { display: flex; gap: 4px; }
+.tm-bkren input { flex: 1; min-width: 0; }
+@media (max-width: 600px) { .s-seedmenu { left: 8px; right: 8px; width: auto; } }
+.bl-table { display: flex; flex-direction: column; gap: 4px; }
+.bl-row { display: grid; grid-template-columns: 96px 52px 1fr; align-items: center; gap: 8px; font-size: 13px; }
+.bl-row em { grid-column: 2 / 4; font-style: normal; font-size: 12px; }
+.bl-bar { display: block; height: 8px; background: #22272e; border-radius: 4px; overflow: hidden; }
+.bl-bar i { display: block; height: 100%; background: var(--accent); }
 /* семь вкладок: переносятся во вторую строку, а не уезжают за край */
 .s-tabs { flex-wrap: wrap; row-gap: 2px; }
 .s-tabs button { flex: 1 1 auto; padding: 6px 5px; }

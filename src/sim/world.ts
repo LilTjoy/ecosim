@@ -379,6 +379,9 @@ export class World {
     this.playerStats = { generation: 0, possessed: 0, deaths: 0 };
     this.crowdRisk.clear();
     this.deaths.clear();
+    // кэш сезона и ввод прошлого мира не должны попасть в основателей: тот же (seed, salt) — тот же мир
+    this.shiftNow = 0;
+    Object.assign(this.input, { dx: 0, dy: 0, run: false });
     for (const f of FOUNDERS) {
       // до выхода на сушу живут только морские существа
       const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };

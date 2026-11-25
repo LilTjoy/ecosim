@@ -22,6 +22,11 @@ export interface BarHost {
   /** 🎲 Плёнка жизни и 🦋 Эффект бабочки. */
   openTape(): void;
   openFly(): void;
+  /** 📌 Закладка (B). */
+  bookmark(): void;
+  /** «🔬 Повторится ли?» для отметки (false — опыт для неё невозможен). */
+  canBlount(m: Mark): boolean;
+  blount(m: Mark): void;
   /** Что считается в фоне (подпись в углу шкалы). */
   bgText(): string;
 }
@@ -53,6 +58,8 @@ export class TimelineBar {
   private tipPinned = false;
   private tipTimer: ReturnType<typeof setTimeout> | undefined;
   private tipKey = '';
+  /** Отметка подсказки, для которой можно поставить опыт «🔬 Повторится ли?». */
+  private tipMark: Mark | null = null;
 
   constructor(private el: HTMLElement, private opener: HTMLElement, private host: BarHost) {
     el.innerHTML = `<div class="tl-btns">
@@ -61,6 +68,7 @@ export class TimelineBar {
         <button data-tl="menu" title="Что если… — вмешаться и пустить историю по новой ветке">🌿</button>
         <button data-tl="tape" class="tl-wide" title="Плёнка жизни: перемотать и запустить снова">🎲</button>
         <button data-tl="fly" class="tl-wide" title="Эффект бабочки">🦋</button>
+        <button data-tl="book" class="tl-wide" title="Закладка (B): сохранить мир — переживёт перезагрузку">📌</button>
         <button data-tl="range" class="tl-wide" title="Вся история / последние 2 года">↔</button>
         <button data-tl="more" class="tl-narrow" title="Ещё">⋯</button>
       </div>
@@ -71,6 +79,7 @@ export class TimelineBar {
         <button data-tl="next">⏩ Вперёд</button>
         <button data-tl="tape">🎲 Плёнка жизни</button>
         <button data-tl="fly">🦋 Эффект бабочки</button>
+        <button data-tl="book">📌 Закладка</button>
         <button data-tl="range">↔ Вся история / 2 года</button>
         <button data-tl="hide">▾ Свернуть шкалу</button>
       </div>`;
@@ -91,6 +100,7 @@ export class TimelineBar {
       else if (k === 'menu') this.host.openMenu();
       else if (k === 'tape') this.host.openTape();
       else if (k === 'fly') this.host.openFly();
+      else if (k === 'book') this.host.bookmark();
       else if (k === 'range') {
         this.recent = !this.recent;
         this.draw();
@@ -410,6 +420,12 @@ export class TimelineBar {
         const end = tl.lineageMarks(tl.active).find((x) => x.kind === 'extinct' && x.t >= m.t && x.text.includes(`«${nm}»`));
         if (end) btns.push(`<button data-tip="rescue" data-t="${end.t}" data-n="${esc(nm)}">🧬 Спасти «${esc(nm)}»</button>`);
       }
+      // 🔬 для главной отметки группы или для первой подходящей (новый вид, вымирание, исчезновение гильдии)
+      this.tipMark = [m, ...list].find((x) => this.host.canBlount(x)) ?? null;
+      if (this.tipMark) {
+        const nm2 = this.tipMark === m ? null : nameIn(this.tipMark.text);
+        btns.push(`<button data-tip="blount" title="Перезапустить историю из разных точек до события: повторится ли оно?">🔬 Повторится ли?${nm2 ? ` («${esc(nm2)}»)` : ''}</button>`);
+      }
     }
     this.tip.innerHTML = lines.join('') + (btns.length ? `<div class="tl-tipbtns">${btns.join('')}</div>` : '');
     this.tip.hidden = false;
@@ -443,5 +459,6 @@ export class TimelineBar {
     else if (k === 'near') this.host.seek(Math.max(0, t - 30));
     else if (k === 'meddle') this.host.intervene(Math.max(0, t - 30));
     else if (k === 'rescue') this.host.rescue(b.dataset.n!, t);
+    else if (k === 'blount' && this.tipMark) this.host.blount(this.tipMark);
   }
 }
