@@ -600,7 +600,7 @@ function discoveries(w: World, B: BestiaryState, tick: number): void {
 // ---------------- 7.3 планы строения ----------------
 
 /** Подпись плана из средних вида: органы ≥ 0.4, класс ног, пловец, класс питания. */
-function planSig(ph: ArrayLike<number>, swim: number, diet: number): number {
+export function planSig(ph: ArrayLike<number>, swim: number, diet: number): number {
   let s = 0;
   for (let k = M.EYE; k < M.LIMB; k++) if (ph[k - 1] >= 0.4) s += 2 ** (k - 1);
   const legs = ph[P.LEGS];

@@ -27,7 +27,7 @@ export const ISLAND_KEYS = ['rivers', 'soils', 'permafrost', 'succession'];
 
 export const FIELD_ORDER: Field[] = ['Астрономия', 'Физика', 'Химия', 'Геология', 'Климат', 'Биология', 'Вероятность'];
 
-export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro' | 'time';
+export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro' | 'discover' | 'time';
 
 export type SimLink =
   | { view: 'planet'; params?: Partial<PlanetParams>; event?: string; match?: string; t?: number; label?: string }

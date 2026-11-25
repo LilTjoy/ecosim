@@ -2,7 +2,7 @@ import { clamp, mix32 } from '../lib/random';
 import { plural } from '../lib/text';
 import { FIELD_ICON, type Fact } from '../planet/facts';
 import { GENE_INFO, GENE_KEYS, type GeneKey, type Genome } from '../sim/genome';
-import type { PresetBody } from '../sim/modules';
+import { P, type PresetBody } from '../sim/modules';
 import type { Pathogen } from '../sim/microbes';
 import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
@@ -18,6 +18,7 @@ import { BlountView } from './blountView';
 import { BOOK_CAP, BookShelf, BookStore, makeBook, type Bookmark } from './bookmarks';
 import { Camera } from './camera';
 import { SURFACE_FACTS } from './facts';
+import { abilBadges, aversionLine, bodyChips, discCentroid, discoverHtml, discoveries, heritageNotable, listIcons, planGenome, recipeOf, sensesLine, speciesOE } from './discover';
 import { MICROBE_GUILDS } from './microbes';
 import { SurfaceRenderer, type Lens } from './renderer';
 
@@ -160,6 +161,7 @@ const TEMPLATE = /* html */ `
       <button data-tab="web">Связи</button>
       <button data-tab="charts">Графики</button>
       <button data-tab="micro">Микромир</button>
+      <button data-tab="discover" data-oe hidden title="Что изобрела эволюция в этом мире">🌟 Открытия</button>
       <button data-tab="log">Летопись</button>
       <button data-tab="time" title="Машина времени: ветки истории и их сравнение">⏳ Ветки</button>
     </nav>
@@ -192,6 +194,7 @@ const TEMPLATE = /* html */ `
       <canvas class="s-soilchart"></canvas>
       <div class="s-legend s-soillegend"></div>
     </div>
+    <div class="s-tab" data-tab="discover" hidden></div>
     <div class="s-tab" data-tab="log" hidden><ol class="s-log"></ol></div>
     <div class="s-tab" data-tab="time" hidden></div>
   </aside>
@@ -262,6 +265,11 @@ export class SurfaceView {
   private bannerSig = '';
   /** 📌 Закладки (IndexedDB) и их список во вкладке «⏳ Ветки». */
   private books = new BookStore();
+  /** ♾️ Рецепты, открытые за все миры (localStorage['ecosim.discoveries'] — только здесь, не в мире). */
+  private collection = new Set<string>();
+  /** ♾️ Тосты «🌟 Открытие»: очередь до 3, не чаще раза в 10 с. */
+  private discQueue: string[] = [];
+  private lastDiscToast = -1e9;
   private shelf!: BookShelf;
   private bookBusy = false;
 
@@ -274,6 +282,18 @@ export class SurfaceView {
     this.tl.trap = DEV;
     this.tl.autoRaise = true;
     this.tl.small = ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4 || matchMedia('(max-width: 600px)').matches;
+    // ♾️ открытая эволюция: ?oe=1 включает, ?oe=0 выключает (до решения о значении по умолчанию)
+    const oeq = new URLSearchParams(location.search).get('oe');
+    if (oeq !== null && (oeq !== '0') !== this.world.settings.openEvo) {
+      this.world.settings.openEvo = oeq !== '0';
+      this.world.reset();
+    }
+    try {
+      const saved = JSON.parse(localStorage.getItem('ecosim.discoveries') ?? '[]') as unknown;
+      if (Array.isArray(saved)) for (const id of saved) if (typeof id === 'string') this.collection.add(id);
+    } catch {
+      /* без localStorage коллекция живёт до перезагрузки */
+    }
     this.tl.reset(this.world);
     this.tl.onToast = (t) => this.toast(t);
     this.tl.onReplayEnd = (same) => same && this.queueFact('tm_seed', true);
@@ -370,6 +390,10 @@ export class SurfaceView {
     if (env.o2 > 0.25 || env.o2 < 0.17 || env.gravity > 1.2 || env.gravity < 0.8) this.queueFact('oxygen');
     if (!env.landLife) this.queueFact('stromatolites');
     if (env.o2 < 0.1) this.queueFact('o2decay'); // как в мире: гниение медленнее только ниже 10%
+    if (this.world.oe) {
+      if (heritageNotable(this.world)) this.queueFact('heritage');
+      if ((env.light ?? 1) < 0.6 || (env.murk ?? 0) > 0.4) this.queueFact('darkworld');
+    }
   }
 
   private afterReset(book?: Bookmark): void {
@@ -485,6 +509,7 @@ export class SurfaceView {
     });
     // HUD перерисовывается 4 раза в секунду — ловим нажатие, а не click
     $(r, '.s-time').addEventListener('pointerdown', (e) => {
+      if ((e.target as HTMLElement).closest('.s-disc')) return this.openTab('discover', '.s-tab[data-tab=discover]');
       if (!(e.target as HTMLElement).closest('.s-sick')) return;
       this.setLens('disease');
       this.openTab('micro');
@@ -496,6 +521,26 @@ export class SurfaceView {
       if (l) this.setLens(l.dataset.glens as Lens);
       const f = t.closest('[data-fact]') as HTMLElement | null;
       if (f) this.showFact(f.dataset.fact!);
+    });
+    // ♾️ вкладка «🌟 Открытия»: карточка, показать носителей, вид из бестиария (перерисовывается — по нажатию)
+    $(r, '.s-tab[data-tab=discover]').addEventListener('pointerdown', (e) => {
+      const t = e.target as HTMLElement;
+      const f = t.closest('[data-fact]') as HTMLElement | null;
+      if (f) return this.showFact(f.dataset.fact!);
+      const rec = t.closest('[data-rec]') as HTMLElement | null;
+      if (rec) {
+        const at = discCentroid(this.world, rec.dataset.rec!);
+        if (at) {
+          this.renderer.focusSpecies = at[2];
+          this.cam.flyTo(at[0], at[1], 1.4);
+        }
+        return;
+      }
+      const sp = t.closest('[data-spg]') as HTMLElement | null;
+      if (sp) {
+        this.renderer.focusSpecies = Number(sp.dataset.spg);
+        this.gotoSpecies(Number(sp.dataset.spg));
+      }
     });
     // строки списка вспышек перерисовываются с живыми цифрами — выбираем по нажатию, а не по click
     $(r, '.s-outbreaks').addEventListener('pointerdown', (e) => {
@@ -908,7 +953,15 @@ export class SurfaceView {
       sy += c.y;
       n++;
     }
-    if (n) this.cam.flyTo(sx / n, sy / n, 1.2);
+    if (!n) return;
+    // к особи, ближайшей к центру вида: у вида на двух берегах центр может прийтись на сушу между ними
+    const mx = sx / n, my = sy / n;
+    let bx = mx, by = my, bd = Infinity;
+    for (const c of this.world.creatures) if (c.sp === id) {
+      const d = (c.x - mx) ** 2 + (c.y - my) ** 2;
+      if (d < bd) [bd, bx, by] = [d, c.x, c.y];
+    }
+    this.cam.flyTo(bx, by, 1.2);
   }
 
   // ---------------- карточки ----------------
@@ -992,6 +1045,13 @@ export class SurfaceView {
   private checkEvents(): void {
     for (const e of this.world.events) {
       if (e.tick <= this.lastEventTick) continue;
+      if (e.kind === 'evo') this.queueFact('openevo');
+      if (e.kind === 'evo' && e.text.startsWith('🌟') && e.fact) this.discovered(e.fact);
+      // ♾️ события открытой эволюции несут свою карточку (радиация — тоже «species»: только одна)
+      if (e.fact) {
+        this.queueFact(e.fact);
+        continue;
+      }
       if (e.kind === 'species') this.queueFact('species');
       else if (e.kind === 'migration' && e.text.startsWith('🧭')) this.queueFact('migration');
       else if (e.kind === 'extinct') this.queueFact('extinct');
@@ -1023,6 +1083,49 @@ export class SurfaceView {
     if (w.micro.lastMeteor && w.tick - w.micro.lastMeteor.tick > 1500) this.queueFact('succession');
     if (w.outbreaks.some((P) => P.rEff < 1)) this.queueFact('r0');
     for (const P of [...w.pathogens.values(), ...w.outbreaks]) if (P.vir0 >= 0.75 && P.virMean <= P.vir0 - 0.15) this.queueFact('virulence');
+    if (w.oe) this.checkEvo();
+  }
+
+  /** ♾️ Карточки открытой эволюции, которые не привязаны к одной строке летописи (§11). */
+  private checkEvo(): void {
+    const w = this.world, B = w.bestiary;
+    const n = discoveries(w);
+    if (n >= 3) this.queueFact('tinkering');
+    if (w.tick > 9000 && n === 0) this.queueFact('tradeoff');
+    if (this.renderer.seen.rings) this.queueFact('senses');
+    for (const id of ['flight', 'gliding']) {
+      const d = B.found.get(id);
+      if (!d || d.inherited) continue;
+      const sp = w.species.all.get(d.sp);
+      const root = sp ? w.species.all.get(sp.root) : undefined;
+      if (root && root.founder.ph[P.FUR] >= 0.3) this.queueFact('exaptation'); // мех — раньше для тепла
+    }
+    this.pumpDisc();
+  }
+
+  /** ♾️ 🌟 открытие: в коллекцию «за все миры» и в очередь тостов. */
+  private discovered(id: string): void {
+    const r = recipeOf(id);
+    if (!r) return;
+    if (!this.collection.has(id)) {
+      this.collection.add(id);
+      try {
+        localStorage.setItem('ecosim.discoveries', JSON.stringify([...this.collection]));
+      } catch {
+        /* приватный режим: коллекция — до перезагрузки */
+      }
+    }
+    if (this.factHold) return; // в прошлом и при повторе — без тостов
+    this.discQueue.push(`🌟 Открытие: ${r.icon} ${r.name}!`);
+    if (this.discQueue.length > 3) this.discQueue.shift();
+    this.pumpDisc();
+  }
+
+  private pumpDisc(): void {
+    const now = performance.now();
+    if (!this.discQueue.length || now - this.lastDiscToast < 10000) return;
+    this.lastDiscToast = now;
+    this.toast(this.discQueue.shift()!, [{ label: '🌟 Открытия', run: () => this.openTab('discover', '.s-tab[data-tab=discover]') }], 3500);
   }
 
   // ---------------- игрок ----------------
@@ -1089,6 +1192,7 @@ export class SurfaceView {
       return;
     }
     const sp = this.world.species.all.get(c.sp)!;
+    const oe = this.world.oe;
     const e = clamp(c.energy / this.world.maxEnergy(c.g), 0, 1);
     const parent = c.mother !== null ? this.world.ancestors.get(c.mother) : undefined;
     const genes = GENE_KEYS.map((k) => {
@@ -1109,20 +1213,28 @@ export class SurfaceView {
         <div>
           <div class="spname" data-a="species" style="color:${spColor(sp)}">${sp.name}</div>
           <div class="latin">${sp.latin}</div>
-          <div class="muted small">#${c.id} · поколение ${c.generation} · ${Math.floor(c.age / DAY)} дн. · ${c.alive ? STATE_NAMES[c.state] + (c.state === 'rest' ? ' <a data-fact="rest">?</a>' : '') : '✝ ' + (c.cause ?? '')}</div>
+          <div class="muted small">#${c.id} · поколение ${c.generation} · ${Math.floor(c.age / DAY)} дн. · ${c.alive ? this.stateText(c) : '✝ ' + (c.cause ?? '')}</div>
           <div class="bar"><div style="width:${e * 100}%"></div></div>
         </div>
         <button data-a="close" class="x">✕</button>
       </div>
       ${c.alive ? this.healthRow(c) : ''}
       <div class="muted small">Ест: ${this.dietText(c)}</div>
-      <div class="genes">${genes}</div>
+      <div class="genes">${genes}</div>${oe ? `
+      <div class="b-chips"><b class="muted small">Тело:</b>${bodyChips(this.world, c)}</div>${c.alive ? sensesLine(this.world, c) : ''}${abilBadges(this.world, c)}${aversionLine(this.world, c)}` : ''}
       <div class="muted small">Детей: ${c.children} · живых потомков: <b class="gold">${this.family.size}</b> · добыча: ${c.kills}${c.father === null && c.mother !== null ? ' · рождён без отца <a data-fact="parthenogenesis">?</a>' : ''}</div>
       <div class="btns">
         <button data-a="possess" ${c.alive ? '' : 'disabled'}>👑 Вселиться</button>
         <button data-a="follow" class="${this.follow ? 'active' : ''}">🎯 Следить</button>
       </div>`;
     this.renderer.portrait($(el, '.portrait'), c);
+  }
+
+  /** Состояние в инспекторе: ♾️ «в норе», спячка — с карточкой. */
+  private stateText(c: Creature): string {
+    if (this.world.oe && this.world.hidden(c)) return 'в норе <a data-fact="burrow">?</a>';
+    if (c.state === 'torpor') return `${STATE_NAMES.torpor} <a data-fact="hibernation">?</a>`;
+    return STATE_NAMES[c.state] + (c.state === 'rest' ? ' <a data-fact="rest">?</a>' : '');
   }
 
   /** Здоровье: болеет, иммунитет от матери, переболел или здоров. */
@@ -1209,6 +1321,7 @@ export class SurfaceView {
       this.root.querySelectorAll<HTMLElement>('[data-oe]').forEach((b) => (b.hidden = !w.oe));
       // выбранный инструмент или зверь исчез — вернуться к обычным
       if (!w.oe && this.tool === 'mutagen') $<HTMLButtonElement>(this.root, '[data-tool=inspect]').click();
+      if (!w.oe && this.tab === 'discover') $<HTMLButtonElement>(this.root, '.s-tabs [data-tab=species]').click();
       if (!w.oe && PRESETS[this.preset]?.body) {
         this.preset = 0;
         this.root.querySelectorAll('.s-spawn [data-p]').forEach((x) => x.classList.toggle('active', (x as HTMLElement).dataset.p === '0'));
@@ -1219,7 +1332,7 @@ export class SurfaceView {
     $(this.root, '.s-env').innerHTML = `<b>${env.name}</b> <span>O₂ ${Math.round(env.o2 * 100)}%</span><span>g ${env.gravity.toFixed(2)}</span>${env.landLife ? '' : '<span>🌊 жизнь пока только в море</span>'}`;
     const t = w.dayTime;
     const dayIcon = t < 0.2 || t > 0.8 ? '🌙' : t < 0.3 ? '🌅' : t > 0.7 ? '🌇' : '☀️';
-    $(this.root, '.s-time').innerHTML = `<span>${s.icon} ${s.name}, год ${w.year}</span><span>${dayIcon} день ${Math.floor(w.tick / DAY)}</span><span>🐾 ${w.creatures.length}</span><span>🧬 ${w.species.living().length} видов</span>${
+    $(this.root, '.s-time').innerHTML = `<span>${s.icon} ${s.name}, год ${w.year}</span><span>${dayIcon} день ${Math.floor(w.tick / DAY)}</span><span>🐾 ${w.creatures.length}</span><span>🧬 ${w.species.living().length} видов</span>${this.oeChips()}${
       w.drought > 0 ? '<span>🔥 засуха</span>' : ''
     }${w.micro.sick > 0 ? `<span class="s-sick" title="Открыть «Микромир» и линзу болезней">🤒 больных ${w.micro.sick}</span>` : ''}${
       this.tl.branches.length > 1 ? `<span class="s-chip" style="border-color:${this.tl.active.color}">🌿 ветка ${this.tl.active.letter}</span>` : ''
@@ -1245,7 +1358,33 @@ export class SurfaceView {
     $(this.root, '.s-region').textContent = txt;
   }
 
+  /** ♾️ Чипы HUD: «🌟 N открытий» (с первого) и паспорт мира. */
+  private oeChips(): string {
+    const w = this.world;
+    if (!w.oe) return '';
+    const n = discoveries(w);
+    const pass = w.passport().replace(/^🌍 В этом мире: /, '');
+    const items = pass.split(', ');
+    return `${n ? `<span class="s-chip s-disc" title="Открыть «🌟 Открытия»">🌟 ${n} ${plural(n, 'открытие', 'открытия', 'открытий')}</span>` : ''}${
+      pass !== 'всё как обычно' ? `<span class="s-chip" title="${w.passport()}">🌍 ${items[0]}${items.length > 1 ? ` +${items.length - 1}` : ''}</span>` : ''}`;
+  }
+
+  /** ♾️ Вкладка «🌟 Открытия»: разметка — только если изменилась; портреты бестиария — после неё. */
+  private renderDiscover(): void {
+    const el = $(this.root, '.s-tab[data-tab=discover]');
+    const html = discoverHtml(this.world, this.collection);
+    if (this.htmlCache.get(el) === html) return;
+    const top = el.scrollTop;
+    this.setHtml(el, html);
+    el.scrollTop = top;
+    el.querySelectorAll<HTMLCanvasElement>('canvas.d-pt').forEach((cv) => {
+      const g = planGenome(this.world, Number(cv.dataset.sig));
+      if (g) this.renderer.portraitGenome(cv, g);
+    });
+  }
+
   private renderPanel(): void {
+    if (this.tab === 'discover') return this.renderDiscover();
     if (this.tab === 'species') this.renderSpecies();
     else if (this.tab === 'tree') this.drawTree();
     else if (this.tab === 'web') this.drawWeb();
@@ -1259,12 +1398,13 @@ export class SurfaceView {
     const living = this.world.species.living();
     const max = Math.max(1, ...living.map((s) => s.count));
     const focus = this.renderer.focusSpecies;
+    const oe = this.world.oe;
     $(this.root, '.s-splist').innerHTML = living
       .slice(0, 40)
       .map(
         (s) => `<li data-sp="${s.id}" class="${s.id === focus ? 'on' : ''}">
           <i style="background:${spColor(s)}"></i>
-          <span class="nm">${dietIcon(s.mean.diet)} ${s.name}<small>${s.latin}</small></span>
+          <span class="nm">${dietIcon(s.mean.diet)} ${s.name}${oe ? listIcons(s) : ''}<small>${s.latin}</small></span>
           <span class="ct">${s.count}</span>
           <div class="mb"><div style="width:${(s.count / max) * 100}%;background:${spColor(s, 50)}"></div></div>
         </li>`,
@@ -1285,7 +1425,7 @@ export class SurfaceView {
         const i = GENE_INFO[k];
         const v = (sp.mean[k] - i.min) / (i.max - i.min);
         return `<div class="gene" data-fact="${k}"><span>${i.label}</span><div class="gbar"><div style="width:${v * 100}%;background:${spColor(sp, 55)}"></div></div><b>?</b></div>`;
-      }).join('')}</div>
+      }).join('')}</div>${oe ? speciesOE(this.world, sp, spColor(sp, 55)) : ''}
       <button data-goto>📍 Показать на карте</button>
     </div>`;
   }
@@ -1917,15 +2057,15 @@ export class SurfaceView {
   }
 
   private renderLog(): void {
-    const factFor = (kind: string, text: string) =>
-      kind === 'species' ? 'species' : kind === 'extinct' ? 'extinct' : kind === 'migration' && text.startsWith('🧭') ? 'migration'
+    const factFor = (kind: string, text: string, fact?: string) =>
+      fact ? fact : kind === 'species' ? 'species' : kind === 'extinct' ? 'extinct' : kind === 'migration' && text.startsWith('🧭') ? 'migration'
         : text.includes('заглохла') ? 'r0' : text.includes('расплодились') || text.startsWith('🦠 Эпидемия') ? 'disease'
         : text.startsWith('🦠 Новая болезнь') ? 'rinderpest' : text.startsWith('🦠') ? 'sir' : text.startsWith('✔') ? 'virulence' : text.startsWith('🍄') ? 'carcass' : text.startsWith('🌊') ? 'bloom' : '';
     $(this.root, '.s-log').innerHTML = this.world.events
       .slice()
       .reverse()
       .map((e) => {
-        const f = factFor(e.kind, e.text);
+        const f = factFor(e.kind, e.text, e.fact);
         return `<li class="${e.kind}" ${e.x !== undefined ? `data-x="${e.x}" data-y="${e.y}"` : ''}><span>д.${Math.floor(e.tick / DAY)}</span> ${e.text}${f ? ` <a data-fact="${f}">💡</a>` : ''}</li>`;
       })
       .join('');

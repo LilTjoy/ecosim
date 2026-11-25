@@ -1,6 +1,8 @@
 import { clamp, mulberry32, Noise } from '../lib/random';
 import { B, BIOMES } from '../sim/terrain';
 import type { Creature, Fx, World } from '../sim/world';
+import type { Genome } from '../sim/genome';
+import { P } from '../sim/modules';
 import type { Camera } from './camera';
 
 interface Particle {
@@ -10,7 +12,7 @@ interface Particle {
   vy: number;
   life: number;
   max: number;
-  kind: 'heart' | 'spark' | 'ring' | 'blast' | 'star' | 'leaf' | 'spore' | 'bubble' | 'glow' | 'steam';
+  kind: 'heart' | 'spark' | 'ring' | 'blast' | 'star' | 'leaf' | 'spore' | 'bubble' | 'glow' | 'steam' | 'burst' | 'zap';
   hue: number;
 }
 
@@ -32,6 +34,8 @@ export interface Seen {
   stromatolite: boolean;
   mat: boolean;
   sick: boolean;
+  /** ♾️ Кольца чувств выбранного зверя показаны хотя бы раз (карточка «Чем зверь чувствует мир»). */
+  rings: boolean;
 }
 
 /** Бюджеты мелочей микромира на кадр (на узком экране — вдвое меньше). */
@@ -83,6 +87,14 @@ function ramp(stops: number[][], k: number, out: Float32Array, o: number): void 
   out[o + 2] = a[2] + (b[2] - a[2]) * u;
 }
 
+/** ♾️ Крабовидная форма у самой особи (как рецепт «карцинизация»). */
+const crabLike = (g: Genome): boolean => g.ph[P.SHELL] >= 0.5 && g.ph[P.CLAW] >= 0.3 && g.ph[P.LEGS] >= 3 && g.body.shape <= 0.3;
+/** ♾️ Где на боку i-й из n светящихся органов (в координатах тела). */
+function photoAt(i: number, n: number, rx: number, ry: number): [number, number] {
+  const t = n > 1 ? i / (n - 1) : 0.5;
+  return [rx * (0.6 - 1.2 * t), (i % 2 ? 1 : -1) * ry * 0.58];
+}
+
 /** Растительные украшения — на планете без жизни на суше их нет. */
 const PLANT_DECO = new Set<string>(['tree', 'acacia', 'bush', 'reed', 'cactus', 'flower']);
 const SPRING_RINGS = ['#8a4a2a', '#e88a2a', '#e8d24a', '#3fb07a', '#2a7fbf'];
@@ -124,7 +136,7 @@ export class SurfaceRenderer {
   /** Текущая линза; менять через setLens — слой клеток перерисуется сразу. */
   lens: Lens = 'off';
   /** Флаги «уже видели» — view превращает их в карточки фактов. */
-  seen: Seen = { fairy: false, glow: false, bubble: false, mushroom: false, flies: false, mould: false, steam: false, wake: false, spore: false, microscope: false, stromatolite: false, mat: false, sick: false };
+  seen: Seen = { fairy: false, glow: false, bubble: false, mushroom: false, flies: false, mould: false, steam: false, wake: false, spore: false, microscope: false, stromatolite: false, mat: false, sick: false, rings: false };
   /** Светящиеся следы пловцов ночью (рисуются поверх ночной вуали). */
   private wakes: Particle[] = [];
   /** Клетки горячих источников. */
@@ -134,6 +146,11 @@ export class SurfaceRenderer {
   /** Масштаб бюджетов: 0.5 на узком экране. */
   private bk = 1;
   private zoom = 1;
+  /** ♾️ Подробно нарисованных зверей в прошлом кадре (мех — только если их не больше 250). */
+  private nDetail = 0;
+  private many = false;
+  /** Портрет: 0 — карта, 1 — живой зверь, 2 — заглушка по геному (бестиарий). */
+  private pmode: 0 | 1 | 2 = 0;
   private glowCyan = this.makeGlow(90, 210, 255);
   private glowGreen = this.makeGlow(150, 255, 170);
   private mushBuf = new Float32Array(BUDGET.mush * 4);
@@ -1464,6 +1481,20 @@ export class SurfaceRenderer {
     } else if (e.kind === 'mutagen') {
       // ☢️ всплеск мутаций: зеленоватая волна радиусом ~150
       P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0, max: 90, kind: 'blast', hue: 90 });
+    } else if (e.kind === 'discovery') {
+      // 🌟 открытие: золотая звёздная вспышка над носителями
+      P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0, max: 80, kind: 'burst', hue: 48 });
+      for (let i = 0; i < 2; i++) P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: -i * 18, max: 70, kind: 'star', hue: 48 });
+    } else if (e.kind === 'zap') {
+      // ⚡ разряд электрического органа: голубой зигзаг и искры
+      P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0, max: 14, kind: 'zap', hue: 190 });
+      for (let i = 0; i < 6; i++) {
+        const a = Math.random() * Math.PI * 2;
+        P.push({ x: e.x, y: e.y, vx: Math.cos(a) * 1.1, vy: Math.sin(a) * 1.1, life: 0, max: 18, kind: 'spark', hue: 190 });
+      }
+    } else if (e.kind === 'yuck') {
+      // 🤢 хищник отравился: зелёное кольцо
+      P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0, max: 40, kind: 'ring', hue: 100 });
     } else if (e.kind === 'newSpecies') {
       for (let i = 0; i < 3; i++) P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: -i * 15, max: 70, kind: 'star', hue: e.hue });
     } else if (e.kind === 'outbreak') {
@@ -1548,7 +1579,27 @@ export class SurfaceRenderer {
     // падаль: пятно, туша с мухами → кости, плесень; потом — следы костей
     if (z > 0.6) this.drawCorpses(vis, z);
 
-    if (selected?.alive) {
+    if (selected?.alive && world.oe) {
+      // ♾️ кольца чувств: где выбранный зверь сейчас видит, слышит, слышит эхо, чует, чувствует тепло и ток
+      const r = world.senses(selected);
+      ctx.lineWidth = 1.2 / z;
+      ctx.setLineDash([5 / z, 4 / z]);
+      ctx.fillStyle = 'rgba(255,255,255,0.04)';
+      ctx.beginPath();
+      ctx.arc(selected.x, selected.y, Math.max(r.vision, 1), 0, Math.PI * 2);
+      ctx.fill();
+      let shown = 0;
+      for (const [v, col] of [[r.vision, '255,224,90'], [r.hearing, '110,160,255'], [r.echo, '190,120,255'], [r.smell, '110,230,120'], [r.heat, '255,110,90'], [r.electric, '90,235,255']] as const) {
+        if (v < 2) continue;
+        shown++;
+        ctx.strokeStyle = `rgba(${col},0.75)`;
+        ctx.beginPath();
+        ctx.arc(selected.x, selected.y, v, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      if (shown) this.seen.rings = true;
+    } else if (selected?.alive) {
       ctx.fillStyle = 'rgba(255,255,255,0.05)';
       ctx.strokeStyle = 'rgba(255,255,255,0.35)';
       ctx.lineWidth = 1 / z;
@@ -1562,6 +1613,9 @@ export class SurfaceRenderer {
 
     const detail = z >= 0.9;
     const night = 1 - world.daylight;
+    const oe = world.oe;
+    this.many = this.nDetail > 250;
+    this.nDetail = 0;
     for (const c of world.creatures) {
       if (!vis(c.x, c.y)) continue;
       const dim = this.focusSpecies !== null && c.sp !== this.focusSpecies;
@@ -1574,11 +1628,17 @@ export class SurfaceRenderer {
       }
       // в линзе болезней здоровые приглушены, чтобы были видны больные
       ctx.globalAlpha = dim ? 0.25 : this.lens === 'disease' && c.sick <= 0 ? 0.45 : 1;
-      if (detail && c.g.size * z > 2.5) this.drawAnimal(c);
+      if (detail && c.g.size * z > 2.5) {
+        if (oe) {
+          this.nDetail++;
+          this.drawAnimalOE(c);
+        } else this.drawAnimal(c);
+      } else if (oe) this.drawDotOE(c, z);
       else this.drawDot(c, z);
     }
     ctx.globalAlpha = 1;
     if (this.lens === 'disease') this.drawDiseaseMarks(vis, z);
+    if (oe) this.drawEcho(vis, z, night);
 
     this.drawParticles();
 
@@ -1591,12 +1651,17 @@ export class SurfaceRenderer {
         ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
         this.drawNightGlow(vx0, vy0, vx1, vy1, z, night);
       } else this.wakes.length = 0;
+      // ♾️ светящиеся органы зверей
+      if (oe) {
+        ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
+        this.drawPhotophores(vis, z, night, detail);
+      }
       // глаза светятся в темноте
       if (detail && night > 0.3) {
         ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
         ctx.fillStyle = `rgba(255,240,170,${(night - 0.3) * 1.2})`;
         for (const c of world.creatures) {
-          if (!vis(c.x, c.y) || c.g.diet < 0.5) continue;
+          if (!vis(c.x, c.y) || c.g.diet < 0.5 || (oe && c.g.ph[P.EYEQ] === 0)) continue;
           const hx = c.x + Math.cos(c.heading) * c.g.size * 1.5;
           const hy = c.y + Math.sin(c.heading) * c.g.size * 1.5;
           ctx.fillRect(hx - 0.8, hy - 0.8, 1.6, 1.6);
@@ -1828,6 +1893,556 @@ export class SurfaceRenderer {
     void cos;
   }
 
+  // ---------------- ♾️ открытая эволюция: зверь по своему телу ----------------
+
+  /** Полуоси тела (как в drawAnimalOE): форма, хищник, жир, краб. */
+  private bodyR(c: Creature): [number, number] {
+    const g = c.g, ph = g.ph, shape = g.body.shape, s = g.size * 1.25;
+    if (crabLike(g)) return [s * 0.72, s * 0.98];
+    return [s * (0.8 + 0.5 * shape), s * (0.85 - 0.35 * shape) * (g.diet > 0.65 ? 0.85 : 1) * (1 + 0.25 * ph[P.FAT])];
+  }
+
+  /** Летит ли зверь сейчас: умеет летать и движется (или под ним вода). */
+  private flying(c: Creature, water: boolean): boolean {
+    return c.g.ph[P.FLY] >= 1 && c.g.swim < 0.5 && c.state !== 'torpor' && (water || c.v > 0.25 * c.g.speed);
+  }
+
+  /** Точка издалека: летуны — галочка, панцирные — шестиугольник, остальные — как раньше. */
+  private drawDotOE(c: Creature, z: number): void {
+    const ph = c.g.ph;
+    const flier = ph[P.FLY] >= 1 && c.g.swim < 0.5;
+    if (!flier && ph[P.SHELL] < 0.5) return this.drawDot(c, z);
+    const ctx = this.ctx;
+    const r = Math.max(c.g.size * 1.2, 2.2 / z);
+    const co = Math.cos(c.heading), si = Math.sin(c.heading);
+    const pt = (x: number, y: number, first = false) => (first ? ctx.moveTo(c.x + co * x - si * y, c.y + si * x + co * y) : ctx.lineTo(c.x + co * x - si * y, c.y + si * x + co * y));
+    ctx.fillStyle = this.color(c);
+    ctx.beginPath();
+    if (flier) {
+      pt(r * 1.3, 0, true);
+      pt(-r, r * 1.15);
+      pt(-r * 0.35, 0);
+      pt(-r, -r * 1.15);
+    } else for (let i = 0; i < 6; i++) pt(Math.cos((i * Math.PI) / 3) * r * 1.15, Math.sin((i * Math.PI) / 3) * r * 1.15, i === 0);
+    ctx.closePath();
+    ctx.fill();
+    if (c.sick > 0) {
+      ctx.strokeStyle = 'rgba(200,245,160,0.85)';
+      ctx.lineWidth = 0.8 / z;
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, r * 1.5, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+  }
+
+  /**
+   * Существо по телу (§9.1): форма, ноги (или их нет), панцирь, мех, перепонки, клешни, рога, глаза (или слепота),
+   * уши, нос, тепловые ямки, электрорецепторы, ядовитые пятна, водоросли-симбионты, горловой мешок, спячка, нора.
+   */
+  private drawAnimalOE(c: Creature): void {
+    const ctx = this.ctx;
+    const w = this.world;
+    const g = c.g, ph = g.ph, shape = g.body.shape;
+    const s = g.size * 1.25;
+    const pm = this.pmode;
+    const walk = pm === 2 ? 0 : Math.sin(c.age * 0.5 * Math.max(0.3, c.v)) * (c.v > 0.05 ? 1 : 0);
+    const inWater = pm === 2 ? g.swim > 0.6 : BIOMES[w.terrain.biome[w.terrain.index(c.x, c.y)]].water;
+    const torpid = c.state === 'torpor';
+    const hidden = pm === 0 && w.hidden(c);
+    const fly = pm === 0 && this.flying(c, inWater);
+    const pred = g.diet > 0.65;
+    const swim = g.swim > 0.6;
+    const crab = crabLike(g);
+    let [rx, ry] = this.bodyR(c);
+    if (torpid) rx = ry = Math.sqrt(rx * ry) * 0.9; // свернулся клубком
+    const legs = ph[P.LEGS] | 0;
+    const shell = ph[P.SHELL], fur = ph[P.FUR], memb = ph[P.MEMB], claw = ph[P.CLAW], horn = ph[P.HORN], dig = ph[P.DIG];
+    const a0 = ctx.globalAlpha;
+    if (hidden) ctx.globalAlpha = a0 * 0.45;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate(c.heading);
+
+    // тень (у летящего — дальше, над водой — вдвое)
+    const so = fly ? (inWater ? 2 : 1.5) : 1;
+    ctx.fillStyle = 'rgba(0,0,0,0.25)';
+    ctx.beginPath();
+    ctx.ellipse(s * 0.15 * so, s * 0.35 * so, rx * 1.2, Math.max(ry, s * 0.5) * 0.8, 0, 0, Math.PI * 2);
+    ctx.fill();
+
+    const body = this.color(c);
+    const dark = `hsl(${g.hue}, 40%, 25%)`;
+
+    // перепонки: два полупрозрачных паруса; в полёте машут
+    if (memb >= 0.25 && !torpid) {
+      const flap = fly ? 0.55 + 0.45 * Math.abs(Math.sin(this.frame * 0.4 + c.id)) : 0.7;
+      const span = Math.max(ry, s * 0.6) * (1 + 2 * memb) * flap;
+      ctx.fillStyle = `hsla(${g.hue}, 40%, 68%, 0.5)`;
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = Math.max(0.3, s * 0.05);
+      for (const side of [1, -1]) {
+        ctx.beginPath();
+        ctx.moveTo(rx * 0.5, side * ry * 0.4);
+        ctx.quadraticCurveTo(rx * 0.35, side * span * 1.1, -rx * 0.1, side * span);
+        ctx.quadraticCurveTo(-rx * 0.35, side * span * 0.7, -rx * 0.6, side * ry * 0.4);
+        ctx.closePath();
+        ctx.fill();
+        ctx.beginPath();
+        ctx.moveTo(rx * 0.2, side * ry * 0.4);
+        ctx.lineTo(-rx * 0.1, side * span);
+        ctx.stroke();
+      }
+    }
+
+    if (inWater && !fly) {
+      // круги на воде
+      ctx.strokeStyle = 'rgba(255,255,255,0.25)';
+      ctx.lineWidth = 0.6;
+      ctx.beginPath();
+      ctx.ellipse(-s * 0.3, 0, rx * 1.6 + walk, Math.max(ry, s * 0.6) * 1.5, 0, 0, Math.PI * 2);
+      ctx.stroke();
+    } else if (!torpid && !fly) {
+      ctx.strokeStyle = dark;
+      ctx.lineCap = 'round';
+      const lw = Math.max(0.6, s * 0.16);
+      const L = s * (0.5 + 0.7 * ph[P.LEGLEN]);
+      if (crab) {
+        // краб: по три ноги с каждой стороны, веером, с коленом
+        ctx.lineWidth = lw;
+        for (const side of [1, -1]) for (const [j, a] of [0.3, 0.9, 1.4].entries()) {
+          const th = side * (Math.PI / 2 + (a - 0.85));
+          const bx = Math.cos(th) * rx * 0.8, by = Math.sin(th) * ry * 0.8;
+          const kx = bx + Math.cos(th) * L * 0.6, ky = by + Math.sin(th) * L * 0.6 - side * L * 0.1;
+          const st = walk * (j % 2 ? 1 : -1) * s * 0.2;
+          ctx.beginPath();
+          ctx.moveTo(bx, by);
+          ctx.lineTo(kx + st, ky);
+          ctx.lineTo(kx + st - L * 0.25, ky + side * L * 0.45);
+          ctx.stroke();
+        }
+      } else if (legs > 0) {
+        for (let k = 0; k < legs; k++) {
+          const lx = legs === 1 ? 0 : rx * (0.55 - (1.1 * k) / (legs - 1));
+          const phs = k % 2 ? -1 : 1;
+          const front = k === 0 && dig >= 0.15;
+          ctx.lineWidth = lw * (front ? 1 + 1.5 * dig : 1);
+          for (const side of [1, -1]) {
+            const fx = lx + walk * phs * side * s * 0.35, fy = side * (ry * 0.5 + L * 0.7);
+            ctx.beginPath();
+            ctx.moveTo(lx, side * ry * 0.5);
+            ctx.lineTo(fx, fy);
+            ctx.stroke();
+            if (front) {
+              // роющие когти
+              ctx.lineWidth = Math.max(0.3, lw * 0.45);
+              ctx.beginPath();
+              for (let q = -1; q <= 1; q++) {
+                ctx.moveTo(fx, fy);
+                ctx.lineTo(fx + s * 0.28, fy + side * q * s * 0.1);
+              }
+              ctx.stroke();
+              ctx.lineWidth = lw * (1 + 1.5 * dig);
+            }
+          }
+        }
+      }
+    }
+
+    // хвост: у безногих на суше — длинный, змеистый
+    if (!crab) {
+      ctx.strokeStyle = body;
+      if (legs === 0 && !swim && !inWater) {
+        ctx.lineWidth = Math.max(0.6, ry * 0.7);
+        ctx.lineCap = 'round';
+        const ph0 = c.age * 0.25 * Math.max(0.3, c.v);
+        ctx.beginPath();
+        ctx.moveTo(-rx * 0.8, 0);
+        for (let i = 1; i <= 6; i++) ctx.lineTo(-rx * 0.8 - i * s * 0.32, Math.sin(ph0 + i * 1.1) * s * 0.3 * (i / 6 + 0.4));
+        ctx.stroke();
+      } else {
+        ctx.lineWidth = Math.max(0.5, s * (swim ? 0.35 : 0.15));
+        ctx.beginPath();
+        ctx.moveTo(-rx * 0.9, 0);
+        ctx.quadraticCurveTo(-rx * 0.9 - s * 0.5, walk * s * 0.4, -rx * 0.9 - s * (swim ? 0.6 : 0.8), walk * s * 0.6 + (swim ? 0 : s * 0.1));
+        ctx.stroke();
+        if (swim) {
+          ctx.fillStyle = body;
+          ctx.beginPath();
+          ctx.moveTo(-rx * 0.9 - s * 0.5, 0);
+          ctx.lineTo(-rx * 0.9 - s, -s * 0.5);
+          ctx.lineTo(-rx * 0.9 - s, s * 0.5);
+          ctx.fill();
+        }
+      }
+    }
+
+    // тело
+    ctx.fillStyle = body;
+    ctx.beginPath();
+    ctx.ellipse(0, 0, rx, ry, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.save();
+    ctx.clip();
+    ctx.fillStyle = dark;
+    ctx.globalAlpha *= 0.45;
+    if (g.pattern > 0.66) {
+      for (let i = -2; i <= 2; i++) ctx.fillRect(i * rx * 0.32 - rx * 0.06, -ry, rx * 0.12, ry * 2);
+    } else if (g.pattern < 0.33) {
+      for (let i = 0; i < 4; i++) {
+        ctx.beginPath();
+        ctx.arc(((i % 2) - 0.5) * rx * 0.8 + (i > 1 ? rx * 0.3 : -rx * 0.2), ((i % 3) - 1) * ry * 0.38, s * 0.13, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalAlpha = hidden ? a0 * 0.45 : a0;
+    if (ph[P.PSYM] > 0.05) {
+      // водоросли-симбионты под кожей
+      ctx.fillStyle = `rgba(70,200,80,${0.5 * ph[P.PSYM]})`;
+      ctx.fillRect(-rx, -ry, rx * 2, ry * 2);
+    }
+    if (ph[P.TOXIN] >= 0.2) {
+      // ядовитые пятна — контрастного цвета
+      ctx.fillStyle = `hsla(${(g.hue + 180) % 360}, 90%, 60%, ${Math.min(1, 0.3 + ph[P.TOXIN])})`;
+      for (const [px, py] of [[0.35, 0.4], [-0.3, 0.4], [0.35, -0.4], [-0.3, -0.4]]) {
+        ctx.beginPath();
+        ctx.arc(px * rx, py * ry, Math.max(0.4, s * 0.14), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.restore();
+
+    // панцирь: тёмный купол с дугами; толстый — с шестиугольниками
+    if (shell >= 0.25) {
+      ctx.fillStyle = `hsla(${g.hue}, 30%, 22%, ${Math.min(0.95, 0.4 + 0.6 * shell)})`;
+      ctx.beginPath();
+      ctx.ellipse(-rx * 0.05, 0, rx * 0.85, ry * 0.85, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+      ctx.lineWidth = Math.max(0.3, s * 0.05);
+      ctx.beginPath();
+      for (let i = -1; i <= 1; i++) {
+        ctx.moveTo(i * rx * 0.35 - rx * 0.05, -ry * 0.72);
+        ctx.quadraticCurveTo(i * rx * 0.35 + rx * 0.1, 0, i * rx * 0.35 - rx * 0.05, ry * 0.72);
+      }
+      ctx.stroke();
+      if (shell > 0.75 && (pm > 0 || s * this.zoom >= 5)) {
+        const hr0 = Math.min(rx, ry) * 0.32;
+        ctx.beginPath();
+        for (let i = 0; i <= 6; i++) {
+          const a = (i * Math.PI) / 3;
+          const x = -rx * 0.05 + Math.cos(a) * hr0, y = Math.sin(a) * hr0;
+          if (i === 0) ctx.moveTo(x, y);
+          else ctx.lineTo(x, y);
+        }
+        for (let i = 0; i < 6; i++) {
+          const a = (i * Math.PI) / 3;
+          ctx.moveTo(-rx * 0.05 + Math.cos(a) * hr0, Math.sin(a) * hr0);
+          ctx.lineTo(-rx * 0.05 + Math.cos(a) * rx * 0.78, Math.sin(a) * ry * 0.78);
+        }
+        ctx.stroke();
+      }
+    }
+    // мех: короткие штрихи по краю
+    if (fur >= 0.3 && (pm > 0 || !this.many)) {
+      ctx.strokeStyle = `hsl(${g.hue}, 30%, 70%)`;
+      ctx.lineWidth = Math.max(0.3, s * 0.06);
+      const fl = s * (0.12 + 0.25 * fur);
+      ctx.beginPath();
+      for (let i = 0; i < 10; i++) {
+        const a = (i * Math.PI * 2) / 10 + 0.3;
+        const x = Math.cos(a) * rx, y = Math.sin(a) * ry;
+        ctx.moveTo(x * 0.92, y * 0.92);
+        ctx.lineTo(x + Math.cos(a) * fl, y + Math.sin(a) * fl);
+      }
+      ctx.stroke();
+    }
+
+    // голова (у краба — нет: глаза на стебельках прямо на панцире)
+    const hr = s * (pred ? 0.5 : 0.45);
+    const hx = crab ? rx * 0.8 : torpid ? rx * 0.55 : rx + s * 0.05;
+    const blind = ph[P.EYEQ] === 0;
+    const eyeR = Math.max(0.4, hr * 0.28) * (0.6 + 0.6 * ph[P.EYE]);
+    const closed = blind || torpid;
+    // клешни: у краба — большие, с вырезом
+    if (crab || claw >= 0.3) {
+      const pr = s * (0.25 + 0.35 * Math.max(claw, 0.3));
+      ctx.lineWidth = Math.max(0.5, s * 0.14);
+      ctx.strokeStyle = dark;
+      for (const side of [1, -1]) {
+        const bx = crab ? rx * 0.6 : hx - hr * 0.2, by = side * (crab ? ry * 0.55 : hr * 0.7);
+        const px = crab ? rx * 1.3 : hx + hr * 1.35, py = side * (crab ? ry * 0.6 : hr * 1.15);
+        ctx.beginPath();
+        ctx.moveTo(bx, by);
+        ctx.quadraticCurveTo((bx + px) / 2, py + side * pr * 0.9, px - pr * 0.5, py);
+        ctx.stroke();
+        ctx.fillStyle = shell >= 0.25 ? `hsl(${g.hue}, 30%, 30%)` : dark;
+        ctx.beginPath();
+        ctx.ellipse(px, py, pr, pr * 0.62, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // вырез между «пальцами»
+        ctx.fillStyle = 'rgba(10,12,8,0.75)';
+        ctx.beginPath();
+        ctx.moveTo(px + pr * 1.05, py - pr * 0.18);
+        ctx.lineTo(px + pr * 0.05, py);
+        ctx.lineTo(px + pr * 1.05, py + pr * 0.18);
+        ctx.fill();
+      }
+    }
+    if (crab) {
+      ctx.strokeStyle = dark;
+      ctx.lineWidth = Math.max(0.3, s * 0.07);
+      for (const side of [1, -1]) {
+        const ex = hx + s * 0.32, ey = side * ry * 0.3;
+        ctx.beginPath();
+        ctx.moveTo(hx - s * 0.05, side * ry * 0.2);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        this.eye(ex, ey, eyeR, closed);
+      }
+    } else {
+      ctx.fillStyle = body;
+      ctx.beginPath();
+      ctx.ellipse(hx, 0, hr * (pred ? 1.3 : 1.1), hr, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // нос: морда с усами
+      if (ph[P.NOSE] >= 0.5) {
+        ctx.beginPath();
+        ctx.ellipse(hx + hr * 1.05, 0, hr * 0.55, hr * 0.4, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(240,235,220,0.7)';
+        ctx.lineWidth = Math.max(0.2, s * 0.03);
+        ctx.beginPath();
+        for (const side of [1, -1]) for (let q = -1; q <= 1; q++) {
+          ctx.moveTo(hx + hr * 1.3, side * hr * 0.2);
+          ctx.lineTo(hx + hr * 1.9, side * hr * (0.55 + q * 0.25));
+        }
+        ctx.stroke();
+      }
+      // уши (у пловцов — нет)
+      if (!swim) {
+        const ek = clamp(ph[P.EAR] / 0.3, 0.7, 2);
+        ctx.fillStyle = dark;
+        if (g.diet < 0.35) {
+          for (const side of [1, -1]) {
+            ctx.beginPath();
+            ctx.ellipse(hx - hr * 0.6, side * hr * 0.7 * Math.sqrt(ek), hr * 0.9 * ek, hr * 0.28 * Math.sqrt(ek), side * 0.5, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        } else {
+          for (const side of [1, -1]) {
+            ctx.beginPath();
+            ctx.moveTo(hx - hr * 0.2, side * hr * 0.5);
+            ctx.lineTo(hx - hr * (0.2 + 0.7 * ek), side * hr * (0.5 + 0.7 * ek));
+            ctx.lineTo(hx - hr * 0.7, side * hr * 0.2);
+            ctx.fill();
+          }
+        }
+      }
+      // рога: у круглых — парные изогнутые, у вытянутых — на носу
+      if (horn >= 0.15) {
+        const hl = hr * (0.6 + 1.6 * horn);
+        ctx.strokeStyle = ctx.fillStyle = '#e8dcc0';
+        if (shape < 0.5) {
+          ctx.lineWidth = Math.max(0.5, hr * 0.26);
+          ctx.lineCap = 'round';
+          for (const side of [1, -1]) {
+            ctx.beginPath();
+            ctx.moveTo(hx, side * hr * 0.5);
+            ctx.quadraticCurveTo(hx + hl * 0.2, side * (hr * 0.5 + hl * 0.9), hx + hl * 0.85, side * (hr * 0.45 + hl * 0.45));
+            ctx.stroke();
+          }
+        } else {
+          const nx = hx + hr * (ph[P.NOSE] >= 0.5 ? 1.25 : 0.8);
+          ctx.beginPath();
+          ctx.moveTo(nx, -hr * 0.28);
+          ctx.lineTo(nx + hl, 0);
+          ctx.lineTo(nx, hr * 0.28);
+          ctx.fill();
+        }
+      }
+      // глаза: размер — от «зрения»; без глаз — бледная сомкнутая щель
+      for (const side of [1, -1]) this.eye(hx + hr * 0.4, side * hr * 0.45, eyeR, closed);
+      // тепловые ямки и электрорецепторы
+      if (ph[P.PIT] >= 0.2) {
+        ctx.fillStyle = 'rgba(30,10,10,0.85)';
+        for (const side of [1, -1]) {
+          ctx.beginPath();
+          ctx.arc(hx + hr * 0.95, side * hr * 0.22, Math.max(0.3, hr * 0.1), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      if (ph[P.AMPUL] >= 0.2) {
+        ctx.fillStyle = 'rgba(210,240,255,0.8)';
+        for (let q = -1; q <= 1; q++) {
+          ctx.beginPath();
+          ctx.arc(hx + hr * 0.15, q * hr * 0.3, Math.max(0.25, hr * 0.07), 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+      // клыки хищника
+      if (pred) {
+        ctx.fillStyle = '#fff';
+        for (const side of [1, -1]) {
+          ctx.beginPath();
+          ctx.moveTo(hx + hr * 1.1, side * hr * 0.25);
+          ctx.lineTo(hx + hr * 1.45, side * hr * 0.12);
+          ctx.lineTo(hx + hr * 1.1, side * hr * 0.05);
+          ctx.fill();
+        }
+      }
+    }
+    // горловой мешок: кричит тревогу
+    const sac = c.alarm > 0 && ph[P.VOICE] > 0.2 && pm === 0;
+    if (sac) {
+      ctx.fillStyle = 'rgba(255,160,190,0.75)';
+      ctx.beginPath();
+      ctx.arc(hx - hr * 0.5, 0, hr * (0.3 + 0.5 * ph[P.VOICE]), 0, Math.PI * 2);
+      ctx.fill();
+    }
+    // светящиеся органы видны и днём — на портрете
+    if (pm > 0 && ph[P.PHOTO] >= 0.2) {
+      ctx.fillStyle = `hsla(185,100%,72%,${0.5 + 0.5 * ph[P.PHOTO]})`;
+      const n = 2 + Math.round(6 * ph[P.PHOTO]);
+      for (let i = 0; i < n; i++) {
+        const [px, py] = photoAt(i, n, rx, ry);
+        ctx.beginPath();
+        ctx.arc(px, py, Math.max(0.4, s * 0.09), 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    // больной: бледно-зелёные «микробы» кружат у головы
+    if (c.sick > 0) {
+      const a = this.frame * 0.15 + c.id;
+      ctx.fillStyle = 'rgba(200,245,160,0.9)';
+      ctx.beginPath();
+      for (let q = 0; q < 2; q++) {
+        const sx = hx + Math.cos(a + q * Math.PI) * hr * 1.5;
+        const sy = Math.sin(a + q * Math.PI) * hr * 1.5;
+        ctx.moveTo(sx + Math.max(0.3, s * 0.09), sy);
+        ctx.arc(sx, sy, Math.max(0.3, s * 0.09), 0, Math.PI * 2);
+      }
+      ctx.fill();
+      this.seen.sick = true;
+    }
+    ctx.restore();
+    ctx.globalAlpha = a0;
+    if (hidden) {
+      // холмик над норой
+      ctx.strokeStyle = 'rgba(110,80,50,0.6)';
+      ctx.lineWidth = Math.max(0.6, s * 0.22);
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, 1.1 * s, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    const fs = Math.max(6, s);
+    if (sac) {
+      ctx.fillStyle = 'rgba(255,200,220,0.9)';
+      ctx.font = `${fs * 0.8}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.fillText(')))', c.x + Math.cos(c.heading) * (rx + s * 1.4), c.y + Math.sin(c.heading) * (rx + s * 1.4));
+    }
+    if (torpid && pm === 0) {
+      const t = (this.frame + c.id * 37) % 120;
+      if (t < 60) {
+        ctx.globalAlpha = a0 * (1 - t / 60);
+        ctx.fillStyle = '#cfe3ff';
+        ctx.font = `bold ${fs * 0.9}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.fillText('z', c.x + s * 0.6, c.y - s * 1.3 - t * 0.04 * s);
+        ctx.globalAlpha = a0;
+      }
+    } else if (c.state === 'flee' && c.alarm > 0 && pm === 0) {
+      ctx.fillStyle = '#ff6b5b';
+      ctx.font = `bold ${fs}px system-ui`;
+      ctx.textAlign = 'center';
+      ctx.fillText('!', c.x, c.y - s * 1.6);
+    }
+  }
+
+  /** Глаз: белок и зрачок — или бледная сомкнутая щель (слепой или спит). */
+  private eye(x: number, y: number, r: number, closed: boolean): void {
+    const ctx = this.ctx;
+    if (closed) {
+      ctx.strokeStyle = 'rgba(225,220,205,0.85)';
+      ctx.lineWidth = Math.max(0.25, r * 0.45);
+      ctx.beginPath();
+      ctx.moveTo(x - r, y);
+      ctx.lineTo(x + r, y);
+      ctx.stroke();
+      return;
+    }
+    ctx.fillStyle = '#fff';
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = '#111';
+    ctx.beginPath();
+    ctx.arc(x + r * 0.35, y, r * 0.55, 0, Math.PI * 2);
+    ctx.fill();
+  }
+
+  /** ♾️ Ночью: светящиеся органы (бюджет 300 × bk), издалека — одна точка. */
+  private drawPhotophores(vis: (x: number, y: number) => boolean, z: number, night: number, detail: boolean): void {
+    const ctx = this.ctx;
+    let budget = Math.floor(300 * this.bk);
+    ctx.globalCompositeOperation = 'lighter';
+    for (const c of this.world.creatures) {
+      const pv = c.g.ph[P.PHOTO];
+      if (pv < 0.2 || !vis(c.x, c.y)) continue;
+      if (budget-- <= 0) break;
+      const a = Math.min(1, pv * night * 1.3);
+      if (!detail || c.g.size * z <= 2.5) {
+        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.3})`;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, 3 / z, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = `hsla(185,100%,75%,${a})`;
+        ctx.fillRect(c.x - 0.75 / z, c.y - 0.75 / z, 1.5 / z, 1.5 / z);
+        continue;
+      }
+      const [rx, ry] = this.bodyR(c);
+      const co = Math.cos(c.heading), si = Math.sin(c.heading);
+      const n = 2 + Math.round(6 * pv);
+      const r = Math.max(0.5, c.g.size * 1.25 * 0.1);
+      const tw = 0.75 + 0.25 * Math.sin(this.frame * 0.08 + c.id);
+      for (let i = 0; i < n; i++) {
+        const [px, py] = photoAt(i, n, rx, ry);
+        const x = c.x + co * px - si * py, y = c.y + si * px + co * py;
+        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.25 * tw})`;
+        ctx.beginPath();
+        ctx.arc(x, y, r * 3, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = `hsla(185,100%,78%,${a * tw})`;
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  /** ♾️ Дуги эха: эхолокаторы на охоте или в бегстве — ночью или в воде (бюджет 60 × bk). */
+  private drawEcho(vis: (x: number, y: number) => boolean, z: number, night: number): void {
+    const ctx = this.ctx, w = this.world;
+    let budget = Math.floor(60 * this.bk);
+    ctx.lineWidth = 1 / z;
+    for (const c of w.creatures) {
+      if (c.state !== 'hunt' && c.state !== 'flee') continue;
+      const ph = c.g.ph;
+      if (ph[P.EAR] < 0.4 || ph[P.VOICE] < 0.4 || !vis(c.x, c.y)) continue;
+      if (night < 0.3 && !BIOMES[w.terrain.biome[c.cell]].water) continue;
+      if (budget-- <= 0) break;
+      const s = c.g.size * 1.25;
+      for (let q = 0; q < 2; q++) {
+        const k = (((this.frame + c.id * 7) % 30) / 30 + q * 0.5) % 1;
+        ctx.strokeStyle = `rgba(200,160,255,${0.7 * (1 - k)})`;
+        ctx.beginPath();
+        ctx.arc(c.x, c.y, s * 1.8 + k * s * 7, c.heading - 0.6, c.heading + 0.6);
+        ctx.stroke();
+      }
+    }
+  }
+
   private drawParticles(): void {
     const ctx = this.ctx;
     for (const p of this.particles) {
@@ -1849,7 +2464,7 @@ export class SurfaceRenderer {
         ctx.arc(p.x, p.y, 3 + k * 12, 0, Math.PI * 2);
         ctx.stroke();
       } else if (p.kind === 'spark') {
-        ctx.fillStyle = p.hue === 0 ? '#ff5252' : '#ffb74d';
+        ctx.fillStyle = p.hue === 0 ? '#ff5252' : p.hue === 190 ? '#7ff6ff' : '#ffb74d';
         ctx.beginPath();
         ctx.arc(p.x, p.y, p.hue === 0 ? 0.7 : 1.6, 0, Math.PI * 2);
         ctx.fill();
@@ -1869,6 +2484,34 @@ export class SurfaceRenderer {
         ctx.lineWidth = 2;
         ctx.beginPath();
         ctx.arc(p.x, p.y, 6 + k * 70, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (p.kind === 'burst') {
+        // восемь золотых лучей, разлетаются и гаснут
+        const r0 = 4 + k * 26, r1 = 10 + k * 60;
+        ctx.strokeStyle = `hsl(${p.hue},100%,68%)`;
+        ctx.lineWidth = 2.2 * (1 - k) + 0.4;
+        ctx.beginPath();
+        for (let i = 0; i < 8; i++) {
+          const a = (i * Math.PI) / 4 + k * 0.6;
+          const rr = i % 2 ? r1 * 0.6 : r1;
+          ctx.moveTo(p.x + Math.cos(a) * r0, p.y + Math.sin(a) * r0);
+          ctx.lineTo(p.x + Math.cos(a) * rr, p.y + Math.sin(a) * rr);
+        }
+        ctx.stroke();
+      } else if (p.kind === 'zap') {
+        ctx.strokeStyle = '#9ff8ff';
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        for (let q = 0; q < 2; q++) {
+          const a = p.life * 1.7 + q * Math.PI;
+          let x = p.x, y = p.y;
+          ctx.moveTo(x, y);
+          for (let j = 1; j <= 4; j++) {
+            x = p.x + Math.cos(a) * j * 3.5 + (j % 2 ? 2.5 : -2.5) * Math.sin(a);
+            y = p.y + Math.sin(a) * j * 3.5 - (j % 2 ? 2.5 : -2.5) * Math.cos(a);
+            ctx.lineTo(x, y);
+          }
+        }
         ctx.stroke();
       } else if (p.kind === 'spore') {
         ctx.globalAlpha = Math.sin(Math.PI * k) * 0.85;
@@ -1937,6 +2580,19 @@ export class SurfaceRenderer {
 
   /** Портрет существа для инспектора. */
   portrait(canvas: HTMLCanvasElement, c: Creature): void {
+    this.portraitOf(canvas, c, 1);
+  }
+
+  /** ♾️ Портрет по геному — для вымерших записей бестиария (зверь-заглушка). */
+  portraitGenome(canvas: HTMLCanvasElement, g: Genome): void {
+    const stub = {
+      id: 0, sp: 0, g, x: 0, y: 0, heading: 0, v: 0, age: 0, energy: this.world.maxEnergy(g), sick: 0, vir: 0, alarm: 0,
+      state: 'wander', torpor: 0, cell: 0, alive: true,
+    } as unknown as Creature;
+    this.portraitOf(canvas, stub, 2);
+  }
+
+  private portraitOf(canvas: HTMLCanvasElement, c: Creature, mode: 1 | 2): void {
     const dpr = window.devicePixelRatio || 1;
     const w = canvas.clientWidth;
     const h = canvas.clientHeight;
@@ -1947,12 +2603,19 @@ export class SurfaceRenderer {
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     ctx.fillStyle = '#1a1e16';
     ctx.fillRect(0, 0, w, h);
-    const k = (Math.min(w, h) * 0.32) / (c.g.size * 1.25);
+    const oe = this.world.oe || mode === 2;
+    const ph = c.g.ph;
+    // ♾️ размах перепонок и рогов — чтобы зверь влез в рамку
+    const k = (Math.min(w, h) * 0.32) / (c.g.size * 1.25 * (oe ? 1 + 0.4 * ph[P.MEMB] + 0.2 * ph[P.HORN] : 1));
     ctx.setTransform(dpr * k, 0, 0, dpr * k, dpr * (w / 2 - c.x * k + c.g.size * k * 0.3), dpr * (h / 2 - c.y * k));
     const heading = c.heading;
     c.heading = 0;
     this.ctx = ctx;
-    this.drawAnimal(c);
+    if (oe) {
+      this.pmode = mode;
+      this.drawAnimalOE(c);
+      this.pmode = 0;
+    } else this.drawAnimal(c);
     this.ctx = saved;
     c.heading = heading;
   }

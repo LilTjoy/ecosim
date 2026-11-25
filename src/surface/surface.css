@@ -18,7 +18,7 @@
 .s-tools { position: absolute; top: 12px; left: 12px; display: flex; flex-direction: column; gap: 6px; }
 .s-tools button, .s-explain { width: 42px; height: 42px; padding: 0; font-size: 19px; display: grid; place-items: center; background: rgba(10,12,16,0.8); border: 1px solid #2a2f37; border-radius: 10px; }
 .s-tools button.active { border-color: var(--accent); background: #333a24; }
-.s-tools button[hidden], .s-spawn button[hidden] { display: none; }
+.s-tools button[hidden], .s-spawn button[hidden], .s-tabs button[hidden] { display: none; }
 .s-explain { cursor: pointer; position: relative; }
 .s-explain input { position: absolute; opacity: 0; width: 100%; height: 100%; margin: 0; cursor: pointer; }
 .s-explain:has(input:not(:checked)) { opacity: 0.4; }
@@ -366,3 +366,41 @@
   .fly-maps { grid-template-columns: 1fr; }
 }
 .tm-follow input { width: auto; flex: none; margin: 0; }
+
+/* ---- ♾️ Открытая эволюция: вкладка «🌟 Открытия», тело, умения ---- */
+.s-log li.evo { color: #ffd56b; }
+.s-heritage { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12px; }
+.s-heritage span { padding: 2px 8px; border-radius: 10px; background: #1c2027; border: 1px solid #2f3540; }
+.s-heritage a, .d-card a, .b-chips a { cursor: pointer; color: #9ecbff; }
+.d-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 5px; }
+@media (max-width: 900px) and (min-width: 520px) { .d-grid { grid-template-columns: 1fr 1fr 1fr; } }
+.d-card { padding: 6px 8px; border-radius: 8px; background: #15181c; border: 1px solid #22262b; font-size: 12px; line-height: 1.3; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.d-card .d-t { font-weight: 600; overflow-wrap: anywhere; }
+.d-card .d-s { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.d-card .d-u { color: #cfe3ff; font-size: 11px; }
+.d-card.found { border-color: #6b5a22; background: #1f1c12; cursor: pointer; }
+.d-card.found .d-t { color: #ffd56b; }
+.d-card.found:hover { border-color: #ffd56b; }
+.d-card.inh { cursor: pointer; }
+.d-card.inh .d-t { color: #c9c3b0; }
+.d-card.lost { opacity: 0.55; filter: grayscale(1); cursor: pointer; }
+.d-card.unk .d-t { color: #8a909a; font-weight: 400; }
+.d-bar { height: 3px; border-radius: 2px; background: #22262b; overflow: hidden; }
+.d-bar div { height: 100%; background: #b8a04a; }
+.d-mu { color: #9be37a; }
+.d-rows, .d-best { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 3px; font-size: 12px; }
+.d-rows li, .d-best li { padding: 4px 8px; border-radius: 8px; background: #15181c; }
+.d-rows li[data-spg], .d-best li { cursor: pointer; }
+.d-best li { display: flex; gap: 8px; align-items: center; line-height: 1.3; }
+.d-best i { color: #c4c9bb; }
+.d-pt { width: 40px; height: 28px; flex: none; border-radius: 4px; }
+.s-collection { font-size: 12px; color: #ffd56b; padding: 6px 8px; border: 1px dashed #6b5a22; border-radius: 8px; text-align: center; }
+.b-chips { display: flex; flex-wrap: wrap; gap: 3px; align-items: center; }
+.b-chip { font-size: 11.5px; padding: 1px 7px; border-radius: 9px; background: #1c2027; border: 1px solid #2f3540; cursor: help; white-space: nowrap; }
+.b-chip.weak { opacity: 0.55; }
+.b-chip.blind { color: #c9c3b0; }
+.a-badges { display: flex; flex-wrap: wrap; gap: 3px; }
+.a-badge { font-size: 11.5px; padding: 1px 7px; border-radius: 9px; background: #1f1c12; border: 1px solid #6b5a22; color: #ffd56b; cursor: pointer; white-space: nowrap; }
+.sp-ic { font-size: 11px; letter-spacing: 1px; }
+i.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; }
+.s-hud .s-disc { pointer-events: auto; cursor: pointer; color: #ffd56b; border-color: #6b5a22; }
