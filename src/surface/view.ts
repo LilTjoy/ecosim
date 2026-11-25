@@ -2,6 +2,7 @@ import { clamp, mix32 } from '../lib/random';
 import { plural } from '../lib/text';
 import { FIELD_ICON, type Fact } from '../planet/facts';
 import { GENE_INFO, GENE_KEYS, type GeneKey, type Genome } from '../sim/genome';
+import type { PresetBody } from '../sim/modules';
 import type { Pathogen } from '../sim/microbes';
 import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
@@ -28,14 +29,19 @@ const DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV ===
 const WORLD_W = 3200;
 const WORLD_H = 2000;
 
-const PRESETS: { icon: string; name: string; g: Partial<Genome> }[] = [
+/** body — ♾️ тело «завезённых» (только с открытой эволюцией; строит мир из своих костей). */
+const PRESETS: { icon: string; name: string; g: Partial<Genome>; body?: PresetBody }[] = [
   { icon: '🐇', name: 'Травоядное', g: { size: 3.5, speed: 1.3, sense: 55, diet: 0.05, tempPref: 0.5, social: 0.6 } },
   { icon: '🐗', name: 'Всеядное', g: { size: 6.5, speed: 1.3, sense: 60, diet: 0.45, tempPref: 0.5, social: 0.5 } },
   { icon: '🦊', name: 'Хищник', g: { size: 6, speed: 2.2, sense: 85, diet: 0.9, tempPref: 0.5, social: 0.6 } },
   { icon: '🐟', name: 'Пловец', g: { size: 4.5, speed: 1.3, sense: 55, diet: 0.15, tempPref: 0.55, swim: 0.85, social: 0.5 } },
   { icon: '🦣', name: 'Снежный гигант', g: { size: 10, speed: 1, sense: 60, diet: 0.05, tempPref: 0.15, social: 0.8 } },
   { icon: '🦎', name: 'Пустынник', g: { size: 2.5, speed: 1.6, sense: 70, diet: 0.1, tempPref: 0.85, social: 0.2 } },
+  { icon: '🦀', name: 'Краб', g: { size: 4, speed: 1, sense: 50, diet: 0.45, tempPref: 0.55, swim: 0.3, social: 0.4 }, body: 'crab' },
+  { icon: '🦇', name: 'Летун', g: { size: 2.5, speed: 1.8, sense: 70, diet: 0.45, tempPref: 0.5, social: 0.6 }, body: 'flier' },
+  { icon: '🎲', name: 'Мутант', g: { size: 4, speed: 1.3, sense: 60, diet: 0.08, tempPref: 0.5, social: 0.5 }, body: 'mutant' },
 ];
+const INTRO_TIP = 'Завезённые игроком не считаются открытиями эволюции';
 
 const STATE_NAMES: Record<Creature['state'], string> = {
   wander: 'бродит',
@@ -126,6 +132,7 @@ const TEMPLATE = /* html */ `
       <button data-tool="grass" title="Сажать траву">🌱</button>
       <button data-tool="spawn" title="Поселить существ">➕</button>
       <button data-tool="meteor" title="Метеорит">☄️</button>
+      <button data-tool="mutagen" data-oe title="Всплеск мутаций: год у потомков зверей рядом органы меняются чаще">☢️</button>
       <button data-act="drought" title="Засуха">🔥</button>
       <button data-act="epidemic" title="Новая болезнь у самого многочисленного вида">🦠</button>
       <button data-act="lens" title="Микроскоп: невидимая жизнь (M)">🔬</button>
@@ -202,7 +209,9 @@ export class SurfaceView {
   private canvas: HTMLCanvasElement;
   private mini: HTMLCanvasElement;
   private speed = 1;
-  private tool: 'inspect' | 'grass' | 'meteor' | 'spawn' = 'inspect';
+  private tool: 'inspect' | 'grass' | 'meteor' | 'spawn' | 'mutagen' = 'inspect';
+  /** Показаны ли кнопки открытой эволюции (☢️, краб, летун, мутант) — сверяется с world.oe в renderHud. */
+  private oeShown: boolean | null = null;
   private preset = 0;
   private selected: Creature | null = null;
   private follow = false;
@@ -499,7 +508,7 @@ export class SurfaceView {
 
     const spawn = $(r, '.s-spawn');
     spawn.innerHTML = '<div class="muted small">Кликните по карте — поселим группу:</div>' +
-      PRESETS.map((p, i) => `<button data-p="${i}" class="${i === 0 ? 'active' : ''}">${p.icon} ${p.name}</button>`).join('');
+      PRESETS.map((p, i) => `<button data-p="${i}" class="${i === 0 ? 'active' : ''}"${p.body ? ` data-oe title="${INTRO_TIP}"` : ''}>${p.icon} ${p.name}</button>`).join('');
     spawn.addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest('[data-p]') as HTMLElement | null;
       if (!b) return;
@@ -708,10 +717,13 @@ export class SurfaceView {
         else if (wx >= 0 && wy >= 0 && wx < WORLD_W && wy < WORLD_H) this.selectCell(this.world.terrain.index(wx, wy));
       }
       else if (this.tool === 'meteor') this.act({ k: 'meteor', x: wx, y: wy });
+      else if (this.tool === 'mutagen') this.act({ k: 'mutagen', x: wx, y: wy });
       else if (this.tool === 'spawn') {
         const p = PRESETS[this.preset];
         // цвет группы — из костей мира (World.apply), запись в летописи — тоже там
-        this.act({ k: 'spawn', g: { ...p.g }, n: 8, x: wx, y: wy, icon: p.icon, label: p.name });
+        this.act(p.body && this.world.oe
+          ? { k: 'spawn', g: { ...p.g }, n: 8, x: wx, y: wy, icon: p.icon, label: p.name, body: p.body }
+          : { k: 'spawn', g: { ...p.g }, n: 8, x: wx, y: wy, icon: p.icon, label: p.name });
       }
     };
     c.addEventListener('pointerup', up);
@@ -1192,6 +1204,16 @@ export class SurfaceView {
 
   private renderHud(): void {
     const w = this.world;
+    if (this.oeShown !== w.oe) {
+      this.oeShown = w.oe;
+      this.root.querySelectorAll<HTMLElement>('[data-oe]').forEach((b) => (b.hidden = !w.oe));
+      // выбранный инструмент или зверь исчез — вернуться к обычным
+      if (!w.oe && this.tool === 'mutagen') $<HTMLButtonElement>(this.root, '[data-tool=inspect]').click();
+      if (!w.oe && PRESETS[this.preset]?.body) {
+        this.preset = 0;
+        this.root.querySelectorAll('.s-spawn [data-p]').forEach((x) => x.classList.toggle('active', (x as HTMLElement).dataset.p === '0'));
+      }
+    }
     const s = w.season;
     const env = w.env;
     $(this.root, '.s-env').innerHTML = `<b>${env.name}</b> <span>O₂ ${Math.round(env.o2 * 100)}%</span><span>g ${env.gravity.toFixed(2)}</span>${env.landLife ? '' : '<span>🌊 жизнь пока только в море</span>'}`;
@@ -2470,7 +2492,7 @@ export class SurfaceView {
       ${row('nudge', '🦋', 'Взмах крыла бабочки', 'сдвинуть одну особь на миллионную долю пикселя')}
       ${row('tape', '🎲', 'Плёнка жизни…', 'перемотать и запустить снова 3–6 раз')}
       ${row('meteor', '☄️', 'Метеорит сюда', 'выберите место на карте')}
-      ${PRESETS.map((p, i) => row('spawn', p.icon, p.name, '8 особей — нажмите на карту', `data-p="${i}"`)).join('')}
+      ${PRESETS.map((p, i) => (p.body && !w.oe ? '' : row('spawn', p.icon, p.name, p.body ? `8 особей — ${INTRO_TIP.toLowerCase()}` : '8 особей — нажмите на карту', `data-p="${i}"`))).join('')}
       ${doomed.length ? `<div class="tm-sub">🧬 ${tl.visiting ? 'Спасти вид (позже вымрет):' : 'Вернуть вымерший вид:'}</div>${doomed.map((sp) => row('rescue', '🧬', `Спасти «${sp.name}»`, '', `data-sp="${sp.id}"`)).join('')}` : ''}
       <div class="tm-sub">🚫 Убрать вид <em>а если бы их не было?</em></div>
       ${living.slice(0, 8).map((sp) => row('remove', '🚫', `«${sp.name}»`, `${sp.count}`, `data-sp="${sp.id}"`)).join('')}

@@ -160,11 +160,11 @@ function emptyBody(shape: number): Body {
 }
 
 /** Тело из списка [вид, уровень]; происхождение по умолчанию — сам вид (наследство). */
-export function bodyFrom(list: readonly (readonly [M, number])[], shape: number, origin?: number): Body {
+export function bodyFrom(list: readonly (readonly [M, number, number?])[], shape: number, origin?: number): Body {
   const b = emptyBody(shape);
   for (let i = 0; i < list.length && i < NSLOT; i++) {
-    const [k, l] = list[i];
-    b.km[i] = k | ((origin ?? k) << 5);
+    const [k, l, o] = list[i];
+    b.km[i] = k | ((o ?? origin ?? k) << 5);
     b.lvl[i] = l;
   }
   return b;
@@ -175,12 +175,40 @@ export function bodyFrom(list: readonly (readonly [M, number])[], shape: number,
  * две пары ног; мех — у холодолюбивых. С `rand` уровни случайно сдвинуты (стенд --kit=random).
  */
 export function kitFor(g: Genome, rand?: Rand): Body {
-  const sw = g.swim > 0.6;
-  const leg = sw ? 0.3 : 0.5;
+  const list = kitList(g.swim, g.tempPref);
+  if (rand) jitterKit(list, rand);
+  return bodyFrom(list, g.swim > 0.6 ? 0.6 : 0.5);
+}
+
+/** Список модулей нейтрального набора (основа и для наследства планеты, heritage.ts). */
+export function kitList(swim: number, tempPref: number): [M, number][] {
+  const leg = swim > 0.6 ? 0.3 : 0.5;
   const list: [M, number][] = [[M.EYE, 1], [M.EAR, 0.3], [M.NOSE, 0.3], [M.ENDO, 0.8], [M.LIMB, leg], [M.LIMB, leg]];
-  if (g.tempPref <= 0.25) list.push([M.FUR, 0.5]);
-  if (rand) for (const e of list) e[1] = clamp(e[1] * (0.6 + 0.8 * rand()), 0.05, 1);
-  return bodyFrom(list, sw ? 0.6 : 0.5);
+  if (tempPref <= 0.25) list.push([M.FUR, 0.5]);
+  return list;
+}
+
+/** Тела «завезённых» игроком (➕): краб, летун и случайный мутант. Происхождение — ORIGIN.INTRODUCED. */
+export type PresetBody = 'crab' | 'flier' | 'mutant';
+export function presetBody(kind: PresetBody, g: { swim?: number; tempPref?: number }, rand: Rand): Body {
+  const I = ORIGIN.INTRODUCED;
+  if (kind === 'crab') return bodyFrom([[M.EYE, 1], [M.ENDO, 0.8], [M.SHELL, 0.7], [M.CLAW, 0.6], [M.LIMB, 0.5], [M.LIMB, 0.5], [M.LIMB, 0.5], [M.LIMB, 0.5]], 0.15, I);
+  if (kind === 'flier') return bodyFrom([[M.EYE, 1], [M.EAR, 0.7], [M.NOSE, 0.3], [M.ENDO, 0.8], [M.LIMB, 0.5], [M.LIMB, 0.5], [M.MEMB, 0.9], [M.VOICE, 0.7]], 0.5, I);
+  const list: [M, number][] = kitList(g.swim ?? 0.1, g.tempPref ?? 0.5);
+  const pool = ALL_KINDS.filter((k) => k !== M.EYE && k !== M.EAR && k !== M.NOSE && k !== M.ENDO && k !== M.LIMB && !list.some((e) => e[0] === k));
+  for (let i = 0; i < 2; i++) {
+    const j = Math.floor(rand() * pool.length);
+    list.push([pool[j], 0.5 + 0.3 * rand()]);
+    pool.splice(j, 1);
+  }
+  // мех занят набором у холодолюбивых — тогда первый модуль ставим вместо него, чтобы влезли оба
+  while (list.length > NSLOT) list.splice(list.findIndex((e) => e[0] === M.FUR), 1);
+  return bodyFrom(list, (g.swim ?? 0.1) > 0.6 ? 0.6 : 0.5, I);
+}
+
+/** Стенд --kit=random: уровни набора случайно ×0.6…1.4. */
+export function jitterKit(list: [M, number][], rand: Rand): void {
+  for (const e of list) e[1] = clamp(e[1] * (0.6 + 0.8 * rand()), 0.05, 1);
 }
 
 /**

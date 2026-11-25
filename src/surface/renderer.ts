@@ -1461,6 +1461,9 @@ export class SurfaceRenderer {
         const v = 1 + Math.random() * 4;
         P.push({ x: e.x, y: e.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 0, max: 60, kind: 'spark', hue: 30 });
       }
+    } else if (e.kind === 'mutagen') {
+      // ☢️ всплеск мутаций: зеленоватая волна радиусом ~150
+      P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: 0, max: 90, kind: 'blast', hue: 90 });
     } else if (e.kind === 'newSpecies') {
       for (let i = 0; i < 3; i++) P.push({ x: e.x, y: e.y, vx: 0, vy: 0, life: -i * 15, max: 70, kind: 'star', hue: e.hue });
     } else if (e.kind === 'outbreak') {
@@ -1853,11 +1856,12 @@ export class SurfaceRenderer {
         p.vx *= 0.92;
         p.vy *= 0.92;
       } else if (p.kind === 'blast') {
-        ctx.fillStyle = `rgba(255,150,50,${0.5 * (1 - k)})`;
+        const mu = p.hue === 90; // ☢️ всплеск мутаций — зелёная волна радиусом 150, без огня
+        ctx.fillStyle = mu ? `rgba(140,255,90,${0.25 * (1 - k)})` : `rgba(255,150,50,${0.5 * (1 - k)})`;
         ctx.beginPath();
-        ctx.arc(p.x, p.y, 20 + k * 200, 0, Math.PI * 2);
+        ctx.arc(p.x, p.y, mu ? 10 + k * 140 : 20 + k * 200, 0, Math.PI * 2);
         ctx.fill();
-        ctx.strokeStyle = 'rgba(255,240,180,0.9)';
+        ctx.strokeStyle = mu ? 'rgba(200,255,160,0.8)' : 'rgba(255,240,180,0.9)';
         ctx.lineWidth = 4;
         ctx.stroke();
       } else if (p.kind === 'star') {

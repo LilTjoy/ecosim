@@ -81,6 +81,8 @@ export const BEST = {
   APO_AVOID: 300, APO_TOX: 0.2, MIM_TOX: 0.05, APO_MAX: 3, MIM_MAX: 3,
   /** Бутылочное горлышко: падение ниже DROP от максимума за 1000 тактов, минимум на ABS особей; пауза COOL; радиация через RAD_T. */
   BN_DROP: 0.5, BN_ABS: 200, BN_COOL: 6000, RAD_T: 6000, RAD_MIN: 4,
+  /** Мир после катастрофы (наследство планеты): первые виды отделяются только к 12–15 тысячам тактов — ждём радиацию дольше. */
+  RAD_HER: 21000,
 };
 /** Конвергенция Стейтона C1. */
 export const CONV = { SPLIT: 8000, TIP: 0.25, MAX: 0.7, C1: 0.65, DEDUP: 5000, N: 8 };
@@ -145,6 +147,8 @@ export interface Bottleneck {
   tick: number;
   survivors: number[];
   n: number;
+  /** Сколько ждать радиацию (нет — BEST.RAD_T; горлышко из наследства планеты — BEST.RAD_HER). */
+  wait?: number;
 }
 
 export interface BestiaryState {
@@ -818,7 +822,7 @@ export function trackBottleneck(w: World): void {
     B.bnLogs++;
     w.log(`⚠️ Бутылочное горлышко: выжило ${n} из ${Math.round(mx)}`, 'disaster', undefined, undefined, 'lilliput');
   }
-  if (B.bn && tick - B.bn.tick >= BEST.RAD_T) {
+  if (B.bn && tick - B.bn.tick >= (B.bn.wait ?? BEST.RAD_T)) {
     const surv = new Set(B.bn.survivors), per = new Map<number, number>();
     let total = 0;
     for (const sp of w.species.all.values()) {

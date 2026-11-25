@@ -5,6 +5,7 @@
 // и снова приложить записанные действия и ввод в те же такты. Ветка — своя запись действий и ввода поверх
 // общего начала (линии предков); снимки прореживаются по возрасту и укладываются в бюджет памяти.
 import { GENE_KEYS, type Genome } from './genome';
+import type { PresetBody } from './modules';
 import { CLIMATE_C, DAY, guildOf, type Sample, type Settings, type World, type WorldEvent } from './world';
 import { recycleSnap, snapshotProblems, type WorldSnap } from './snapshot';
 
@@ -16,7 +17,10 @@ export type Action = { t: number } & (
   | { k: 'epidemic' }
   /** Точки (x, y подряд) одного такта сливаются в одно действие. */
   | { k: 'grass'; pts: number[]; r: number }
-  | { k: 'spawn'; g: Partial<Genome>; n: number; x: number; y: number; icon: string; label: string }
+  /** body — тело «завезённых» (♾️ краб, летун, мутант; строится в мире из его костей). */
+  | { k: 'spawn'; g: Partial<Genome>; n: number; x: number; y: number; icon: string; label: string; body?: PresetBody }
+  /** ♾️ Всплеск мутаций: у зверей рядом год органы потомков меняются чаще. */
+  | { k: 'mutagen'; x: number; y: number }
   | { k: 'possess'; id: number | null }
   /** Записывается сам, по разнице настроек перед шагом (и «Мутации ×2/×½»). */
   | { k: 'settings'; s: Settings }
@@ -40,7 +44,7 @@ type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type ActionInput = DistOmit<Action, 't'>;
 
 /** Действия, которые можно отменить тостом «↶ Отменить». */
-export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue']);
+export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue', 'mutagen']);
 /** Разница, записанная машиной времени, а не поступок игрока. */
 export const isDiff = (a: Action): boolean => a.k === 'settings' || (a.k === 'experiment' && !!a.quiet);
 
@@ -288,6 +292,7 @@ export function actionText(a: Action): string {
     case 'epidemic': return '🦠 эпидемия';
     case 'grass': return '🌱 трава';
     case 'spawn': return `${a.icon} «${a.label}»`;
+    case 'mutagen': return '☢️ всплеск мутаций';
     case 'possess': return a.id === null ? '👑 вы покинули особь' : `👑 вселение в #${a.id}`;
     case 'settings': return '🧪 настройки';
     case 'experiment': return '🧫 опыт';

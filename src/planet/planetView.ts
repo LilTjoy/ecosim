@@ -1,6 +1,7 @@
-import { clamp } from '../lib/random';
+import { clamp, mulberry32 } from '../lib/random';
 import { drawGases, drawTemperature, drawTimeline, STAGE_COLORS, xToTime } from './charts';
 import type { SurfaceEnv } from '../sim/world';
+import { computeHeritage } from '../sim/heritage';
 import { FACTS, FIELD_ICON, WORLD_FACTS, type Fact } from './facts';
 import { Globe } from './globe';
 import {
@@ -412,6 +413,7 @@ export class PlanetView {
     const d = this.result.derived;
     const land = s.ocean <= 0.005 ? 1 : clamp(1 - (1 - d.land) * Math.pow(s.ocean, 0.6), 0, 1);
     const t = clamp((d.teff - 2800) / 4200, 0, 1);
+    const h = computeHeritage(this.result, this.now);
     return {
       name: `Мир #${this.params.seed}, ${fmtAge(this.now)}`,
       sea: clamp(1 - land, 0.08, 0.85),
@@ -423,6 +425,12 @@ export class PlanetView {
       starTint: [1, 0.82 + t * 0.18, 0.62 + t * 0.38],
       volcanism: d.tectonics ? 1 : 0.3,
       lifeStage: s.stage,
+      // ♾️ для открытой эволюции: свет для зрения, мутность морей, давление, магнитное поле и наследство предков
+      light: h.light,
+      murk: clamp(0.15 + 0.45 * mulberry32(this.params.seed ^ 0x77)(), 0, 0.6),
+      pressure: s.pressure + s.co2,
+      magField: this.now < d.dynamo,
+      heritage: h,
     };
   }
 

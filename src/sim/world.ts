@@ -2,10 +2,11 @@ import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
 import { clamp, mix32, mulberry32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
-import { ALL_KINDS, EARTH_EXPR, EVO, finish, hueDiff, hueNear, newEvoStats, ORIGIN, P, patClass, type ExprCtx } from './modules';
+import { ALL_KINDS, EARTH_EXPR, EVO, finish, hueDiff, hueNear, newEvoStats, ORIGIN, P, patClass, presetBody, type ExprCtx, type M } from './modules';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
-import { newBestiary, trackBottleneck, updateBestiary, type BestiaryState } from './bestiary';
+import { BEST, newBestiary, trackBottleneck, updateBestiary, type BestiaryState } from './bestiary';
+import { chronicle, founderPlan, heritageOf, worldPalette, type Founder, type Heritage } from './heritage';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 import type { Action } from './timeline';
 
@@ -216,6 +217,8 @@ export interface SurfaceEnv {
   murk?: number;
   pressure?: number;
   magField?: boolean;
+  /** ♾️ Наследство планеты (heritage.ts); недостающие поля — как на Земле. Нет — Земля. */
+  heritage?: Partial<Heritage>;
 }
 
 export const EARTH_ENV: SurfaceEnv = { name: 'Земля', sea: 0.3, tempOffset: 0, o2: 0.21, gravity: 1, seasonAmp: 0.16, landLife: true, starTint: [1, 1, 1], volcanism: 1, lifeStage: 7 };
@@ -244,7 +247,7 @@ export const CLIMATE_C = 100 / 3;
 const HASH = 80;
 
 /** Стартовые «предки». Каждый живёт в своём климате. */
-const FOUNDERS: { n: number; g: Partial<Genome> }[] = [
+const FOUNDERS: Founder[] = [
   { n: 140, g: { size: 3.5, speed: 1.3, sense: 50, diet: 0.05, tempPref: 0.5, social: 0.6, hue: 110 } },
   { n: 50, g: { size: 4.5, speed: 1.1, sense: 60, diet: 0.05, tempPref: 0.2, social: 0.8, hue: 30 } },
   { n: 50, g: { size: 2.5, speed: 1.6, sense: 70, diet: 0.08, tempPref: 0.8, social: 0.2, hue: 50 } },
@@ -396,6 +399,10 @@ export class World {
   avoided = new Map<number, number>();
   /** Летопись открытий (простые данные — снимок клонирует целиком). */
   bestiary: BestiaryState = newBestiary();
+  /** Основатели этого мира (с открытой эволюцией — по наследству планеты); из них же «приплывают с большой земли». */
+  founderPlan: Founder[] = FOUNDERS;
+  /** Палитра мира: модули, которые у части основателей в зачатке. */
+  palette: M[] = [];
   /** Квадраты радиусов каналов текущей воспринимающей особи (считаются в senseRange прямо перед perceive). */
   private sv2 = 0;
   private sh2 = 0;
@@ -469,11 +476,22 @@ export class World {
       for (let i = 0; i < 4; i++) this.chan[i] = 1 + EVO.JIT * (2 * pr() - 1);
       this.airSnd = clamp(Math.sqrt(env.pressure ?? 1), 0.3, 1.5);
     }
-    for (const f of FOUNDERS) {
-      // до выхода на сушу живут только морские существа
-      const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
-      this.colonize(g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
-    }
+    this.founderPlan = FOUNDERS;
+    this.palette = [];
+    let her: Heritage | null = null;
+    if (this.oe) {
+      // до выхода на сушу — только морские (до набора и наследства); тела основателей — по наследству планеты
+      const base = FOUNDERS.map((f) => ({ n: f.n, g: env.landLife ? f.g : { ...f.g, swim: 0.9 } }));
+      her = heritageOf(env.heritage);
+      this.palette = worldPalette(seed, her);
+      this.founderPlan = founderPlan(base, her, seed, this.palette).plan;
+      for (const f of this.founderPlan) this.colonize(f.g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
+    } else
+      for (const f of FOUNDERS) {
+        // до выхода на сушу живут только морские существа
+        const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
+        this.colonize(g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
+      }
     this.metRef = 1;
     this.upRef = 0;
     this.dl = this.daylight;
@@ -491,7 +509,16 @@ export class World {
       mode === 'neural' ? 'Мир создан. Мозги случайные — посмотрим, кто научится выживать.' : 'Мир создан. Жизнь начинается.',
       'info',
     );
-    if (this.oe) this.log(this.passport(), 'info');
+    if (her) {
+      this.log(this.passport(), 'info');
+      for (const [text, fact] of chronicle(her, this.founderPlan, this.palette)) this.log(text, 'evo', undefined, undefined, fact);
+      // мир после катастрофы: остров заселяют потомки выживших — ждём адаптивную радиацию (§7.6)
+      if (her.bottleneck > 0.3) {
+        const survivors = this.species.living().map((sp) => sp.id);
+        this.bestiary.bn = { tick: 0, survivors, n: this.creatures.length, wait: BEST.RAD_HER };
+        this.bestiary.lastBn = 0;
+      }
+    }
   }
 
   /** Почва без случайностей: тёплый старт около равновесия (поток случайных чисел основателей не меняется). */
@@ -2067,7 +2094,8 @@ export class World {
       this.log(`⛵ С большой земли приплыли ${what}: «${sp.name}» (${n})`, 'migration');
     };
     const pickF = (f: (g: Partial<Genome>) => boolean) => {
-      const list = FOUNDERS.filter((x) => f(x.g));
+      let list = this.founderPlan.filter((x) => f(x.g));
+      if (!list.length) list = FOUNDERS.filter((x) => f(x.g));
       return list[Math.floor(this.r() * list.length)].g;
     };
     if (this.env.landLife) {
@@ -2079,6 +2107,21 @@ export class World {
   }
 
   // ---------------- инструменты и катастрофы ----------------
+
+  /** ☢️ Всплеск мутаций: у зверей в радиусе 150 год потомки чаще удваивают и изобретают органы (×EVO.MUT_BOOST). */
+  mutagen(x: number, y: number): void {
+    if (!this.oe) return;
+    const R2 = 150 * 150, until = this.tick + YEAR;
+    let n = 0;
+    for (const c of this.creatures) {
+      if (!c.alive || (c.x - x) ** 2 + (c.y - y) ** 2 > R2) continue;
+      c.mutT = Math.max(c.mutT, until);
+      n++;
+    }
+    this.fx.push({ kind: 'mutagen', x, y, hue: 90 });
+    const region = this.terrain.regionAt(x, y)?.name ?? 'неизвестных землях';
+    this.log(`☢️ Всплеск мутаций в «${region}»: год у потомков этих зверей (${n}) органы будут меняться чаще`, 'evo', x, y, 'mutagen');
+  }
 
   meteor(x: number, y: number): void {
     const R = 160;
@@ -2199,6 +2242,9 @@ export class World {
       case 'drought':
         this.startDrought();
         break;
+      case 'mutagen':
+        this.mutagen(a.x, a.y);
+        break;
       case 'epidemic':
         this.epidemic();
         break;
@@ -2206,7 +2252,10 @@ export class World {
         for (let i = 0; i + 1 < a.pts.length; i += 2) this.paintGrass(a.pts[i], a.pts[i + 1], a.r);
         break;
       case 'spawn': {
-        const sp = this.colonize({ ...a.g, hue: this.r() * 360 }, a.n, a.x, a.y);
+        const g: Partial<Genome> = { ...a.g, hue: this.r() * 360 };
+        // ♾️ завезённые игроком — всегда отдельный вид и не в счёт открытий
+        if (this.oe && a.body) g.body = presetBody(a.body, g, this.r);
+        const sp = this.colonize(g, a.n, a.x, a.y, this.oe);
         this.log(`${a.icon} Вы поселили группу: «${sp.name}» (${a.n})`, 'player', a.x, a.y);
         break;
       }

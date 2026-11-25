@@ -67,7 +67,9 @@ export function genome(p: Partial<Genome>, neural: boolean, rand: Rand, ctx: Exp
     brain: neural ? randomBrain(rand) : null,
     ...p,
   } as Genome;
-  out.body = p.body ?? kitFor(out);
+  // своя копия тела: у снимка тела общие по ссылке, а план основателей и основатель вида после загрузки — копии
+  // (иначе тот же мир после загрузки снимка дал бы другой отпечаток)
+  out.body = p.body ? { km: new Int32Array(p.body.km), lvl: new Float32Array(p.body.lvl), shape: p.body.shape } : kitFor(out);
   return finish(out, ctx);
 }
 

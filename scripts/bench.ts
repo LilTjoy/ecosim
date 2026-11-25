@@ -14,6 +14,7 @@ import { runTm } from './tmBench';
 import { BIOMES } from '../src/sim/terrain';
 import * as MM from '../src/sim/modules';
 import * as BM from '../src/sim/bestiary';
+import * as HM from '../src/sim/heritage';
 const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags: Record<string, string> = {};
 for (const a of process.argv.slice(2)) if (a.startsWith('--')) { const [k, v] = a.slice(2).split('='); flags[k] = v ?? '1'; }
@@ -37,10 +38,12 @@ const applyFlags = (w: InstanceType<typeof World>) => {
   if (flags.oe !== undefined && 'openEvo' in w.settings) W.settings.openEvo = flags.oe !== '0';
 };
 // ручки открытой эволюции (и будущих таблиц: открытия, наследство) — по имени, в том же духе, что SOIL/DIS
-const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV] as unknown as Record<string, unknown>[];
+const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV, HM.PAL, HM.HER] as unknown as Record<string, unknown>[];
 for (const mod of KNOBS) for (const k in flags) if (k in mod) mod[k] = typeof mod[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
 if (flags.convdiag) BM.CONV_DIAG.on = true;
 if (flags.benthic !== undefined) MM.EVO.BENTHIC = flags.benthic !== '0';
+// --kit=random — уровни нейтрального набора основателей случайно ×0.6…1.4 (ворота O9)
+if (flags.kit !== undefined) HM.HER.kitRandom = flags.kit === 'random';
 // --her=… — условия планеты (поля, которых мир пока не знает, он просто не читает)
 const HER: Record<string, Record<string, unknown>> = {
   cold: { heritage: { cold: 0.8 } },
@@ -78,7 +81,18 @@ if (flags.tm) {
 w.reset(mode, seed, herEnv, salt);
 // ♾️ только при открытой эволюции: счётчики строк журнала, первые такты событий, смерти хищников
 const OE = !!W.oe;
-const oe = { evoLines: 0, bottle: 0, first: {} as Record<string, number>, carnD: 0, poisonD: 0, creSum: 0, msSum: 0, cre0: 0 };
+const chron0 = OE ? w.events.filter((e) => e.kind === 'evo').map((e) => e.fact).join(',') || '-' : '';
+const oe = { evoLines: 0, bottle: 0, first: {} as Record<string, number>, carnD: 0, poisonD: 0, creSum: 0, msSum: 0, cre0: 0, peak: new Float64Array(MM.KIND_NAMES.length), peakT: new Float64Array(MM.KIND_NAMES.length) };
+/** Носители вида модуля (накопленный уровень ≥ 0.3; ноги — пары / 2) по всем особям. */
+const carriers = (out: Float64Array) => {
+  out.fill(0);
+  for (const c of w.creatures) {
+    const ph = c.g.ph as Float32Array;
+    for (let k = 1; k < out.length; k++) if ((k === MM.M.LIMB ? ph[MM.P.LEGS] / 2 : ph[k - 1]) >= 0.3) out[k]++;
+  }
+  return out;
+};
+const carrBuf = new Float64Array(MM.KIND_NAMES.length);
 if (OE) {
   const log0 = W.log;
   W.log = function (this: any, text: string, kind: string, ...rest: unknown[]) {
@@ -134,7 +148,11 @@ const landN = tLand();
 let budget = 0;
 for (let t = 1; t <= T; t++) {
   w.step();
-  if (OE) oe.creSum += w.creatures.length;
+  if (OE) {
+    oe.creSum += w.creatures.length;
+    // O11: наибольшее число носителей каждого модуля за прогон (раз в 500 тактов)
+    if (t % 500 === 0) { carriers(carrBuf); for (let k = 1; k < carrBuf.length; k++) if (carrBuf[k] > oe.peak[k]) { oe.peak[k] = carrBuf[k]; oe.peakT[k] = t; } }
+  }
   for (const sp of w.species.all.values()) if (sp.extinct === null && sp.count > 400) budget += sp.count * w.crowding(sp.id);
   if (t % 10 === 0) {
     const cur = new Set<any>(w.corpses);
@@ -266,6 +284,8 @@ if (OE) {
     `\n OE perf: msK=${(oe.msSum / Math.max(1, oe.creSum / 1000)).toFixed(3)} (мс на 1000 особей·такт) heapMB=${(process.memoryUsage().heapUsed / 1048576).toFixed(1)}` +
     `\n OE body: EYE/ENDO herb=${kitMin[0]} omni=${kitMin[1]} carn=${kitMin[2]} swim=${kitMin[3]} fliers=${pc(fly, land)}% gliders=${pc(glide, land)}% of land(n=${land}) torpid=${torp}` +
     `\n OE senses: hidden=${hid} avoided=${(B?.avoidTot ?? 0) + [...(W.avoided as Map<number, number>).values()].reduce((x, y) => x + y, 0)} chan=${[...W.chan].map((x: number) => x.toFixed(2)).join('/')} airSnd=${f2(W.airSnd, 2)} | ${w.passport()}` +
+    `\n OE her: palette=${(W.palette as number[]).map((k) => MM.KIND_NAMES[k]).join(',')} founders=${W.founderPlan.length} n0=${f2(W.founderPlan.reduce((a: number, x: any) => a + x.n, 0), 0)} maxSize=${f2(Math.max(...W.founderPlan.map((x: any) => x.g.size ?? 4)), 2)} palFounders=${W.founderPlan.filter((x: any) => Array.from(x.g.body.km as Int32Array).some((km) => km >>> 5 > MM.ORIGIN.PALETTE && km >>> 5 < 100)).length} blind=${W.founderPlan.filter((x: any) => !Array.from(x.g.body.km as Int32Array).some((km) => (km & 31) === MM.M.EYE)).length} chron=${chron0}` +
+    `\n OE peak: ${MM.KIND_NAMES.slice(1).map((nm, j) => `${nm}${oe.peak[j + 1]}`).join(' ')}` +
     (BM.CONV_DIAG.on ? `\n CONVROWS ${JSON.stringify(BM.CONV_DIAG.rows.map((r) => r.map((x) => +x.toFixed(3))))}` : '') +
     `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
     ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('');
