@@ -5,7 +5,7 @@ import { EARTH_ENV, World, YEAR, type SurfaceEnv } from '../src/sim/world';
 import { mulberry32 } from '../src/lib/random';
 import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
-  addTwin, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, landMean, MARS, MARS_RD,
+  addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
   outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld,
 } from '../src/learn/scenarios';
 
@@ -66,6 +66,10 @@ console.log('🪐 Планета');
   const r = run({ ...EARTH, orbit: fluxOrbit(1.4) });
   const e = ev(r, 'runaway');
   ok(!!e && e.t < 4.5, `Венера (×1,4): океаны выкипели на ${e?.t}`);
+  // шаг 3 урока: после выкипания карбонаты отдают CO₂ — ждём ≥ 40 бар (giveUp на 7 млрд лет)
+  const cb = ev(r, 'carbonates');
+  const s40 = cb ? r.samples.find((x) => x.t >= cb.t && x.co2 >= 40) : undefined;
+  ok(!!cb && !!e && cb.t >= e.t && !!s40 && s40.t < 7, `Венера (×1,4): карбонаты ${cb?.t}, CO₂ ≥ 40 бар на ${s40?.t.toFixed(2)} (T ${s40 ? Math.round(s40.T - 273) : '-'} °C), максимум ${Math.max(...r.samples.map((x) => x.co2)).toFixed(0)} бар`);
   const r2 = run({ ...EARTH, orbit: fluxOrbit(1.25) });
   console.log(`    ×1,25: T(2)=${Math.round(at(r2, 2).T - 273)} °C, T(4,5)=${Math.round(at(r2, 4.5).T - 273)} °C, океан ${at(r2, 4.5).ocean.toFixed(2)}, co2starve ${ev(r2, 'co2starve')?.t}, runaway ${ev(r2, 'runaway')?.t}`);
 }
@@ -101,7 +105,10 @@ if (!args.includes('--planet')) {
     steps(w, 9000);
     let max = 0;
     for (const c of w.creatures) if (c.generation > 0) max = Math.max(max, c.g.size);
-    ok(max <= 8.65, `O₂ 8%, зерно ${seed}: самое крупное потомство ${max.toFixed(2)} ≤ 8,65 (потолок ${w.maxSize.toFixed(2)}, гигантов ${guilds(w).giants})`);
+    ok(max <= CAP8 + 0.01, `O₂ 8%, зерно ${seed}: самое крупное потомство ${max.toFixed(2)} ≤ ${CAP8.toFixed(2)} (потолок ${w.maxSize.toFixed(2)}, гигантов > 8: ${guilds(w).giants}, крупнее потолка: ${herbsOver(w, CAP8)} — только основатели и пришельцы)`);
+    let bornOver = 0;
+    for (const c of w.creatures) if (c.alive && c.generation > 0 && c.g.size > CAP8 + 0.01) bornOver++;
+    ok(bornOver === 0, `O₂ 8%, зерно ${seed}: родившихся крупнее потолка нет (${bornOver})`);
     lap('O₂ 8%', t);
   }
   if (args.includes('--full')) {
@@ -109,7 +116,7 @@ if (!args.includes('--planet')) {
       const w = make(42, { o2 });
       steps(w, 9000);
       const g = guilds(w);
-      console.log(`    O₂ ${o2}: max ${g.max.toFixed(1)}, гигантов ${g.giants}, потолок ${w.maxSize.toFixed(1)}`);
+      console.log(`    O₂ ${o2}: max ${g.max.toFixed(1)}, гигантов ${g.giants}, крупнее ${CAP8.toFixed(2)}: ${herbsOver(w, CAP8)}, потолок ${w.maxSize.toFixed(1)}`);
     }
   }
   for (const seed of seeds) {
@@ -138,7 +145,14 @@ if (!args.includes('--planet')) {
       continue;
     }
     steps(w, 3000);
-    const L0 = landMean(w, sf.litter), S0 = landMean(w, sf.soil), K0 = w.corpses.length;
+    const L0 = landMean(w, sf.litter), S0 = landMean(w, sf.soil), K0 = w.corpses.length, G0 = w.history.at(-1)?.grass ?? 0;
+    const rec0 = w.micro.corpsesRecycled;
+    let rotLogs = 0;
+    const log0 = w.log.bind(w);
+    w.log = (text, kind, x, y) => {
+      if (text.includes('разложились')) rotLogs++;
+      log0(text, kind, x, y);
+    };
     sw.noDecomposers = true;
     let tk = 0, L = L0, S = S0;
     while (tk < 2 * YEAR && !(tk >= YEAR && L >= L0 * 2 && S <= S0 * 0.85)) {
@@ -150,6 +164,10 @@ if (!args.includes('--planet')) {
     const K = w.corpses.length;
     ok(tk >= YEAR && L >= L0 * 2 && S <= S0 * 0.85, `Без разложителей, зерно ${seed}: опад ${L0.toFixed(3)} → ${L.toFixed(3)} (×${(L / L0).toFixed(2)}), почва ${S0.toFixed(3)} → ${S.toFixed(3)} (×${(S / S0).toFixed(2)}), туш ${K0} → ${K} за ${tk}`);
     ok(K > K0, `Без разложителей, зерно ${seed}: туши копятся (${K0} → ${K})`);
+    const G = w.history.at(-1)?.grass ?? 0;
+    console.log(`    трава ${G0.toFixed(3)} → ${G.toFixed(3)} (×${(G / Math.max(1e-9, G0)).toFixed(2)}; в уроке «поредела» при < 0,85)`);
+    ok(w.micro.corpsesRecycled === rec0 && rotLogs === 0, `Без разложителей, зерно ${seed}: туши не «перерабатываются» (${w.micro.corpsesRecycled - rec0}) и летопись молчит о гниении (${rotLogs})`);
+    w.log = log0;
     const Loff = L;
     sw.noDecomposers = false;
     tk = 0;
@@ -188,6 +206,7 @@ if (!args.includes('--planet')) {
       }
     }
     const P = outbreakById(w, e.P.id);
+    if (P) console.log(`    переболели ${((P.cases / e.n0) * 100).toFixed(0)}% вида — в уроке ${P.cases >= e.n0 * 0.5 ? 'коллективный иммунитет' : 'R < 1 без коллективного иммунитета'}`);
     ok(passed && !!P, `Эпидемия, зерно ${seed}: «${e.hostName}» (${e.n0}), заразили ${i0}, пик ${P?.peak}, всего ${P?.cases}, погибли ${P?.deaths}, выздоровели ${P?.recovered}, вирулентность ${P?.vir0} → ${P?.virMean.toFixed(2)}, спала за ${tk}`);
     lap('эпидемия', t);
   }

@@ -397,6 +397,11 @@ export class PlanetView {
     this.onFact?.(id);
   }
 
+  /** Открыта ли карточка события (уроки: история стоит из-за неё, а не сама по себе). */
+  get factOpen(): boolean {
+    return !$(this.root, '.p-fact').hidden;
+  }
+
   private hideFact(): void {
     $(this.root, '.p-fact').hidden = true;
   }

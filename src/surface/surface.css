@@ -96,11 +96,11 @@
 /* ---- Микромир: линзы, клетка, здоровье, вкладка ---- */
 /* чипы HUD переносятся, а не уезжают под кнопки скорости */
 .s-hud { max-width: max(330px, calc(100% - 530px)); }
-/* с кнопкой «↩ К планете» верхняя панель шире (~570 px) */
-.s-stage:has(.s-back:not([hidden])) .s-hud { max-width: max(300px, calc(100% - 660px)); }
+/* с кнопкой «↩ К планете» или «🌍 Обычная Земля» верхняя панель шире (~570 px) */
+.s-stage:has(:is(.s-back, .s-earth):not([hidden])) .s-hud { max-width: max(300px, calc(100% - 660px)); }
 /* узкая сцена: верхняя панель не оставляет места — HUD уходит под неё */
 @media (min-width: 901px) and (max-width: 1240px) { .s-hud { top: 56px; max-width: calc(100% - 76px); } }
-@media (min-width: 901px) and (max-width: 1320px) { .s-stage:has(.s-back:not([hidden])) .s-hud { top: 56px; max-width: calc(100% - 76px); } }
+@media (min-width: 901px) and (max-width: 1320px) { .s-stage:has(:is(.s-back, .s-earth):not([hidden])) .s-hud { top: 56px; max-width: calc(100% - 76px); } }
 .s-hud .s-sick { pointer-events: auto; cursor: pointer; color: #ffb3a8; border-color: #6a3a35; }
 .s-hud .s-sick:hover { border-color: #ff8a7a; }
 .s-lenslegend {

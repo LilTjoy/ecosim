@@ -104,6 +104,7 @@ const TEMPLATE = /* html */ `
       </select>
       <button class="s-reset">↻ Новый мир</button>
       <button class="s-back" hidden>↩ К планете</button>
+      <button class="s-earth" hidden title="Мир урока или справочника — вернуться к обычной Земле">🌍 Обычная Земля</button>
     </div>
     <div class="s-tools">
       <button data-tool="inspect" class="active" title="Выбрать / двигать карту">🔍</button>
@@ -219,6 +220,7 @@ export class SurfaceView {
     this.world.reset(this.world.brainMode, seed, env);
     this.afterReset();
     $(this.root, '.s-back').hidden = !this.onBack || env === EARTH_ENV;
+    $(this.root, '.s-earth').hidden = true;
     if (env.o2 > 0.25 || env.o2 < 0.17 || env.gravity > 1.2 || env.gravity < 0.8) this.queueFact('oxygen');
     if (!env.landLife) this.queueFact('stromatolites');
     if (env.o2 < 0.1) this.queueFact('o2decay'); // как в мире: гниение медленнее только ниже 10%
@@ -273,6 +275,10 @@ export class SurfaceView {
       this.afterReset();
     };
     $(r, '.s-back').onclick = () => this.onBack?.();
+    $(r, '.s-earth').onclick = () => {
+      this.setEnv(EARTH_ENV);
+      this.setSpeed(1);
+    };
     r.querySelectorAll<HTMLButtonElement>('[data-tool]').forEach((b) => {
       b.onclick = () => {
         this.tool = b.dataset.tool as typeof this.tool;
@@ -1288,7 +1294,9 @@ export class SurfaceView {
       if (a > 0 && (b === 0 || b === -2 || b === -3)) graze += v;
     }
     // Растения → Животные → Туши и помёт → Разложители → Перегной и опад → Минеральные → Растения; + реки → море
-    const v = [graze, fe.dungIn + fe.carrionIn, fe.corpseDecay, fe.carrionIn + fe.dungIn, fe.decomp, fe.uptake, fe.runoff];
+    // опыт урока «без разложителей»: туши и помёт сохнут прямо в опад, через разложителей ничего не идёт
+    const noDec = w.experiment.noDecomposers;
+    const v = [graze, fe.dungIn + fe.carrionIn, fe.corpseDecay, noDec ? 0 : fe.carrionIn + fe.dungIn, fe.decomp, fe.uptake, fe.runoff];
     const c = this.cyc;
     const dt = c.tick < 0 || w.tick < c.tick ? -1 : w.tick - c.tick;
     v.forEach((x, i) => {
@@ -1710,7 +1718,14 @@ export class SurfaceView {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
     this.setEnv(env, seed);
-    // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта
+    // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта;
+    // вместо неё — путь назад к обычной Земле («↻ Новый мир» повторяет условия опыта)
     $(this.root, '.s-back').hidden = true;
+    $(this.root, '.s-earth').hidden = false;
+  }
+
+  /** Урок закончился или закрыт: мир опыта остаётся (на него можно посмотреть), но уже без спешки 12×. */
+  endLesson(): void {
+    if (this.speed > 1) this.setSpeed(1);
   }
 }

@@ -78,6 +78,16 @@ export function guilds(w: World): Guilds {
   return { herb, omni, carn, swim, giants, smallHerb: herb - giants, max, maxBorn, n: herb + omni + carn + swim };
 }
 
+/** Потолок размера при 8% кислорода (World.maxSize при o2 = 0,08 и обычной гравитации) — 8,64. */
+export const CAP8 = 14 * Math.sqrt(0.08 / 0.21);
+
+/** Травоядные (не пловцы, не игрок) крупнее size: родившиеся при 8% O₂ не бывают крупнее CAP8. */
+export function herbsOver(w: World, size: number): number {
+  let n = 0;
+  for (const c of w.creatures) if (c.alive && !c.player && c.g.swim <= 0.6 && c.g.diet < 0.3 && c.g.size > size + 0.01) n++;
+  return n;
+}
+
 /**
  * Цель опыта Гаузе: гигантов хотя бы втрое меньше (крупные травоядные в этой модели неплохо живут и на траве).
  * Замер после того, как листва перестала отрастать уже внутри growGrass (зёрна 42, 7, 3, 1 × 2 прогона):

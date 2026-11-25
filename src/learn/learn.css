@@ -49,6 +49,9 @@
 .l-card h4 { margin: 0; font-size: 15px; color: var(--text); font-weight: 700; }
 .l-card p { margin: 0; font-size: 13.5px; line-height: 1.5; }
 .l-card .earth { color: #b9e6a0; }
+.l-vals { display: flex; flex-wrap: wrap; gap: 4px 10px; font-size: 12.5px; }
+.l-vals .l-vl { flex-basis: 100%; color: var(--muted); font-size: 11.5px; }
+.l-vals span i { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--wc); margin-right: 4px; }
 .l-card mark { background: #3a4a20; color: inherit; border-radius: 3px; padding: 0 1px; }
 .l-unseen { font-size: 11.5px; font-style: italic; }
 .l-cbtns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }

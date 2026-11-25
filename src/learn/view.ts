@@ -1,4 +1,5 @@
 import { FIELD_ICON, type Field } from '../planet/facts';
+import { SOLAR } from '../compare/worlds';
 import { allCards, cardById, cardFor, FIELD_ORDER, SOURCE_LABEL, type Card, type CardSource } from './catalog';
 import { LessonEngine, toast, type LearnCtx, type ViewName } from './engine';
 import { LESSONS } from './lessons';
@@ -320,6 +321,7 @@ export class LearnView {
       <h4>${mark(card.title, words)}</h4>
       <p>${mark(card.text, words)}</p>
       ${card.earth ? `<p class="earth">🌍 ${mark(card.earth, words)}</p>` : ''}
+      ${card.vals ? `<div class="l-vals">${card.valLabel ? `<span class="l-vl">${card.valLabel}</span>` : ''}${card.vals.map((v, k) => `<span style="--wc:${SOLAR[k].color}"><i></i>${SOLAR[k].name}: <b>${v}</b></span>`).join('')}</div>` : ''}
       ${met ? '' : '<small class="muted l-unseen">ещё не встречалась</small>'}
       <div class="l-cbtns">
         ${label ? `<button data-link="${card.id}">${label}</button>` : ''}

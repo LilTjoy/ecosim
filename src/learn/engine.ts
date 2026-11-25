@@ -295,6 +295,8 @@ export class LessonEngine {
       console.warn(e);
     }
     this.base.planet.focusFacts = null;
+    // опыт на «Поверхности» шёл на 12× — дальше мир идёт своим ходом (кнопка «🌍 Обычная Земля» вернёт обычный мир)
+    if (L.steps.some((s) => s.view === 'eco')) this.base.surface.endLesson();
     abortTwin();
     this.lesson = null;
   }
@@ -460,6 +462,12 @@ export class LessonEngine {
       this.render();
     } else if (c === 'next') this.next();
     else if (c === 'act') void this.act(this.viewIdx);
+    else if (c === 'play') {
+      const p = this.base.planet;
+      p.seek(p.snapshot().now, true);
+      this.base.show('planet');
+      this.render();
+    }
     else if (c === 'goto') {
       const v = this.lesson?.steps[this.viewIdx].view;
       if (v) this.base.show(v);
@@ -535,12 +543,19 @@ export class LessonEngine {
     const review = i < this.cur;
     const c = this.ctx(this.token, this.mem);
     const watching = !review && this.watching(i) && !ss.guard;
-    const sig = JSON.stringify([L.id, i, this.cur, ss, this.minimised, this.curView, this.st.map((x) => x.passed), watching]);
+    // история планеты стоит, а карточки нет (её закрыли ✕ или остановили ⏸) — сама она не пойдёт
+    let stuck = false;
+    if (watching && s.view === 'planet' && !ss.running && !ss.gave) {
+      const p = c.planet.snapshot();
+      stuck = !p.playing && p.now < p.result.end - 1e-6 && !c.planet.factOpen;
+    }
+    const sig = JSON.stringify([L.id, i, this.cur, ss, this.minimised, this.curView, this.st.map((x) => x.passed), watching, stuck]);
     let hint = '';
     if (watching) {
       const eco = s.view === 'eco';
       if (ss.gave) hint = '';
       else if (eco && (c.surface.speedNow === 0 || !c.surface.active) && !ss.running) hint = '⏸ Мир стоит — включите 12× (↪ К опыту)';
+      else if (stuck) hint = '⏸ История планеты стоит — нажмите «▶ Дальше по истории»';
       else {
         try {
           hint = s.watch!.hint(c);
@@ -621,6 +636,7 @@ export class LessonEngine {
     const btns = [
       i > 0 ? '<button data-c="back">← Назад</button>' : '',
       s.view && this.curView !== s.view ? `<button data-c="goto">↪ К опыту: ${VIEW_LABEL[s.view]}</button>` : '',
+      stuck ? '<button data-c="play" class="primary">▶ Дальше по истории</button>' : '',
       showAction ? `<button data-c="act" class="${needAction ? 'primary' : ''}" ${ss.running ? 'disabled' : ''}>${ss.running ? '⏳ Идёт…' : actLabel}</button>` : '',
       `<button data-c="next" class="${!needAction && (ss.passed || review) ? 'primary' : ''}" ${ss.passed || review ? '' : 'disabled'}>${last ? '🎓 Завершить' : 'Дальше →'}</button>`,
     ].join('');

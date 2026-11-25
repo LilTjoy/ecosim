@@ -16,7 +16,7 @@ export const SOURCE_LABEL: Record<CardSource, string> = {
   compare: '🌍 Сравнение миров',
   surface: '🦊 Жизнь на поверхности',
   microbes: '🦠 Микромир',
-  island: '🌍 Устройство мира',
+  island: '🗺️ Устройство мира',
   stats: '🎲 Методы науки',
 };
 
@@ -38,6 +38,9 @@ export type SimLink =
   | { view: 'lesson'; id: string; label?: string };
 
 export interface Card extends Fact {
+  /** Карточки «Сравнения миров»: строка значений Земля | Марс | Венера. */
+  valLabel?: string;
+  vals?: [string, string, string];
   id: string;
   key: string;
   source: CardSource;

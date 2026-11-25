@@ -268,8 +268,8 @@ export class World {
   /**
    * Опыты уроков 📚 (не Settings: сбрасываются вместе с миром). По умолчанию выключены и ничего не меняют.
    * noDecomposers — бактерии и грибы почвы выключены: опад не гниёт, почва не пополняется из него,
-   * туши сохнут в 7 раз медленнее (остаются жуки и солнце) и лежат до 6000 тактов (не больше 2500 туш);
-   * нормировки плодородия заморожены.
+   * туши сохнут в 7 раз медленнее (остаются жуки и солнце), но лежат не дольше обычных 1500 тактов
+   * (потом крошатся в опад, который не гниёт; не больше 2500 туш); нормировки плодородия заморожены.
    */
   experiment = { noDecomposers: false };
   /** Эффект Бёрча: всплеск дыхания почвы после засухи. */
@@ -1021,8 +1021,11 @@ export class World {
         const v = Lt[k.idx] + SOIL.CN * d;
         Lt[k.idx] = v > SOIL.LMAX ? SOIL.LMAX : v;
         this.flux.carrionIn += SOIL.CN * d;
-        this.flux.corpseDecay += d;
-        this.flux.resp += d * 0.01;
+        // без разложителей туша не гниёт, а сохнет и крошится в опад — в «гниение» и дыхание не идёт
+        if (!noDec) {
+          this.flux.corpseDecay += d;
+          this.flux.resp += d * 0.01;
+        }
       }
     }
     if (mn && !noDec) this.corpseRef += (ms / mn - this.corpseRef) * 0.002;
@@ -1030,16 +1033,17 @@ export class World {
     if (noDec && this.corpses.length > 2500) this.corpses.splice(0, this.corpses.length - 2500);
     if (this.tick % 10 === 0) {
       const keep: Corpse[] = [];
-      const maxAge = noDec ? 6000 : 1500; // без разложителей туши лежат годами (мумии)
       for (const k of this.corpses) {
-        if (k.energy > 0 && k.age < maxAge) {
+        if (k.energy > 0 && k.age < 1500) {
           keep.push(k);
           continue;
         }
         if (!soilOn) continue;
+        // остаток туши уходит в опад; без разложителей там он и лежит (опад не гниёт) — это не переработка
         if (k.energy > 0) Lt[k.idx] = Math.min(SOIL.LMAX, Lt[k.idx] + SOIL.CN * k.energy);
         this.boneMarks.push({ x: k.x, y: k.y, size: k.size, t: this.tick });
         if (this.boneMarks.length > 400) this.boneMarks.shift();
+        if (noDec) continue;
         this.micro.corpsesRecycled++;
         if (k.size >= 8 && this.tick - this.micro.lastGiantLog > 2000) {
           this.micro.lastGiantLog = this.tick;
@@ -1662,13 +1666,10 @@ export class World {
     this.log('🔥 Засуха — трава почти не растёт.', 'disaster');
   }
 
-  /**
-   * Инструмент «эпидемия»: по умолчанию — самый многочисленный вид и доля DIS.TOOL_SHARE
-   * (урок может выбрать вид hostId и долю share).
-   */
-  epidemic(hostId?: number, share: number = DIS.TOOL_SHARE): void {
-    const top = hostId === undefined ? this.species.living()[0] : this.species.all.get(hostId);
-    if (!top || top.extinct !== null) return;
+  /** Инструмент «эпидемия»: новая болезнь у самого многочисленного вида (доля DIS.TOOL_SHARE). */
+  epidemic(): void {
+    const top = this.species.living()[0];
+    if (!top) return;
     if (this.settings.disease) {
       // новая болезнь: заражаем долю вида злым штаммом — дальше волна идёт сама
       const hosts = this.creatures.filter((c) => c.alive && c.sp === top.id);
@@ -1688,7 +1689,7 @@ export class World {
       const first = hosts[Math.floor(Math.random() * hosts.length)];
       const P = this.newPathogen(top.id, first.x, first.y, DIS.TOOL_VIR);
       P.cases = oldSick;
-      const k = Math.min(hosts.length, Math.max(5, Math.round(share * hosts.length)));
+      const k = Math.min(hosts.length, Math.max(5, Math.round(DIS.TOOL_SHARE * hosts.length)));
       for (let i = 0; i < k; i++) {
         // частичная перетасовка Фишера — Йетса: k разных особей
         const j = i + Math.floor(Math.random() * (hosts.length - i));
