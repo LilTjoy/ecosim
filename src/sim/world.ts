@@ -2,9 +2,10 @@ import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
 import { clamp, mix32, mulberry32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
-import { ALL_KINDS, EARTH_EXPR, EVO, finish, newEvoStats, ORIGIN, P, type ExprCtx } from './modules';
+import { ALL_KINDS, EARTH_EXPR, EVO, finish, hueDiff, hueNear, newEvoStats, ORIGIN, P, patClass, type ExprCtx } from './modules';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
+import { newBestiary, trackBottleneck, updateBestiary, type BestiaryState } from './bestiary';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 import type { Action } from './timeline';
 
@@ -43,11 +44,7 @@ export const DIS = { BETA: 0.0035, IMM: 3000, IMM_VAR: 2000, SPILL: 2e-6, SPILL_
   BOOST_RISK: 0.003, BOOST_T: 1500, RISK_CAP: 0.01 };
 /** Длительность болезни: мягкие штаммы болеют дольше (компромисс «заразность — вирулентность»). */
 const DUR = (v: number) => Math.round(220 + 160 * (1 - v));
-/** ♾️ Класс узора для запоминания окраски: 2 полосы, 0 пятна, 1 однотонный (как в adjective()). */
-export const patClass = (p: number): number => (p > 0.66 ? 2 : p < 0.33 ? 0 : 1);
-/** Разница оттенков по кругу (без ошибок на −5° и 364°). */
-export const hueDiff = (a: number, b: number): number => Math.abs((((a - b) % 360) + 540) % 360 - 180);
-export const hueNear = (a: number, b: number): boolean => hueDiff(a, b) < EVO.HUE_TOL;
+export { patClass, hueDiff, hueNear };
 /** Где можно зарыться (индекс — B): мелководье (садовые угри), пляж, луг, саванна, лес, пустыня, тундра. */
 export const DIGGABLE = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0]);
 /** Перемешивающий хеш (id, окно тактов) → [0, 1): стабилен 8 тактов и не тратит случайных чисел. */
@@ -160,9 +157,11 @@ export interface Ancestor {
 export interface WorldEvent {
   tick: number;
   text: string;
-  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player' | 'micro' | 'disease';
+  kind: 'extinct' | 'disaster' | 'milestone' | 'info' | 'species' | 'migration' | 'player' | 'micro' | 'disease' | 'evo';
   x?: number;
   y?: number;
+  /** ♾️ Карточка, которую открывает событие (id в SURFACE_FACTS или рецепт). */
+  fact?: string;
 }
 
 /** Мгновенные события для визуальных эффектов (сердечки, вспышки и т.п.). */
@@ -393,8 +392,10 @@ export class World {
   chan = new Float32Array([1, 1, 1, 1]);
   /** Как далеко слышно в воздухе: √давления, в пределах [0.3, 1.5]. */
   airSnd = 1;
-  /** Сколько раз хищники обошли добычу из-за окраски, по видам добычи (для апосематизма). */
-  private avoided = new Map<number, number>();
+  /** Сколько раз хищники обошли добычу из-за окраски, по видам добычи (бестиарий читает и очищает раз в 1000 тактов). */
+  avoided = new Map<number, number>();
+  /** Летопись открытий (простые данные — снимок клонирует целиком). */
+  bestiary: BestiaryState = newBestiary();
   /** Квадраты радиусов каналов текущей воспринимающей особи (считаются в senseRange прямо перед perceive). */
   private sv2 = 0;
   private sh2 = 0;
@@ -458,6 +459,8 @@ export class World {
     this.nextOrigin = ORIGIN.FRESH;
     this.evoStats = newEvoStats();
     this.avoided.clear();
+    this.bestiary = newBestiary();
+    this.species.oe = this.oe;
     this.chan = new Float32Array([1, 1, 1, 1]);
     this.airSnd = 1;
     if (this.oe) {
@@ -644,7 +647,7 @@ export class World {
   }
 
   /** Поселить группу одинаковых особей туда, где им комфортно. */
-  colonize(base: Partial<Genome>, n: number, x?: number, y?: number): Species {
+  colonize(base: Partial<Genome>, n: number, x?: number, y?: number, introduced = false): Species {
     const neural = this.brainMode === 'neural';
     const g0 = genome(base, neural, this.r, this.expr);
     let cx = x;
@@ -652,7 +655,8 @@ export class World {
     if (cx === undefined || cy === undefined) [cx, cy] = this.findHome(g0);
     const region = this.terrain.regionAt(cx, cy)?.name ?? 'неизвестные земли';
     // основатели — всегда отдельный вид; пришельцы присоединяются к очень близкому родственнику
-    const sp = this.tick === 0 ? this.species.create(g0, null, 0, region) : this.species.match(g0, this.tick, region);
+    // завезённые игроком (introduced) — всегда новый вид: открытие не достанется местным
+    const sp = this.tick === 0 ? this.species.create(g0, null, 0, region, introduced) : this.species.match(g0, this.tick, region, introduced);
     for (let i = 0; i < n; i++) {
       const g = mutate(g0, 0.03, this.r, this.expr); // основатели никогда не «изобретают»
       if (neural) g.brain = genome({}, true, this.r).brain;
@@ -2370,8 +2374,8 @@ export class World {
 
   // ---------------- статистика ----------------
 
-  log(text: string, kind: WorldEvent['kind'], x?: number, y?: number): void {
-    this.events.push({ tick: this.tick, text, kind, x, y });
+  log(text: string, kind: WorldEvent['kind'], x?: number, y?: number, fact?: string): void {
+    this.events.push(fact === undefined ? { tick: this.tick, text, kind, x, y } : { tick: this.tick, text, kind, x, y, fact });
     if (this.events.length > 120) this.events.shift();
   }
 
@@ -2542,6 +2546,10 @@ export class World {
       co2: 0,
     });
     if (this.history.length > 900) this.history.shift();
+    if (this.oe) {
+      trackBottleneck(this);
+      if (this.tick % 200 === 0) updateBestiary(this);
+    }
   }
 
   // ---------------- опыты для уроков 📚 (по умолчанию ничего не меняют) ----------------

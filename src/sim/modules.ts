@@ -76,6 +76,12 @@ export interface EvoStats {
 }
 export const newEvoStats = (): EvoStats => ({ poisoned: 0, poisonDeaths: 0, zaps: 0, births: 0, dup: 0, neo: 0, nu: 0 });
 
+/** Класс узора для запоминания окраски: 2 полосы, 0 пятна, 1 однотонный (как в adjective()). */
+export const patClass = (p: number): number => (p > 0.66 ? 2 : p < 0.33 ? 0 : 1);
+/** Разница оттенков по кругу (без ошибок на −5° и 364°). */
+export const hueDiff = (a: number, b: number): number => Math.abs((((a - b) % 360) + 540) % 360 - 180);
+export const hueNear = (a: number, b: number): boolean => hueDiff(a, b) < EVO.HUE_TOL;
+
 // ---------------- таблицы ----------------
 
 /** Содержание: доля базового обмена 0.05·m·air за единицу уровня. EYE, ENDO, ANAER, PSYM — 0 (платятся иначе). */

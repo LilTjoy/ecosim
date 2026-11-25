@@ -13,6 +13,7 @@ const { World, guildOf } = WM;
 import { runTm } from './tmBench';
 import { BIOMES } from '../src/sim/terrain';
 import * as MM from '../src/sim/modules';
+import * as BM from '../src/sim/bestiary';
 const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags: Record<string, string> = {};
 for (const a of process.argv.slice(2)) if (a.startsWith('--')) { const [k, v] = a.slice(2).split('='); flags[k] = v ?? '1'; }
@@ -36,8 +37,9 @@ const applyFlags = (w: InstanceType<typeof World>) => {
   if (flags.oe !== undefined && 'openEvo' in w.settings) W.settings.openEvo = flags.oe !== '0';
 };
 // ручки открытой эволюции (и будущих таблиц: открытия, наследство) — по имени, в том же духе, что SOIL/DIS
-const KNOBS: Record<string, unknown>[] = [MM.EVO as unknown as Record<string, unknown>];
+const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV] as unknown as Record<string, unknown>[];
 for (const mod of KNOBS) for (const k in flags) if (k in mod) mod[k] = typeof mod[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
+if (flags.convdiag) BM.CONV_DIAG.on = true;
 if (flags.benthic !== undefined) MM.EVO.BENTHIC = flags.benthic !== '0';
 // --her=… — условия планеты (поля, которых мир пока не знает, он просто не читает)
 const HER: Record<string, Record<string, unknown>> = {
@@ -254,14 +256,17 @@ if (OE) {
   const ft = (m: string) => oe.first[m] ?? '-';
   const f = (v: unknown) => (v === undefined ? '-' : String(v));
   oeRep =
-    `\n OE: found=${f(B?.found?.size ?? B?.found)} origins=${f(B?.origins)} parallel=${f(B?.parallel)} plans=${f(B?.plans?.size ?? B?.plans)} conv=${f(B?.conv?.length ?? B?.conv)} apo=${f(B?.apo)} mim=${f(B?.mim)}` +
+    `\n OE: found=${f(B ? [...B.found.values()].filter((d: any) => !d.inherited).length : undefined)} inherited=${f(B ? [...B.found.values()].filter((d: any) => d.inherited).map((d: any) => d.id).join(',') || 0 : undefined)} origins=${f(B?.independent)} parallel=${f(B?.parallel)} plans=${f(B?.plans?.size)} conv=${f(B?.conv?.length)}(logged ${f(B?.conv?.filter((c: any) => c.logged).length)}) apo=${f(B?.apoSp?.length)} mim=${f(B?.mimPairs?.length)}` +
     ` 🧪=${f(B?.beats?.['🧪'])} 🌱=${f(B?.beats?.['🌱'])} 💨=${f(B?.beats?.['💨'])} births=${S.births} dup=${S.dup} neo=${S.neo} new=${S.nu} nextOrigin=${W.nextOrigin} metRef=${f2(W.metRef, 4)} upRef=${f2(W.upRef, 4)}` +
+    `\n OE disc: ${B ? [...B.found.values()].filter((d: any) => !d.inherited).map((d: any) => `${d.id}@${d.tick}${d.times > 1 ? '×' + d.times : ''}${d.parallel ? '∥' + d.parallel : ''}${d.lost !== null ? '⚰' : ''}`).join(' ') || '-' : '-'}` +
+    ` | prog ${B ? [...B.prog].filter(([, p]: [string, number]) => p >= 0.3).map(([id, p]: [string, number]) => `${id}:${p.toFixed(2)}`).join(' ') || '-' : '-'}` +
+    `\n OE convdiag: tried=${B?.convDiag?.tried} young=${B?.convDiag?.young} bestDmax=${B?.convDiag?.best?.toFixed(2)} ${B ? B.conv.map((c: any) => `${c.a}~${c.b}@${c.tick}:${c.fact}${c.logged ? '' : '(silent)'}`).join(' ') || '-' : '-'} | plans ${B ? [...B.plans.values()].map((p: any) => `${p.ru}@${p.tick}`).join('; ') || '-' : '-'}` +
     `\n OE first: 🧪@${ft('🧪')} 🌱@${ft('🌱')} 🌟@${ft('🌟')} 💨@${ft('💨')} 🌳@${ft('🌳')} 🪞@${ft('🪞')} evoLines=${oe.evoLines} bottleneckLogs=${oe.bottle}` +
     `\n OE death: poisoned=${S.poisoned} poisonDeaths=${S.poisonDeaths} zaps=${S.zaps} carnDeaths=${oe.carnD} carnPoisoned=${oe.poisonD}` +
     `\n OE perf: msK=${(oe.msSum / Math.max(1, oe.creSum / 1000)).toFixed(3)} (мс на 1000 особей·такт) heapMB=${(process.memoryUsage().heapUsed / 1048576).toFixed(1)}` +
     `\n OE body: EYE/ENDO herb=${kitMin[0]} omni=${kitMin[1]} carn=${kitMin[2]} swim=${kitMin[3]} fliers=${pc(fly, land)}% gliders=${pc(glide, land)}% of land(n=${land}) torpid=${torp}` +
-    `\n OE senses: hidden=${hid} avoided=${[...(W.avoided as Map<number, number>).values()].reduce((x, y) => x + y, 0)} chan=${[...W.chan].map((x: number) => x.toFixed(2)).join('/')} airSnd=${f2(W.airSnd, 2)} | ${w.passport()}` +
-    (B?.convDiag ? `\n convdiag: ${B.convDiag}` : '') +
+    `\n OE senses: hidden=${hid} avoided=${(B?.avoidTot ?? 0) + [...(W.avoided as Map<number, number>).values()].reduce((x, y) => x + y, 0)} chan=${[...W.chan].map((x: number) => x.toFixed(2)).join('/')} airSnd=${f2(W.airSnd, 2)} | ${w.passport()}` +
+    (BM.CONV_DIAG.on ? `\n CONVROWS ${JSON.stringify(BM.CONV_DIAG.rows.map((r) => r.map((x) => +x.toFixed(3))))}` : '') +
     `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
     ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('');
 }

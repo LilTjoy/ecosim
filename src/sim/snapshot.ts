@@ -77,7 +77,7 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0', 'chan', 'airSnd', 'avoided'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
+  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0', 'chan', 'airSnd', 'avoided', 'bestiary'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
 export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
@@ -337,6 +337,7 @@ export function captureWorld(w: WorldInternals): WorldSnap {
   };
   s.digest = snapDigest(s);
   let bytes = 30_000 + 600 * w.species.all.size;
+  for (const sp of w.species.all.values()) bytes += (sp.formHist?.byteLength ?? 0) + (sp.formT?.byteLength ?? 0) + (sp.mph?.byteLength ?? 0); // ♾️ история облика
   for (const a of [f64, i32, gf, gb, brains, anc, corpses, claim.idx, claim.val, claim.t, gbody, bkm, blvl, bshape]) bytes += a.byteLength;
   for (const k in cells) bytes += cells[k].byteLength;
   s.bytes = bytes;
