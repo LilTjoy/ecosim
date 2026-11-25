@@ -43,7 +43,7 @@ const NOUNS: [string, PathogenKind][] = [
 ];
 
 /** «Тундра Каэль» → «Каэльская лихорадка» (вирус). В море — «Морская …». */
-export function pathogenName(regionName: string, rand: () => number = Math.random): { name: string; kind: PathogenKind } {
+export function pathogenName(regionName: string, rand: () => number): { name: string; kind: PathogenKind } {
   const proper = regionName.split(' ')[1];
   const adj = proper ? proper.replace(/[аяоеиыуюэ]$/i, '') + 'ская' : 'Морская';
   const [noun, kind] = NOUNS[Math.floor(rand() * NOUNS.length)];

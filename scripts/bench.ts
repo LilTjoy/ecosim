@@ -1,8 +1,11 @@
 // Балансный стенд: node-прогон мира без браузера.
 // npm run bench -- <seed> <ticks> [rules|neural] [--soil=0|1] [--disease=0|1] [--rescue=0|1] [--rng=k] [--UN=..] [--BETA=..]
 // --tool=1 — инструмент «эпидемия» на такте 10000 (или --toolAt=N), отчёт через 3000 тактов
+// --trap=1 — Math.random внутри симуляции бросает исключение (по умолчанию для --tm=*)
+// --tm=det|fly — проверки машины времени (снимки, точная перемотка, эффект бабочки), см. scripts/tmBench.ts
 import * as WM from '../src/sim/world';
-const { World } = WM;
+const { World, guildOf } = WM;
+import { runTm } from './tmBench';
 import { BIOMES } from '../src/sim/terrain';
 const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags: Record<string, string> = {};
@@ -12,14 +15,29 @@ const T = Number(pos[1] ?? 30000);
 const mode = (pos[2] ?? 'rules') as any;
 // --every=N — шаг строк отчёта (по умолчанию T/5)
 const EV = Number(flags.every ?? T / 5);
-// детерминированный Math.random (LCG) — прогоны воспроизводимы
-// --rng=k сдвигает поток случайных чисел (та же карта, другие основатели) — для оценки шума
+// детерминированный Math.random (LCG) — для кода вне симуляции (симуляция берёт кости из своего зерна)
+// --rng=k — «соль» зерна: та же карта, другие основатели, трава и кости — для оценки шума
 let rs = (seed * 7 + 1 + Number(flags.rng ?? 0)) >>> 0;
-Math.random = () => (rs = (rs * 1664525 + 1013904223) >>> 0) / 4294967296;
-const w = new World(3200, 2000);
-const W = w as any;
+const lcg = () => (rs = (rs * 1664525 + 1013904223) >>> 0) / 4294967296;
+Math.random = lcg;
+const salt = Number(flags.rng ?? 0);
+const trap = () => { throw new Error('Math.random в симуляции'); };
+const trapOn = flags.trap !== undefined ? flags.trap !== '0' : !!flags.tm;
 // флаги пишем в settings, только если такое поле уже есть
-for (const k in flags) if (k in w.settings) W.settings[k] = typeof W.settings[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
+const applyFlags = (w: InstanceType<typeof World>) => {
+  const W = w as any;
+  for (const k in flags) if (k in w.settings) W.settings[k] = typeof W.settings[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
+};
+/** Новый мир (конструктор вызывает reset() со случайным зерном — ловушку ставим только после него). */
+const mkWorld = () => {
+  Math.random = lcg;
+  const w = new World(3200, 2000);
+  if (trapOn) Math.random = trap;
+  applyFlags(w);
+  return w;
+};
+const w = mkWorld();
+const W = w as any;
 // ручки баланса почвы: --UN=0.15 --DUNG=0.5 --TAU=1500 --clampL=0.75,1.2 --clampW=0.7,1.25
 const SO = (WM as any).SOIL, NC = (WM as any).NUT_CLAMP, DI = (WM as any).DIS;
 for (const k in flags) {
@@ -29,7 +47,11 @@ for (const k in flags) {
   if (NC && k === 'clampW') NC.water = flags[k].split(',').map(Number);
   if (NC && k === 'clampC') NC.corpse = flags[k].split(',').map(Number);
 }
-w.reset(mode, seed);
+if (flags.tm) {
+  runTm(flags.tm, { seed, T, mode, salt, flags, mk: () => { const x = mkWorld(); x.reset(mode, seed, undefined, salt); return x; } });
+  process.exit(0);
+}
+w.reset(mode, seed, undefined, salt);
 // время soilPass отдельно (если он есть)
 let soilMs = 0;
 const sp0 = W.soilPass;
@@ -47,7 +69,8 @@ const [clo, chi] = ((WM as any).NUT_CLAMP?.land ?? [0.6, 1.3]) as number[];
 let rawSum = 0;
 const clampShare = () => { let c = 0, r = 0, n = 0; const nu = W.nut as Float32Array, S = W.soil as Float32Array, ref = W.nutRef.land; for (let i = 0; i < nu.length; i++) { if (BIOMES[t1b[i]].water) continue; n++; if (nu[i] <= clo + 1e-4 || nu[i] >= chi - 1e-4) c++; const raw = 1.5 * S[i] / (S[i] + 0.5) / ref; if (raw <= 0.6 || raw >= 1.3) r++; } rawSum += r / Math.max(1, n); return c / Math.max(1, n); };
 // гильдии — ровно как в migrantsFromAfar
-const guild = (c: any) => c.g.swim > 0.6 ? 'swim' : c.g.diet < 0.3 ? 'herb' : c.g.diet <= 0.65 ? 'omni' : 'carn';
+const GUILDS = ['herb', 'omni', 'carn', 'swim'] as const;
+const guild = (c: any) => GUILDS[guildOf(c.g)];
 const extinct: Record<string, number> = {};
 const zero: Record<string, number> = { herb: 0, omni: 0, carn: 0, swim: 0 };
 const lastZero: Record<string, number> = {};

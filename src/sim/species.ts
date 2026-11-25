@@ -1,5 +1,5 @@
 import { distance, GENE_KEYS, SPECIES_LIMIT, type GeneKey, type Genome } from './genome';
-import { pick } from '../lib/random';
+import { mulberry32, pick, type Rand } from '../lib/random';
 
 export interface Species {
   id: number;
@@ -31,23 +31,23 @@ export interface Species {
 
 const ROMAN = ['', ' II', ' III', ' IV', ' V', ' VI', ' VII', ' VIII', ' IX', ' X'];
 
-function noun(g: Genome): [string, string] {
-  if (g.swim > 0.65) return pick([['Плавун', 'Natator'], ['Ныряльщик', 'Mergus'], ['Водолюб', 'Hydrophilus']] as const);
+function noun(g: Genome, rand: Rand): [string, string] {
+  if (g.swim > 0.65) return pick([['Плавун', 'Natator'], ['Ныряльщик', 'Mergus'], ['Водолюб', 'Hydrophilus']] as const, rand);
   if (g.diet < 0.3) {
-    if (g.size < 3) return pick([['Прыгун', 'Saltator'], ['Шуршун', 'Susurrus'], ['Грызун', 'Rodens']] as const);
-    if (g.size < 7) return pick([['Травоед', 'Herbivorus'], ['Жвачник', 'Ruminans'], ['Пасун', 'Pastor']] as const);
-    return pick([['Рогач', 'Cornutus'], ['Толстокож', 'Pachyderm'], ['Великан', 'Gigas']] as const);
+    if (g.size < 3) return pick([['Прыгун', 'Saltator'], ['Шуршун', 'Susurrus'], ['Грызун', 'Rodens']] as const, rand);
+    if (g.size < 7) return pick([['Травоед', 'Herbivorus'], ['Жвачник', 'Ruminans'], ['Пасун', 'Pastor']] as const, rand);
+    return pick([['Рогач', 'Cornutus'], ['Толстокож', 'Pachyderm'], ['Великан', 'Gigas']] as const, rand);
   }
   if (g.diet < 0.65) {
     if (g.social > 0.6) return ['Падальщик', 'Necrophagus'];
-    return pick([['Всеед', 'Omnivorax'], ['Кабанчик', 'Suillus'], ['Рылец', 'Rostratus']] as const);
+    return pick([['Всеед', 'Omnivorax'], ['Кабанчик', 'Suillus'], ['Рылец', 'Rostratus']] as const, rand);
   }
-  if (g.size < 4) return pick([['Хорёк', 'Mustela'], ['Кусач', 'Mordax']] as const);
-  if (g.size < 9) return pick([['Клыкач', 'Dentifer'], ['Охотник', 'Venator'], ['Ловчий', 'Captor']] as const);
-  return pick([['Тиран', 'Tyrannus'], ['Зверь', 'Bestia']] as const);
+  if (g.size < 4) return pick([['Хорёк', 'Mustela'], ['Кусач', 'Mordax']] as const, rand);
+  if (g.size < 9) return pick([['Клыкач', 'Dentifer'], ['Охотник', 'Venator'], ['Ловчий', 'Captor']] as const, rand);
+  return pick([['Тиран', 'Tyrannus'], ['Зверь', 'Bestia']] as const, rand);
 }
 
-function adjective(g: Genome): [string, string] {
+function adjective(g: Genome, rand: Rand): [string, string] {
   const options: [string, string][] = [];
   if (g.tempPref < 0.28) options.push(['Снежный', 'nivalis'], ['Северный', 'borealis']);
   if (g.tempPref > 0.72) options.push(['Пустынный', 'deserti'], ['Знойный', 'aestivus']);
@@ -68,13 +68,37 @@ function adjective(g: Genome): [string, string] {
     h < 250 ? ['Синий', 'caeruleus'] :
     h < 300 ? ['Фиолетовый', 'violaceus'] : ['Розовый', 'roseus'];
   options.push(color);
-  return pick(options);
+  return pick(options, rand);
+}
+
+/** Сохранённый реестр (живые ссылки — вызывающий клонирует, см. snapshot.ts). */
+export interface SpeciesSave {
+  all: [number, Species][];
+  nextId: number;
+  names: [string, number][];
 }
 
 export class SpeciesRegistry {
   all = new Map<number, Species>();
   private nextId = 1;
   private names = new Map<string, number>();
+  /** Поток случайных чисел для имён: мир подставляет свой (имя берётся из «костей» того, кто родил вид). */
+  rand: Rand = mulberry32(1);
+
+  get peekNextId(): number {
+    return this.nextId;
+  }
+
+  /** ЖИВЫЕ ссылки — вызывающий обязан клонировать (одним structuredClone вместе с остальным). */
+  save(): SpeciesSave {
+    return { all: [...this.all], nextId: this.nextId, names: [...this.names] };
+  }
+
+  load(s: SpeciesSave): void {
+    this.all = new Map(s.all);
+    this.nextId = s.nextId;
+    this.names = new Map(s.names);
+  }
 
   clear(): void {
     this.all.clear();
@@ -83,8 +107,8 @@ export class SpeciesRegistry {
   }
 
   create(founder: Genome, parent: number | null, tick: number, origin: string): Species {
-    const [n, genus] = noun(founder);
-    const [a, epithet] = adjective(founder);
+    const [n, genus] = noun(founder, this.rand);
+    const [a, epithet] = adjective(founder, this.rand);
     const base = `${a} ${n.toLowerCase()}`;
     const k = this.names.get(base) ?? 0;
     this.names.set(base, k + 1);

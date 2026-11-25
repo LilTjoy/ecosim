@@ -9,6 +9,15 @@ export function mulberry32(seed: number): () => number {
   };
 }
 
+export type Rand = () => number;
+
+/** Перемешать 32-битное число (для «новых костей» и производных зёрен). */
+export function mix32(x: number): number {
+  x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
+  x = Math.imul(x ^ (x >>> 15), 0x846ca68b);
+  return (x ^ (x >>> 16)) | 0;
+}
+
 /** Нормально распределённое случайное число (Бокс — Мюллер). */
 export function gauss(rand: () => number = Math.random): number {
   let u = 0;

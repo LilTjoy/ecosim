@@ -1,5 +1,5 @@
 import { mutateBrain, randomBrain } from './brain';
-import { clamp, gauss } from '../lib/random';
+import { clamp, gauss, type Rand } from '../lib/random';
 
 /**
  * Геном. Никаких «видов» в генах нет — есть только числа.
@@ -39,7 +39,8 @@ export const GENE_INFO: Record<GeneKey, { label: string; min: number; max: numbe
   generosity: { label: 'Забота о потомстве', min: 0.2, max: 0.8, lo: 'мало', hi: 'много' },
 };
 
-export function genome(p: Partial<Genome>, neural: boolean): Genome {
+/** Новый геном: значения по умолчанию, поверх — `p`. Случайные внешность и мозг — из потока `rand`. */
+export function genome(p: Partial<Genome>, neural: boolean, rand: Rand): Genome {
   return {
     size: 4,
     speed: 1.2,
@@ -49,40 +50,40 @@ export function genome(p: Partial<Genome>, neural: boolean): Genome {
     swim: 0.1,
     social: 0.3,
     generosity: 0.45,
-    hue: Math.random() * 360,
-    pattern: Math.random(),
-    brain: neural ? randomBrain() : null,
+    hue: rand() * 360,
+    pattern: rand(),
+    brain: neural ? randomBrain(rand) : null,
     ...p,
   };
 }
 
-export function mutate(g: Genome, rate: number): Genome {
+export function mutate(g: Genome, rate: number, rand: Rand): Genome {
   const out = { ...g };
   for (const k of GENE_KEYS) {
     const { min, max } = GENE_INFO[k];
-    out[k] = clamp(g[k] + gauss() * rate * 0.35 * (max - min), min, max);
+    out[k] = clamp(g[k] + gauss(rand) * rate * 0.35 * (max - min), min, max);
   }
-  out.hue = (g.hue + gauss() * rate * 80 + 360) % 360;
-  out.pattern = clamp(g.pattern + gauss() * rate * 0.6, 0, 1);
-  out.brain = g.brain ? mutateBrain(g.brain, rate) : null;
+  out.hue = (g.hue + gauss(rand) * rate * 80 + 360) % 360;
+  out.pattern = clamp(g.pattern + gauss(rand) * rate * 0.6, 0, 1);
+  out.brain = g.brain ? mutateBrain(g.brain, rate, rand) : null;
   return out;
 }
 
 /** Потомок двух родителей: каждый ген берётся от одного из них или смешивается. */
-export function crossover(a: Genome, b: Genome): Genome {
+export function crossover(a: Genome, b: Genome, rand: Rand): Genome {
   const out = { ...a };
   for (const k of GENE_KEYS) {
-    const r = Math.random();
+    const r = rand();
     out[k] = r < 0.4 ? a[k] : r < 0.8 ? b[k] : (a[k] + b[k]) / 2;
   }
-  out.hue = Math.random() < 0.5 ? a.hue : b.hue;
-  out.pattern = Math.random() < 0.5 ? a.pattern : b.pattern;
+  out.hue = rand() < 0.5 ? a.hue : b.hue;
+  out.pattern = rand() < 0.5 ? a.pattern : b.pattern;
   if (a.brain && b.brain) {
     const w = new Float32Array(a.brain.length);
     // мозг наследуется блоками — целыми нейронами от одного из родителей
     const block = 13;
     for (let i = 0; i < w.length; i += block) {
-      const src = Math.random() < 0.5 ? a.brain : b.brain;
+      const src = rand() < 0.5 ? a.brain : b.brain;
       for (let j = i; j < Math.min(w.length, i + block); j++) w[j] = src[j];
     }
     out.brain = w;

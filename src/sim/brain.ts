@@ -1,4 +1,4 @@
-import { gauss } from '../lib/random';
+import { gauss, type Rand } from '../lib/random';
 
 /**
  * Крошечная нейросеть: 13 «ощущений» → 8 скрытых нейронов (tanh) → 2 действия.
@@ -26,15 +26,15 @@ export const HID = 8;
 export const OUT = OUTPUTS.length;
 export const WEIGHTS = IN * HID + (HID + 1) * OUT;
 
-export function randomBrain(): Float32Array {
+export function randomBrain(rand: Rand): Float32Array {
   const w = new Float32Array(WEIGHTS);
-  for (let i = 0; i < w.length; i++) w[i] = gauss() * 0.8;
+  for (let i = 0; i < w.length; i++) w[i] = gauss(rand) * 0.8;
   return w;
 }
 
-export function mutateBrain(w: Float32Array, rate: number): Float32Array {
+export function mutateBrain(w: Float32Array, rate: number, rand: Rand): Float32Array {
   const out = new Float32Array(w);
-  for (let i = 0; i < out.length; i++) if (Math.random() < 0.25) out[i] += gauss() * rate * 4;
+  for (let i = 0; i < out.length; i++) if (rand() < 0.25) out[i] += gauss(rand) * rate * 4;
   return out;
 }
 

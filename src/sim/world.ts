@@ -1,9 +1,10 @@
 import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
-import { clamp } from '../lib/random';
+import { clamp, mix32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
+import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -87,6 +88,18 @@ export interface Creature {
   immune: number;
   vir: number;
   beta: number;
+  /** Личные «кости» (mulberry32): последствия вмешательства расходятся волной, а не меняют весь мир сразу. */
+  rs: number;
+  /** Фаза выпадения навоза (0..31, со дня рождения): раз в 32 такта, но у каждого в свой такт. */
+  dph: number;
+}
+
+/** Всё, из чего собирается особь (обязательное — кто, где; остальное — по умолчанию как у новорождённого). */
+export type CreatureInit = Pick<Creature, 'id' | 'sp' | 'g' | 'x' | 'y' | 'heading' | 'rs'> & Partial<Creature>;
+
+/** Гильдия, как её считают пришельцы с большой земли и стенд: 0 травоядные, 1 всеядные, 2 хищники, 3 пловцы. */
+export function guildOf(g: Genome): 0 | 1 | 2 | 3 {
+  return g.swim > 0.6 ? 3 : g.diet < 0.3 ? 0 : g.diet <= 0.65 ? 1 : 2;
 }
 
 export interface Corpse {
@@ -230,6 +243,25 @@ export class World {
   env: SurfaceEnv = EARTH_ENV;
   drought = 0;
   seed = 1;
+  /** «Соль» зерна: та же карта (seed), но другие основатели, трава и кости. */
+  salt = 0;
+  /** Поток мира: основатели, мигранты, стихии, инструменты (между шагами и вне хода особи). */
+  rng = 1;
+  /** Чья очередь ходить в step(): её личные кости; null — поток мира. */
+  private ctx: Creature | null = null;
+  /**
+   * Единственный источник случайности симуляции (mulberry32 по потоку `ctx` или мира).
+   * Других источников случайности в src/sim нет — иначе перемотка и ветки не повторятся.
+   */
+  readonly r = (): number => {
+    const c = this.ctx;
+    let s: number;
+    if (c) s = c.rs = (c.rs + 0x6d2b79f5) | 0;
+    else s = this.rng = (this.rng + 0x6d2b79f5) | 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
   /** Ввод игрока: направление и бег. */
   input = { dx: 0, dy: 0, run: false };
   player: Creature | null = null;
@@ -307,9 +339,14 @@ export class World {
     this.reset();
   }
 
-  reset(mode: BrainMode = this.brainMode, seed = (Math.random() * 1e9) | 0, env: SurfaceEnv = this.env): void {
+  /** Новый мир. (seed, env, mode, salt) полностью задают его, включая основателей; рельеф зависит только от seed и env. */
+  reset(mode: BrainMode = this.brainMode, seed = (Math.random() * 1e9) | 0 /* entropy: new world */, env: SurfaceEnv = this.env, salt = 0): void {
     this.brainMode = mode;
     this.seed = seed;
+    this.salt = salt;
+    this.rng = mix32(seed ^ 0x5bd1e995 ^ mix32(salt));
+    this.ctx = null;
+    this.species.rand = this.r;
     this.env = env;
     this.terrain = new Terrain(this.width, this.height, this.cell, seed, env.sea, env.tempOffset, env.volcanism ?? 1);
     this.grass = new Float32Array(this.terrain.cols * this.terrain.rows);
@@ -319,9 +356,9 @@ export class World {
     this.forage = new Float32Array(this.grass.length);
     for (let i = 0; i < this.grass.length; i++) {
       const b = BIOMES[this.terrain.biome[i]];
-      this.grass[i] = b.fert * Math.random();
-      this.browse[i] = b.browse * (0.5 + Math.random() * 0.5);
-      this.forage[i] = b.forage * Math.random();
+      this.grass[i] = b.fert * this.r();
+      this.browse[i] = b.browse * (0.5 + this.r() * 0.5);
+      this.forage[i] = b.forage * this.r();
     }
     this.initSoil();
     this.creatures = [];
@@ -337,6 +374,8 @@ export class World {
     this.nextId = 1;
     this.player = null;
     this.playerStats = { generation: 0, possessed: 0, deaths: 0 };
+    this.crowdRisk.clear();
+    this.deaths.clear();
     for (const f of FOUNDERS) {
       // до выхода на сушу живут только морские существа
       const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
@@ -502,7 +541,7 @@ export class World {
   /** Поселить группу одинаковых особей туда, где им комфортно. */
   colonize(base: Partial<Genome>, n: number, x?: number, y?: number): Species {
     const neural = this.brainMode === 'neural';
-    const g0 = genome(base, neural);
+    const g0 = genome(base, neural, this.r);
     let cx = x;
     let cy = y;
     if (cx === undefined || cy === undefined) [cx, cy] = this.findHome(g0);
@@ -510,9 +549,9 @@ export class World {
     // основатели — всегда отдельный вид; пришельцы присоединяются к очень близкому родственнику
     const sp = this.tick === 0 ? this.species.create(g0, null, 0, region) : this.species.match(g0, this.tick, region);
     for (let i = 0; i < n; i++) {
-      const g = mutate(g0, 0.03);
-      if (neural) g.brain = genome({}, true).brain;
-      g.hue = g0.hue + (Math.random() - 0.5) * 10;
+      const g = mutate(g0, 0.03, this.r);
+      if (neural) g.brain = genome({}, true, this.r).brain;
+      g.hue = g0.hue + (this.r() - 0.5) * 10;
       const [px, py] = this.nearbyLand(cx, cy, 120, g);
       this.spawn(sp.id, g, px, py);
     }
@@ -524,8 +563,8 @@ export class World {
     let best: [number, number] = [this.width / 2, this.height / 2];
     let bestScore = -Infinity;
     for (let i = 0; i < 400; i++) {
-      const x = Math.random() * this.width;
-      const y = Math.random() * this.height;
+      const x = this.r() * this.width;
+      const y = this.r() * this.height;
       const idx = this.terrain.index(x, y);
       if (!this.passable(g, idx)) continue;
       const wet = BIOMES[this.terrain.biome[idx]].water;
@@ -540,8 +579,8 @@ export class World {
 
   private nearbyLand(x: number, y: number, r: number, g: Genome): [number, number] {
     for (let i = 0; i < 30; i++) {
-      const px = clamp(x + (Math.random() - 0.5) * 2 * r, 0, this.width - 1);
-      const py = clamp(y + (Math.random() - 0.5) * 2 * r, 0, this.height - 1);
+      const px = clamp(x + (this.r() - 0.5) * 2 * r, 0, this.width - 1);
+      const py = clamp(y + (this.r() - 0.5) * 2 * r, 0, this.height - 1);
       if (this.passable(g, this.terrain.index(px, py))) return [px, py];
     }
     return [x, y];
@@ -596,46 +635,61 @@ export class World {
   // ---------------- существа ----------------
 
   spawn(sp: number, g: Genome, x: number, y: number): Creature {
-    const c: Creature = {
-      id: this.nextId++,
-      sp,
-      g,
-      x,
-      y,
-      heading: Math.random() * Math.PI * 2,
-      v: 0,
-      energy: this.maxEnergy(g) * 0.5,
-      age: 0,
-      generation: 0,
-      mother: null,
-      father: null,
-      children: 0,
-      kills: 0,
-      alive: true,
-      state: 'wander',
-      cooldown: 0,
-      cooldownHunt: 0,
-      gx: 0,
-      gy: 0,
-      gt: 0,
-      pv: Math.pow(1 - g.diet, 1.1),
-      reachK: clamp((g.size - 4.5) / 3.5, 0, 1),
-      fe: clamp(1 - Math.abs(g.diet - 0.45) * 2.6, 0, 1),
-      lonely: 0,
-      pack: 0,
-      alarm: 0,
-      activations: g.brain ? new Float32Array(IN + HID + OUT) : null,
-      player: false,
-      cause: null,
-      dung: 0,
-      sick: 0,
-      immune: 0,
-      vir: 0,
-      beta: 0,
-    };
+    const heading = this.r() * Math.PI * 2;
+    // личный поток — из текущего: у детёныша — из маминых костей, у основателя и пришельца — из костей мира
+    const rs = (this.r() * 4294967296) | 0;
+    const dph = (this.r() * 32) | 0;
+    const c = this.makeCreature({ id: this.nextId++, sp, g, x, y, heading, rs, dph, energy: this.maxEnergy(g) * 0.5 });
     this.creatures.push(c);
     this.ancestors.set(c.id, { id: c.id, mother: null, sp, g, generation: 0, born: this.tick, died: null });
     return c;
+  }
+
+  /**
+   * Единственное место, где собирается особь (рождение и восстановление снимка): один порядок полей —
+   * один скрытый класс у всех особей, иначе после перемотки шаг заметно медленнее.
+   */
+  private makeCreature(o: CreatureInit): Creature {
+    const g = o.g;
+    return {
+      id: o.id,
+      sp: o.sp,
+      g,
+      x: o.x,
+      y: o.y,
+      heading: o.heading,
+      v: o.v ?? 0,
+      energy: o.energy ?? this.maxEnergy(g) * 0.5,
+      age: o.age ?? 0,
+      generation: o.generation ?? 0,
+      mother: o.mother ?? null,
+      father: o.father ?? null,
+      children: o.children ?? 0,
+      kills: o.kills ?? 0,
+      alive: o.alive ?? true,
+      state: o.state ?? 'wander',
+      cooldown: o.cooldown ?? 0,
+      cooldownHunt: o.cooldownHunt ?? 0,
+      gx: o.gx ?? 0,
+      gy: o.gy ?? 0,
+      gt: o.gt ?? 0,
+      pv: o.pv ?? Math.pow(1 - g.diet, 1.1),
+      reachK: o.reachK ?? clamp((g.size - 4.5) / 3.5, 0, 1),
+      fe: o.fe ?? clamp(1 - Math.abs(g.diet - 0.45) * 2.6, 0, 1),
+      lonely: o.lonely ?? 0,
+      pack: o.pack ?? 0,
+      alarm: o.alarm ?? 0,
+      activations: g.brain ? new Float32Array(IN + HID + OUT) : null,
+      player: o.player ?? false,
+      cause: o.cause ?? null,
+      dung: o.dung ?? 0,
+      sick: o.sick ?? 0,
+      immune: o.immune ?? 0,
+      vir: o.vir ?? 0,
+      beta: o.beta ?? 0,
+      rs: o.rs,
+      dph: o.dph ?? 0,
+    };
   }
 
   /** Предельный размер тела: кислород позволяет вырасти, гравитация — мешает. */
@@ -881,6 +935,7 @@ export class World {
     const disOn = this.settings.disease;
     for (const c of this.creatures) {
       if (!c.alive) continue;
+      this.ctx = c; // всё случайное в ходе этой особи — из её личных костей
       const idx = this.terrain.index(c.x, c.y);
       const p = this.perceive(c, this.senseRange(c, idx));
       let throttle: number;
@@ -897,7 +952,10 @@ export class World {
       if (c.cooldownHunt > 0) c.cooldownHunt--;
       this.feed(c, idx2, p.prey);
       // навоз выпадает порциями: в воде — сразу в «почву», на суше — в опад
-      if (soilOn && ((c.id + this.tick) & 31) === 0 && c.dung > 0) {
+      // такт — по возрасту и личной фазе, а не по номеру: одно лишнее рождение сдвигает все номера (номера
+      // в решениях не участвуют); фаза случайная, а не «от рождения» — с одной лишь фазой рождения навоз выпадал
+      // в такт с размножением, и баланс сдвигался (стенд: +17% особей, +23% видов, травоядные мельче)
+      if (soilOn && ((c.age + c.dph) & 31) === 0 && c.dung > 0) {
         if (this.isWater[idx2] === 1) this.soil[idx2] = Math.min(SOIL.SMAX, this.soil[idx2] + c.dung);
         else this.litter[idx2] = Math.min(SOIL.LMAX, this.litter[idx2] + c.dung);
         c.dung = 0;
@@ -928,16 +986,16 @@ export class World {
         risk = this.healthyRisk.get(c.sp) ?? 0; // == crowding(), пока в виде никто не болеет
         if (c.immune > 0) c.immune--;
         else if (p.sickB > 0) {
-          if (Math.random() < DIS.BETA * p.sickB) this.infect(c, p.srcV + (Math.random() + Math.random() + Math.random() - 1.5) * DIS.MUT);
+          if (this.r() < DIS.BETA * p.sickB) this.infect(c, p.srcV + (this.r() + this.r() + this.r() - 1.5) * DIS.MUT);
         } else if (p.n >= 6 && !this.pathogens.has(c.sp)) this.trySpill(c, p.n);
       }
       if (c.energy <= 0) this.die(c, disOn && wasSick ? 'болезнь' : 'голод');
-      else if (risk && Math.random() < risk) this.die(c, 'болезнь');
+      else if (risk && this.r() < risk) this.die(c, 'болезнь');
       else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
       else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5) this.die(c, 'утонул');
       // выздоровление — только если пережил этот такт (иначе die() уже записал исход)
       if (wasSick && c.alive && --c.sick === 0) {
-        c.immune = DIS.IMM + ((Math.random() * DIS.IMM_VAR) | 0);
+        c.immune = DIS.IMM + ((this.r() * DIS.IMM_VAR) | 0);
         const P = this.pathogens.get(c.sp);
         if (P) {
           P.recovered++;
@@ -945,6 +1003,7 @@ export class World {
         }
       }
     }
+    this.ctx = null;
 
     this.creatures = this.creatures.filter((c) => c.alive);
     this.creatures.push(...born);
@@ -1198,8 +1257,8 @@ export class World {
     const far = here < 0.12 ? 3.5 : 1.2;
     const r = c.g.sense * far;
     for (let k = 0; k < 8; k++) {
-      const a = Math.random() * Math.PI * 2;
-      const d = r * (0.2 + Math.random() * 0.8);
+      const a = this.r() * Math.PI * 2;
+      const d = r * (0.2 + this.r() * 0.8);
       const x = c.x + Math.cos(a) * d;
       const y = c.y + Math.sin(a) * d;
       if (x < 0 || y < 0 || x >= this.width || y >= this.height) continue;
@@ -1316,7 +1375,7 @@ export class World {
       c.state = 'graze';
       throttle = 0.12;
     } else {
-      c.heading += (Math.random() - 0.5) * 0.5;
+      c.heading += (this.r() - 0.5) * 0.5;
       c.state = 'wander';
     }
     // 6. стадо: держимся вместе и смотрим в одну сторону
@@ -1384,7 +1443,7 @@ export class World {
     const ny = c.y + Math.sin(c.heading) * v;
     if (nx < 0 || ny < 0 || nx >= this.width || ny >= this.height || !this.passable(c.g, this.terrain.index(nx, ny))) {
       // упёрлись в воду или край — разворот
-      if (!c.player) c.heading += Math.PI * (0.5 + Math.random());
+      if (!c.player) c.heading += Math.PI * (0.5 + this.r());
       return v * 0.3;
     }
     c.x = nx;
@@ -1441,7 +1500,7 @@ export class World {
     if (target) {
       const r = c.g.size + target.g.size + 2;
       if ((target.x - c.x) ** 2 + (target.y - c.y) ** 2 < r * r && this.canEat(c, target) && c.cooldownHunt <= 0) {
-        if (Math.random() > this.captureChance(c, target)) {
+        if (this.r() > this.captureChance(c, target)) {
           // добыча отбилась: хищник тратит силы, а крупная жертва может ранить
           c.cooldownHunt = 40;
           c.energy -= this.maxEnergy(c.g) * (target.g.size > c.g.size * 0.8 ? 0.08 : 0.02);
@@ -1528,14 +1587,14 @@ export class World {
   private trySpill(c: Creature, n: number): void {
     const sp = this.species.all.get(c.sp);
     if (!sp || sp.count < DIS.SPILL_MIN_N || this.tick - sp.lastOutbreak <= DIS.COOLDOWN) return;
-    if (Math.random() >= DIS.SPILL * (n - 5) * (this.crowding(c.sp) > 0 ? 20 : 1)) return;
-    const P = this.newPathogen(c.sp, c.x, c.y, 0.35 + 0.3 * Math.random());
+    if (this.r() >= DIS.SPILL * (n - 5) * (this.crowding(c.sp) > 0 ? 20 : 1)) return;
+    const P = this.newPathogen(c.sp, c.x, c.y, 0.35 + 0.3 * this.r());
     this.infect(c, P.vir0);
   }
 
   private newPathogen(host: number, x: number, y: number, vir0: number): Pathogen {
     const region = this.terrain.regionAt(x, y)?.name ?? 'море';
-    const { name, kind } = pathogenName(region);
+    const { name, kind } = pathogenName(region, this.r);
     const P: Pathogen = { id: this.nextPath++, host, name, kind, region, born: this.tick, ended: null, cases: 0, deaths: 0, recovered: 0, peak: 0,
       curve: [], virCurve: [], vir0, virMean: vir0, newW: 0, outW: 0, rEff: 1, announced: false, x, y };
     this.pathogens.set(host, P);
@@ -1559,10 +1618,10 @@ export class World {
   }
 
   private breed(a: Creature, b: Creature | null): Creature {
-    let g = b ? crossover(a.g, b.g) : { ...a.g };
-    g = mutate(g, this.settings.mutationRate);
+    let g = b ? crossover(a.g, b.g, this.r) : { ...a.g };
+    g = mutate(g, this.settings.mutationRate, this.r);
     g.size = Math.min(g.size, this.maxSize);
-    const angle = Math.random() * Math.PI * 2;
+    const angle = this.r() * Math.PI * 2;
     let x = a.x + Math.cos(angle) * a.g.size * 2;
     let y = a.y + Math.sin(angle) * a.g.size * 2;
     if (!this.passable(g, this.terrain.index(x, y))) [x, y] = [a.x, a.y];
@@ -1603,23 +1662,16 @@ export class World {
   /** Если какой-то трофический уровень пуст — с большой земли приплывают новые колонисты. */
   private migrantsFromAfar(): void {
     // гильдии: пловцы отдельно, иначе по диете (как в стенде scripts/bench.ts)
-    let herb = 0;
-    let omni = 0;
-    let meat = 0;
-    let swim = 0;
-    for (const c of this.creatures) {
-      if (c.g.swim > 0.6) swim++;
-      else if (c.g.diet < 0.3) herb++;
-      else if (c.g.diet <= 0.65) omni++;
-      else meat++;
-    }
+    const gc = [0, 0, 0, 0];
+    for (const c of this.creatures) gc[guildOf(c.g)]++;
+    const [herb, omni, meat, swim] = gc;
     const arrive = (base: Partial<Genome>, n: number, what: string) => {
       const sp = this.colonize(base, n);
       this.log(`⛵ С большой земли приплыли ${what}: «${sp.name}» (${n})`, 'migration');
     };
     const pickF = (f: (g: Partial<Genome>) => boolean) => {
       const list = FOUNDERS.filter((x) => f(x.g));
-      return list[Math.floor(Math.random() * list.length)].g;
+      return list[Math.floor(this.r() * list.length)].g;
     };
     if (this.env.landLife) {
       if (herb < 25) arrive(pickF((g) => (g.diet ?? 0) < 0.3 && (g.swim ?? 0) < 0.6), 30, 'травоядные');
@@ -1686,13 +1738,13 @@ export class World {
         old.cases -= oldSick;
         this.endPathogen(old, true);
       }
-      const first = hosts[Math.floor(Math.random() * hosts.length)];
+      const first = hosts[Math.floor(this.r() * hosts.length)];
       const P = this.newPathogen(top.id, first.x, first.y, DIS.TOOL_VIR);
       P.cases = oldSick;
       const k = Math.min(hosts.length, Math.max(5, Math.round(DIS.TOOL_SHARE * hosts.length)));
       for (let i = 0; i < k; i++) {
         // частичная перетасовка Фишера — Йетса: k разных особей
-        const j = i + Math.floor(Math.random() * (hosts.length - i));
+        const j = i + Math.floor(this.r() * (hosts.length - i));
         const c = hosts[j];
         hosts[j] = hosts[i];
         hosts[i] = c;
@@ -1705,7 +1757,7 @@ export class World {
     }
     let killed = 0;
     for (const c of this.creatures) {
-      if (c.sp === top.id && Math.random() < 0.6) {
+      if (c.sp === top.id && this.r() < 0.6) {
         this.die(c, 'эпидемия');
         killed++;
       }
@@ -1725,6 +1777,26 @@ export class World {
         }
       }
     }
+  }
+
+  // ---------------- машина времени ----------------
+
+  /** Новые «кости»: перемешать поток мира и потоки всех особей (мир тот же — дальше другой случай). */
+  reseed(salt: number): void {
+    const k = Math.imul(salt | 0, 0x9e3779b9);
+    this.rng = mix32(this.rng ^ k);
+    for (const c of this.creatures) c.rs = mix32(c.rs ^ k ^ c.id);
+    if (this.player && !this.player.alive) this.player.rs = mix32(this.player.rs ^ k);
+  }
+
+  /** Точный снимок мира (между шагами). */
+  captureState(): WorldSnap {
+    return captureWorld(this as unknown as WorldInternals);
+  }
+
+  /** Вернуть мир в снимок (тот же seed, env и размеры). `history` — графики из архива машины времени. */
+  loadState(s: WorldSnap, history: Sample[] = []): void {
+    loadWorld(this as unknown as WorldInternals, s, history);
   }
 
   // ---------------- игрок ----------------

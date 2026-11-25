@@ -101,6 +101,7 @@ npm run dev
 Проверки:
 - `npm run build` — TypeScript (strict) и сборка;
 - `npm run bench -- <зерно> <тактов> [rules|neural]` — балансный стенд поверхности без браузера;
+  `--tm=det` / `--tm=fly` — точность снимков машины времени и «эффект бабочки»; опорные числа — `scripts/BENCH.md`;
 - `npm run check:worlds` — сравнение Земли, Марса и Венеры с реальными данными;
 - `npm run learn:check` — уроки проходят на настоящих симуляциях.
 
