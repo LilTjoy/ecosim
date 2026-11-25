@@ -3,6 +3,7 @@
  * их используют уроки, ссылки справочника и scripts/learn-check.ts.
  */
 import { EARTH, luminosity0, PRESETS, simulate, type PlanetParams, type SimResult } from '../planet/model';
+import type { Pathogen } from '../sim/microbes';
 import type { World } from '../sim/world';
 import { BIOMES } from '../sim/terrain';
 
@@ -36,6 +37,8 @@ export const PLANET_LINKS: Record<string, PlanetLink> = {
   supernova: { params: { seed: 3 } },
   flare: { params: { starMass: 0.45, orbit: orbitFor(0.45, 1), seed: 133 } },
   dynamo: { params: { mass: 0.11, tectonics: null } },
+  atmoloss: { params: { mass: 0.11, tectonics: null } },
+  carbonates: { params: { orbit: fluxOrbit(1.4) }, t: 4.27 },
   axis: { params: { moon: 0 } },
   co2starve: { params: { orbit: fluxOrbit(1.25) } },
   runaway: { params: { orbit: fluxOrbit(1.4) }, t: 4.26 },
@@ -94,36 +97,51 @@ export function landMean(w: World, arr: ArrayLike<number>): number {
   return n ? s / n : 0;
 }
 
-/** Поля микромира (появятся вместе с микробами в почве). Проверяем «на лету», чтобы урок работал и до, и после. */
+/** Поля микромира: минеральное питание почвы и опад (по клеткам). */
 export interface SoilFields {
   soil: ArrayLike<number>;
   litter: ArrayLike<number>;
 }
 
+/** null — почва выключена (старая модель: опад и плодородие не считаются). */
 export function soilFields(w: World): SoilFields | null {
-  const x = w as unknown as Partial<Record<'soil' | 'litter', unknown>>;
-  const ok = (v: unknown): v is ArrayLike<number> => v instanceof Float32Array || v instanceof Float64Array;
-  return ok(x.soil) && ok(x.litter) ? { soil: x.soil, litter: x.litter } : null;
+  return w.settings.soil ? { soil: w.soil, litter: w.litter } : null;
 }
 
-/** Переключатель опыта «без разложителей», если мир его поддерживает. */
+/** Переключатель опыта «без разложителей» (World.experiment; сбрасывается с каждым новым миром). */
 export function decomposerSwitch(w: World): { noDecomposers: boolean } | null {
-  if (!('soil' in w.settings)) return null;
-  const e = (w as unknown as { experiment?: unknown }).experiment;
-  if (typeof e !== 'object' || e === null || !('noDecomposers' in e)) return null;
-  const sw = e as { noDecomposers: unknown };
-  return typeof sw.noDecomposers === 'boolean' ? (sw as { noDecomposers: boolean }) : null;
+  return w.settings.soil ? w.experiment : null;
 }
 
-/** Есть ли новая модель болезней (волна, иммунитет) — без неё урок об эпидемии не работает. */
+/** Включена ли модель болезней (SIR с иммунитетом, src/sim/microbes.ts) — без неё урок об эпидемии не работает. */
 export function diseaseModel(w: World): boolean {
-  return 'disease' in w.settings && w.settings.disease === true;
+  return w.settings.disease;
 }
 
-/** Сколько больных в последней записи истории (если мир это считает). */
+/** Сколько больных сейчас (по последней записи истории, раз в 20 тактов). */
 export function sickNow(w: World): number | null {
-  const h = w.history.at(-1) as unknown as Record<string, unknown> | undefined;
-  return h && typeof h.sick === 'number' ? h.sick : null;
+  const h = w.history.at(-1);
+  return h ? h.sick : null;
+}
+
+/** Вспышка, начатая уроком (по id болезни): ещё идёт — в w.pathogens, закончилась — в архиве w.outbreaks. */
+export function outbreakById(w: World, id: number): Pathogen | null {
+  for (const P of w.pathogens.values()) if (P.id === id) return P;
+  for (let i = w.outbreaks.length - 1; i >= 0; i--) if (w.outbreaks[i].id === id) return w.outbreaks[i];
+  return null;
+}
+
+/** Больные этой болезнью сейчас (0 — вспышка закончилась). Обновляется раз в 20 тактов. */
+export const outbreakSick = (P: Pathogen | null): number => (!P || P.ended !== null ? 0 : (P.curve.at(-1) ?? 0));
+
+/** Урок «Как растёт эпидемия»: заразить самый многочисленный вид новой болезнью. Возвращает вспышку или null. */
+export function startLessonEpidemic(w: World): { P: Pathogen; host: number; hostName: string; n0: number } | null {
+  const top = w.species.living()[0];
+  if (!top || !w.settings.disease) return null;
+  const n0 = top.count;
+  w.epidemic();
+  const P = w.pathogens.get(top.id);
+  return P ? { P, host: top.id, hostName: top.name, n0 } : null;
 }
 
 /** Итог опыта с «близнецами»: n миров с одинаковыми зёрнами случайности и одной разницей. */

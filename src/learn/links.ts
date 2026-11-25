@@ -31,6 +31,9 @@ export function goLink(ctx: LearnCtx, card: Card, startLesson: (id: string) => v
     ctx.show('eco');
     if (l.tab) ctx.surface.showTab(l.tab, l.gene);
     ctx.surface.openFact(card.key);
+  } else if (l.view === 'compare') {
+    ctx.show('compare');
+    ctx.openCompareFact?.(card.key);
   } else if (l.view === 'lesson') startLesson(l.id);
   else ctx.show(l.view);
 }

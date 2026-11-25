@@ -37,6 +37,7 @@ function ensureCompare(): CompareView {
   c.getLucky = () => mc.stats.lucky.map((l) => l.params);
   c.getPlanet = () => planet.current;
   c.onNeedMc = () => show('mc');
+  c.onFact = (id) => learn.markSeen('compare', id);
   return (compare = c);
 }
 planet.onCompare = (p) => {
@@ -49,7 +50,7 @@ mc.onOpen = (params, preset) => {
   planet.open(params, preset);
   show('planet');
 };
-const learn = new LearnView(el('view-learn'), { planet, mc, drake, surface, show });
+const learn = new LearnView(el('view-learn'), { planet, mc, drake, surface, show, openCompareFact: (id) => ensureCompare().openFact(id) });
 planet.onFact = (id) => learn.markSeen('planet', id);
 surface.observeFacts((id) => learn.markSeen('surface', id));
 

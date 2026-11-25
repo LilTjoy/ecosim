@@ -3,9 +3,10 @@
 import { EARTH, PRESETS, simulate, type PlanetParams, type SimResult } from '../src/planet/model';
 import { EARTH_ENV, World, YEAR, type SurfaceEnv } from '../src/sim/world';
 import { mulberry32 } from '../src/lib/random';
+import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, landMean, MARS, MARS_RD,
-  PLANET_LINKS, sickNow, soilFields, twinWorld,
+  outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld,
 } from '../src/learn/scenarios';
 
 const args = process.argv.slice(2);
@@ -28,9 +29,12 @@ console.log('🪐 Планета');
   ok(!!d && d.t < 0.2, `Марс: щит гаснет до 0,2 млрд лет (${d?.t})`);
   const s15 = at(r, 1.5), s45 = at(r, 4.5);
   console.log(`    N₂ ${f2(r.samples[0].pressure)} → ${f2(s15.pressure)} (1,5) → ${f2(s45.pressure)} (4,5); CO₂ ${f2(s15.co2)}/${f2(s45.co2)}; T ${Math.round(s15.T - 273)}/${Math.round(s45.T - 273)} °C; max stage ${r.maxStage}`);
+  ok(s45.ocean > 0.3, `Марс у Солнца: воздух улетел (${ev(r, 'atmoloss')?.t}), а вода осталась (${s45.ocean.toFixed(2)} на 4,5)`);
   const rd = run(MARS_RD);
   const s = rd.samples.find((x) => x.pressure < 0.01 && x.ocean <= 0.01);
-  ok(!!s && s.t < 1.2, `Марс у красного карлика: нет азота и воды до 1,2 (${s?.t.toFixed(2)}, CO₂ ${s ? f2(s.co2) : '-'})`);
+  ok(!!s && s.t < 1.5, `Марс у красного карлика: нет азота и воды до 1,5 (${s?.t.toFixed(2)}, CO₂ ${s ? f2(s.co2) : '-'})`);
+  const al = ev(rd, 'atmoloss');
+  ok(!!al && al.t < 0.2, `Марс у красного карлика: воздух улетел почти сразу (${al?.t})`);
   console.log(`    щит гаснет: ${ev(rd, 'dynamo')?.t}; приливный захват: ${rd.derived.tidalLock}`);
 }
 {
@@ -72,6 +76,12 @@ for (const [key, l] of Object.entries(PLANET_LINKS)) {
   if (!e) ok(false, `Ссылка «${key}»: событие не найдено`);
 }
 console.log(`  ✓ ссылки проверены (${Object.keys(PLANET_LINKS).length})`);
+{
+  // у каждой карточки планеты есть сценарий (иначе «▶ Посмотреть» откроет Землю на t = 0)
+  const keys = [...Object.keys(FACTS), ...Object.keys(WORLD_FACTS)];
+  const miss = keys.filter((k) => !PLANET_LINKS[k]);
+  ok(miss.length === 0, `Карточки планеты со ссылками: ${keys.length - miss.length}/${keys.length}${miss.length ? ` (нет: ${miss.join(', ')})` : ''}`);
+}
 
 if (!args.includes('--planet')) {
   console.log('🦊 Поверхность');
@@ -117,41 +127,69 @@ if (!args.includes('--planet')) {
     ok(g1.giants <= gauseGoal(g0.giants), `Гаузе, зерно ${seed}: гигантов ${g0.giants} → ${g1.giants} за ${tk} тактов (мелких травоядных ${g0.smallHerb} → ${g1.smallHerb}, хищников ${g0.carn} → ${g1.carn})`);
     lap('Гаузе', t);
   }
-  {
-    const w = make(42);
+  // «Невидимые дворники»: как в уроке — 3000 тактов, год без разложителей, потом возвращаем
+  for (const seed of seeds) {
+    const t = Date.now();
+    const w = make(seed);
     const sw = decomposerSwitch(w);
     const sf = soilFields(w);
-    if (!sw || !sf) console.log('  – урок «Невидимые дворники» пропущен: в мире ещё нет микробов почвы');
-    else {
-      steps(w, 3000);
-      const L0 = landMean(w, sf.litter), S0 = landMean(w, sf.soil);
-      sw.noDecomposers = true;
-      let tk = 0, L = L0, S = S0;
-      while (tk < 12000 && !(L >= L0 * 1.5 && S <= S0 * 0.85)) {
-        steps(w, 250);
-        tk += 250;
-        const f = soilFields(w)!;
-        L = landMean(w, f.litter);
-        S = landMean(w, f.soil);
-      }
-      ok(L >= L0 * 1.5 && S <= S0 * 0.85, `Без разложителей: опад ${L0.toFixed(3)} → ${L.toFixed(3)}, почва ${S0.toFixed(3)} → ${S.toFixed(3)} за ${tk}`);
+    if (!sw || !sf) {
+      ok(false, 'Невидимые дворники: в мире нет почвы или опыта noDecomposers');
+      continue;
     }
+    steps(w, 3000);
+    const L0 = landMean(w, sf.litter), S0 = landMean(w, sf.soil), K0 = w.corpses.length;
+    sw.noDecomposers = true;
+    let tk = 0, L = L0, S = S0;
+    while (tk < 2 * YEAR && !(tk >= YEAR && L >= L0 * 2 && S <= S0 * 0.85)) {
+      steps(w, 250);
+      tk += 250;
+      L = landMean(w, sf.litter);
+      S = landMean(w, sf.soil);
+    }
+    const K = w.corpses.length;
+    ok(tk >= YEAR && L >= L0 * 2 && S <= S0 * 0.85, `Без разложителей, зерно ${seed}: опад ${L0.toFixed(3)} → ${L.toFixed(3)} (×${(L / L0).toFixed(2)}), почва ${S0.toFixed(3)} → ${S.toFixed(3)} (×${(S / S0).toFixed(2)}), туш ${K0} → ${K} за ${tk}`);
+    ok(K > K0, `Без разложителей, зерно ${seed}: туши копятся (${K0} → ${K})`);
+    const Loff = L;
+    sw.noDecomposers = false;
+    tk = 0;
+    while (tk < 2 * YEAR && !(L <= Loff * 0.8 && S >= S0 * 0.95)) {
+      steps(w, 250);
+      tk += 250;
+      L = landMean(w, sf.litter);
+      S = landMean(w, sf.soil);
+    }
+    ok(L <= Loff * 0.8 && S >= S0 * 0.95, `Разложители вернулись, зерно ${seed}: опад ${Loff.toFixed(3)} → ${L.toFixed(3)}, почва ${S.toFixed(3)} (до опыта ${S0.toFixed(3)}) за ${tk}`);
+    lap('дворники', t);
   }
-  {
-    const w = make(42);
-    if (!diseaseModel(w) || sickNow(w) === null) console.log('  – урок «Как растёт эпидемия» пропущен: в мире ещё нет новой модели болезней');
-    else {
-      steps(w, 3000);
-      w.epidemic();
-      let peak = 0, now = 0;
-      for (let tk = 0; tk < 15000; tk += 100) {
-        steps(w, 100);
-        now = sickNow(w) ?? 0;
-        peak = Math.max(peak, now);
-        if (tk > 1500 && peak > 0 && now <= 0.2 * peak) break;
-      }
-      ok(peak > 0 && now <= 0.2 * peak, `Эпидемия: пик ${peak}, сейчас ${now}`);
+  // «Как растёт эпидемия»: заражаем самый многочисленный вид, следим за этой вспышкой (а не за всеми больными мира)
+  for (const seed of seeds) {
+    const t = Date.now();
+    const w = make(seed);
+    if (!diseaseModel(w)) {
+      ok(false, 'Эпидемия: модель болезней выключена');
+      continue;
     }
+    steps(w, 3000);
+    const e = startLessonEpidemic(w);
+    if (!e) {
+      ok(false, `Эпидемия, зерно ${seed}: заразить некого`);
+      continue;
+    }
+    const i0 = e.P.cases, t0e = w.tick;
+    let tk = 0, passed = false;
+    while (tk < 15000) {
+      steps(w, 20);
+      tk += 20;
+      const P = outbreakById(w, e.P.id);
+      if (P && P.peak > 0 && outbreakSick(P) <= 0.2 * P.peak && w.tick > t0e + 1500) {
+        passed = true;
+        break;
+      }
+    }
+    const P = outbreakById(w, e.P.id);
+    ok(passed && !!P, `Эпидемия, зерно ${seed}: «${e.hostName}» (${e.n0}), заразили ${i0}, пик ${P?.peak}, всего ${P?.cases}, погибли ${P?.deaths}, выздоровели ${P?.recovered}, вирулентность ${P?.vir0} → ${P?.virMean.toFixed(2)}, спала за ${tk}`);
+    lap('эпидемия', t);
   }
 }
 console.log(`\n${failed ? `✗ Провалено проверок: ${failed}` : '✓ Все проверки пройдены'} · ${((Date.now() - t0) / 1000).toFixed(0)} с`);

@@ -4,7 +4,10 @@ import { fmtAge } from '../planet/planetView';
 import { wilson } from '../planet/stats';
 import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
-import { decomposerSwitch, diseaseModel, fluxOrbit, gauseGoal, guilds, landMean, MARS, MARS_RD, sickNow, soilFields } from './scenarios';
+import {
+  decomposerSwitch, diseaseModel, fluxOrbit, gauseGoal, guilds, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
+  startLessonEpidemic,
+} from './scenarios';
 
 // ---------------- помощники ----------------
 
@@ -115,7 +118,7 @@ export const LESSONS: Lesson[] = [
       P({
         checkpoint: true,
         focus: ['dynamo'],
-        text: 'Азот уходит медленно: наше Солнце спокойное. Что, если звезда буйная? Поставим ту же планету к красному карлику — в молодости они бьют вспышками и плотным звёздным ветром.',
+        text: 'У спокойного Солнца воздух улетел, а вода осталась — замёрзла в полярных шапках и под грунтом, как на настоящем Марсе. Что, если звезда буйная? Поставим ту же планету к красному карлику — в молодости они бьют вспышками и плотным звёздным ветром.',
         action: { label: '⚡ Та же планета у красного карлика', run: (c) => startPlanet(c, MARS_RD) },
         watch: {
           hint: () => 'Следим за азотом и 🌊 водой…',
@@ -128,7 +131,10 @@ export const LESSONS: Lesson[] = [
           done: (c) => {
             const { now, sample: s } = S(c);
             const tDyn = passed(c, 'dynamo')?.t ?? S(c).result.derived.dynamo;
-            return `За ${fmtAge(now)} азота почти не осталось — ${bar(s.pressure)} бар, и океаны улетели вслед за ним. Щит здесь погас ещё быстрее, через ${fmtAge(tDyn)}: планета так близко к звезде, что повёрнута к ней одной стороной (приливный захват), а медленное вращение ослабляет динамо. В воздухе остался лишь тонкий слой вулканического CO₂ (${bar(s.co2)} бар) — у настоящего Марса атмосфера тоже на 95% из CO₂.`;
+            const tAir = passed(c, 'atmoloss')?.t;
+            const air = tAir !== undefined ? `Воздух улетел почти сразу — уже через ${fmtAge(tAir)}, а к ${fmtAge(now)} звёздный ветер унёс и всю воду.` : `За ${fmtAge(now)} азота почти не осталось — ${bar(s.pressure)} бар, и вода улетела вслед за ним.`;
+            const co2 = s.co2 >= 0.001 ? ` В воздухе остался лишь тонкий слой вулканического CO₂ (${bar(s.co2)} бар) — у настоящего Марса атмосфера тоже на 95% из CO₂.` : ' Даже вулканический CO₂ здесь не задерживается — без щита ветер уносит и его.';
+            return `${air} Щит здесь погас ещё быстрее, через ${fmtAge(tDyn)}: планета так близко к звезде, что повёрнута к ней одной стороной (приливный захват), а медленное вращение ослабляет динамо.${co2}`;
           },
         },
       }),
@@ -668,7 +674,7 @@ export const LESSONS: Lesson[] = [
       },
       {
         view: 'eco',
-        text: 'Выключим бактерии и грибы почвы — только их. Азотфиксаторы и выветривание камней продолжат работать.',
+        text: 'Выключим бактерии и грибы почвы — только их. Азотфиксаторы и выветривание камней продолжат работать. Смотрим целый год: опад и почва меняются по сезонам, сравнивать честно только одно время года с тем же.',
         action: {
           label: '🧫 Выключить разложителей',
           run: (c) => {
@@ -683,17 +689,21 @@ export const LESSONS: Lesson[] = [
         watch: {
           hint: (c) => {
             const s = soilNow(c);
-            return `Опад ${n2(s.L)} / было ${n2(num(c, 'L0'))}, почва ${n2(s.S)} / было ${n2(num(c, 'S0'))}…`;
+            return `Год опыта: ${Math.min(100, Math.round((ticks(c) / YEAR) * 100))}% · опад ${n2(s.L)} (было ${n2(num(c, 'L0'))}), почва ${n2(s.S)} (было ${n2(num(c, 'S0'))}), туш ${s.K} (было ${num(c, 'K0')})`;
           },
+          // замер (зёрна 42, 7, 123, 2024): через год опад ×2,7–3,1, почва ×0,63–0,70; без опыта за тот же год — ×1,4 и ×1,0
           test: (c) => {
             const s = soilNow(c);
-            return s.L >= num(c, 'L0') * 1.5 && s.S <= num(c, 'S0') * 0.85;
+            return ticks(c) >= YEAR && s.L >= num(c, 'L0') * 2 && s.S <= num(c, 'S0') * 0.85;
           },
-          giveUp: { ticks: 12000 },
+          onPass: (c) => {
+            c.mem.Loff = soilNow(c).L;
+          },
+          giveUp: { ticks: 2 * YEAR },
           done: (c) => {
             const s = soilNow(c);
-            const k = s.K > num(c, 'K0') * 1.2 ? ` Туш стало ${s.K}: их разлагают только жуки и солнце.` : '';
-            return `Опад вырос в ${n1(s.L / Math.max(1e-9, num(c, 'L0')))} раза — лежит и не гниёт. Почва обеднела: ${n2(s.S)} (было ${n2(num(c, 'S0'))}), трава — ${n2(s.G)} (было ${n2(num(c, 'G0'))}).${k} Падальщики пируют, а травоядным всё труднее.`;
+            const k = s.K > num(c, 'K0') * 1.2 ? ` Туш на карте — ${s.K} (было ${num(c, 'K0')}): их сушат только солнце и жуки.` : '';
+            return `За год опад вырос в ${n1(s.L / Math.max(1e-9, num(c, 'L0')))} раза — лежит и не гниёт. Почва обеднела: ${n2(s.S)} (было ${n2(num(c, 'S0'))}), трава — ${n2(s.G)} (было ${n2(num(c, 'G0'))}).${k} Питание заперто в мёртвом: падальщики пируют, а травоядным всё труднее.`;
           },
         },
       },
@@ -705,20 +715,27 @@ export const LESSONS: Lesson[] = [
           run: (c) => {
             const sw = decomposerSwitch(c.world);
             if (sw) sw.noDecomposers = false;
+            c.world.log('🧫 Опыт окончен: бактерии и грибы снова работают', 'info');
+            if (c.mem.Loff === undefined) c.mem.Loff = soilNow(c).L;
             c.mem.t0 = c.world.tick;
           },
         },
         watch: {
           hint: (c) => {
             const s = soilNow(c);
-            return `Опад ${n2(s.L)}, почва ${n2(s.S)} — ждём, когда вернутся к прежним…`;
+            return `Опад ${n2(s.L)} (в конце опыта ${n2(num(c, 'Loff'))}), почва ${n2(s.S)} (до опыта ${n2(num(c, 'S0'))}) — ждём…`;
           },
+          // замер: почва возвращается за 1500–3000 тактов, опад тает до 0,8 от пика за ≈4500
           test: (c) => {
             const s = soilNow(c);
-            return s.L <= num(c, 'L0') * 1.2 && s.S >= num(c, 'S0') * 0.95;
+            return s.L <= num(c, 'Loff') * 0.8 && s.S >= num(c, 'S0') * 0.95;
           },
-          giveUp: { ticks: 12000 },
-          done: () => 'Круговорот снова замкнулся: опад разлагается, почва богатеет, трава возвращается. Заметьте: азотфиксаторы весь опыт работали — без них почва обеднела бы ещё сильнее.',
+          giveUp: { ticks: 2 * YEAR },
+          done: (c) => {
+            const s = soilNow(c);
+            const rich = s.S > num(c, 'S0') * 1.05 ? ` Почва теперь даже богаче, чем до опыта (${n2(s.S)} против ${n2(num(c, 'S0'))}): сгнило всё, что накопилось за год.` : '';
+            return `Круговорот снова замкнулся: опад разлагается (${n2(s.L)}, а было ${n2(num(c, 'Loff'))}), туши исчезают, питание возвращается в почву.${rich} Заметьте: азотфиксаторы весь опыт работали — без них почва обеднела бы ещё сильнее.`;
+          },
         },
       },
       {
@@ -747,8 +764,11 @@ export const LESSONS: Lesson[] = [
     teaser: 'Почему волна болезни сначала растёт, а потом сама спадает.',
     minutes: 5,
     cards: ['microbes.sir', 'microbes.r0', 'microbes.virulence'],
-    locked: (c) => (diseaseModel(c.world) && sickNow(c.world) !== null ? null : '🔒 Появится вместе с микробами-возбудителями'),
-    readout: (c) => `🤒 Больных сейчас: ${sickNow(c.world) ?? 0}`,
+    locked: (c) => (diseaseModel(c.world) ? null : '🔒 Появится вместе с микробами-возбудителями'),
+    readout: (c) => {
+      const P = c.mem.path === undefined ? null : outbreakById(c.world, num(c, 'path'));
+      return P ? `🤒 «${P.name}»: больных ${outbreakSick(P)} · пик ${P.peak} · всего заразились ${P.cases} · погибли ${P.deaths} · выздоровели ${P.recovered}` : `🤒 Больных во всём мире: ${sickNow(c.world) ?? 0}`;
+    },
     steps: [
       {
         view: 'eco',
@@ -769,47 +789,47 @@ export const LESSONS: Lesson[] = [
         text: 'Предскажите.',
         quiz: {
           q: 'Заразим 12% самого многочисленного вида новой болезнью. Как будет меняться число больных?',
-          options: ['Расти без конца, пока все не вымрут', 'Сначала быстро расти, потом спадать — когда переболевших станет много', 'Сразу пойдёт на спад'],
+          options: ['Расти без конца, пока все не вымрут', 'Держаться или расти, пока есть кого заражать, а потом спадёт само — когда переболевших станет много', 'Болезнь останется навсегда: больных всегда будет столько же'],
           correct: 1,
-          explain: 'Сначала каждый больной заражает нескольких здоровых, и волна растёт. Но переболевшие получают иммунитет, и заражать становится некого.',
+          explain: 'Пока каждый больной успевает заразить хотя бы одного здорового, волна держится или растёт. Но переболевшие получают иммунитет, и заражать становится некого — волна гаснет сама.',
         },
       },
       {
         view: 'eco',
-        text: 'Запускаем болезнь. Смотрите на число больных.',
+        text: 'Запускаем болезнь. Кривую больных видно во вкладке «🦠 Микромир» внизу, а числа — в строке под подсказкой.',
         action: {
           label: '🦠 Запустить болезнь',
-          clear: ['peak'],
+          clear: ['path', 'i0'],
           run: (c) => {
-            const top = c.world.species.living()[0];
-            c.mem.n0 = top?.count ?? 0;
-            c.mem.top = top?.id ?? -1;
-            c.mem.topName = top?.name ?? '?';
-            c.world.epidemic();
+            const e = startLessonEpidemic(c.world);
+            if (!e) throw new Error('в этом мире некого заражать');
+            Object.assign(c.mem, { path: e.P.id, i0: e.P.cases, vir0: e.P.vir0, n0: e.n0, top: e.host, topName: e.hostName });
             c.mem.tStart = c.world.tick;
             c.mem.t0 = c.world.tick;
-            c.mem.peak = 0;
+            c.surface.showTab('micro');
           },
         },
         watch: {
           hint: (c) => {
-            const now = sickNow(c.world) ?? 0;
-            c.mem.peak = Math.max(num(c, 'peak'), now);
-            return `Больных: ${now} · пик пока ${num(c, 'peak')}`;
+            const P = outbreakById(c.world, num(c, 'path'));
+            return P ? `Больных: ${outbreakSick(P)} · пик пока ${P.peak} (заразили ${num(c, 'i0')})` : 'Ждём…';
           },
+          // замер (зёрна 42, 7, 123, 2024): пик через 0–160 тактов (+5…24% к заражённым), волна гаснет к 1500 тактам
           test: (c) => {
-            const now = sickNow(c.world) ?? 0;
-            const peak = Math.max(num(c, 'peak'), now);
-            c.mem.peak = peak;
-            return peak > 0 && now <= 0.2 * peak && c.world.tick > num(c, 'tStart') + 1500;
+            const P = outbreakById(c.world, num(c, 'path'));
+            return !!P && P.peak > 0 && outbreakSick(P) <= 0.2 * P.peak && c.world.tick > num(c, 'tStart') + 1500;
           },
           giveUp: { ticks: 15000 },
           done: (c) => {
-            const sp = c.world.species.all.get(num(c, 'top'));
-            const n = sp?.count ?? 0;
-            const n0 = num(c, 'n0');
-            const lost = n0 ? Math.max(0, Math.round((1 - n / n0) * 100)) : 0;
-            return `Пик — ${num(c, 'peak')} больных, потом волна спала: у переболевших появился иммунитет, и болезни стало некого заражать. Вид потерял ${lost}%.`;
+            const P = outbreakById(c.world, num(c, 'path'));
+            if (!P) return 'Волна спала.';
+            const i0 = num(c, 'i0');
+            const rise =
+              P.peak > i0 * 1.15
+                ? `Сначала волна выросла: заразили ${i0}, а на пике болели ${P.peak} сразу.`
+                : `Волна почти не росла (заразили ${i0}, на пике ${P.peak}): этот вид живёт не очень тесно, и каждый больной успевал заразить примерно одного соседа — R около 1.`;
+            const milder = P.virMean < num(c, 'vir0') - 0.03 ? ' А ещё болезнь стала мягче: щадящие штаммы дольше живут в хозяине и успевают заразить больше.' : '';
+            return `${rise} Всего заразились ${P.cases}; из них ${P.deaths} погибли, ${P.recovered} выздоровели и получили иммунитет. Потом болезни стало некого заражать — и волна спала сама.${milder}`;
           },
         },
       },

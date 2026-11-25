@@ -88,7 +88,7 @@ export class LearnView {
   }
 
   /** Вид показал научную карточку. */
-  markSeen(source: 'planet' | 'surface', key: string): void {
+  markSeen(source: 'planet' | 'surface' | 'compare', key: string): void {
     const c = cardFor(source, key);
     if (c) this.seen(c.id);
   }

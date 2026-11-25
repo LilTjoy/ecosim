@@ -17,6 +17,8 @@ export interface LearnCtx {
   drake: DrakeView;
   surface: SurfaceView;
   show(v: ViewName): void;
+  /** «Сравнение миров» создаётся при первом заходе — карточку открываем через app.ts. */
+  openCompareFact?(id: string): void;
 }
 
 export interface Quiz {

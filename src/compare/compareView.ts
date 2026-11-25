@@ -165,6 +165,8 @@ export class CompareView {
     controls: matchMedia('(pointer: coarse)').matches ? 'none' : 'rotate',
   };
   private _active = false;
+  /** Справочник: вызывается, когда показана научная карточка. */
+  onFact: ((id: string) => void) | null = null;
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -705,6 +707,15 @@ export class CompareView {
       <div class="btns"><button data-go="1">${this.goLabel()}</button><button aria-label="Закрыть">✕</button></div>`;
     el.hidden = false;
     el.scrollTop = 0;
+    this.onFact?.(id);
+  }
+
+  /** Справочник: открыть карточку (вкладка уже показана). */
+  openFact(id: string): void {
+    if (!COMPARE_FACTS[id]) return;
+    this.shownFacts.add(id);
+    this.playing = false;
+    this.showFact(id);
   }
 
   /** Отбросить очередь автокарточек: непоказанные снова считаем непоказанными (появятся при повторном проигрыше). */

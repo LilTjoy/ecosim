@@ -4,14 +4,16 @@ import type { PlanetParams } from '../planet/model';
 import type { GeneKey } from '../sim/genome';
 import type { SurfaceEnv } from '../sim/world';
 import * as surfaceFacts from '../surface/facts';
+import * as compareFacts from '../compare/compareFacts';
 import { EXTRA_FACTS } from './extraFacts';
 import { LESSONS } from './lessons';
 import { PLANET_LINKS } from './scenarios';
 
-export type CardSource = 'planet' | 'surface' | 'microbes' | 'island' | 'stats';
+export type CardSource = 'planet' | 'compare' | 'surface' | 'microbes' | 'island' | 'stats';
 
 export const SOURCE_LABEL: Record<CardSource, string> = {
   planet: '🪐 Планета',
+  compare: '🌍 Сравнение миров',
   surface: '🦊 Жизнь на поверхности',
   microbes: '🦠 Микромир',
   island: '🌍 Устройство мира',
@@ -32,6 +34,7 @@ export type SimLink =
   | { view: 'eco'; env?: Partial<SurfaceEnv>; envName?: string; tab?: EcoTab; gene?: GeneKey; label?: string }
   | { view: 'mc'; label?: string }
   | { view: 'drake'; label?: string }
+  | { view: 'compare'; label?: string }
   | { view: 'lesson'; id: string; label?: string };
 
 export interface Card extends Fact {
@@ -98,6 +101,9 @@ export function allCards(): Card[] {
       const l = PLANET_LINKS[k];
       add(k, f, 'planet', l ? { view: 'planet', params: l.params, event: l.noEvent ? '-' : l.event, match: l.match, t: l.t } : { view: 'planet' });
     }
+  // «Почему они такие разные» (Земля, Марс, Венера): карточки открываются во вкладке сравнения
+  for (const t of factTables(compareFacts as unknown as Record<string, unknown>))
+    for (const [k, f] of Object.entries(t)) add(k, f, 'compare', { view: 'compare', label: '▶ Открыть в «Сравнении миров»' });
   for (const t of factTables(surfaceFacts as unknown as Record<string, unknown>))
     for (const [k, f] of Object.entries(t)) {
       const src: CardSource = MICRO_KEYS.includes(k) ? 'microbes' : ISLAND_KEYS.includes(k) ? 'island' : 'surface';
@@ -119,6 +125,10 @@ export function cardById(id: string): Card | undefined {
 }
 
 /** Карточка, которую показал вид (для поверхности — с учётом микромира и устройства мира). */
-export function cardFor(source: 'planet' | 'surface', key: string): Card | undefined {
-  return allCards().find((c) => c.key === key && (source === 'planet' ? c.source === 'planet' : c.source === 'surface' || c.source === 'microbes' || c.source === 'island'));
+export function cardFor(source: 'planet' | 'surface' | 'compare', key: string): Card | undefined {
+  return allCards().find(
+    (c) =>
+      c.key === key &&
+      (source === 'planet' ? c.source === 'planet' : source === 'compare' ? c.source === 'compare' || c.source === 'planet' : c.source === 'surface' || c.source === 'microbes' || c.source === 'island'),
+  );
 }

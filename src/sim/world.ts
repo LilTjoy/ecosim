@@ -265,6 +265,13 @@ export class World {
   /** Средний множитель роста там, где трава растёт (за последние 20 тактов) — диагностика. */
   nutGrow = { land: 1, water: 1 };
   private corpseRef = 1;
+  /**
+   * Опыты уроков 📚 (не Settings: сбрасываются вместе с миром). По умолчанию выключены и ничего не меняют.
+   * noDecomposers — бактерии и грибы почвы выключены: опад не гниёт, почва не пополняется из него,
+   * туши сохнут в 7 раз медленнее (остаются жуки и солнце) и лежат до 6000 тактов (не больше 2500 туш);
+   * нормировки плодородия заморожены.
+   */
+  experiment = { noDecomposers: false };
   /** Эффект Бёрча: всплеск дыхания почвы после засухи. */
   private birch = 0;
   /** Потоки за окно в 20 тактов и их сглаженные значения (для схемы круговорота). */
@@ -380,6 +387,7 @@ export class World {
     this.nutAcc = { wl: 0, fl: 0, ww: 0, fw: 0, nl: 0, nw: 0 };
     this.nutGrow = { land: 1, water: 1 };
     this.corpseRef = 1;
+    this.experiment = { noDecomposers: false };
     this.birch = 0;
     for (const k in this.flux) {
       this.flux[k as keyof World['flux']] = 0;
@@ -419,6 +427,7 @@ export class World {
     const [lo, hi] = NUT_CLAMP.land, [wlo, whi] = NUT_CLAMP.water;
     const KD = SOIL.KD * 16, KR = SOIL.KR * 16, KS = SOIL.KS * 16, UN = SOIL.UN, SG = SOIL.SG, SMAX = SOIL.SMAX, LMAX = SOIL.LMAX;
     let decS = 0, runS = 0, senS = 0;
+    const noDec = this.experiment.noDecomposers;
     // непрерывный кусок из N/16 клеток (а не каждая 16-я): так массивы читаются целыми строками кэша
     const blk = Math.ceil(N / 16);
     const i0 = (this.tick & 15) * blk, i1 = Math.min(N, i0 + blk);
@@ -439,11 +448,11 @@ export class World {
         senS += u;
       }
       // редуценты следуют за едой и теплом (отклик ≈ 2 дня)
-      const mt = (a > 1.5 ? 1 : a / 1.5) * (l / (l + 0.3));
+      const mt = noDec ? 0 : (a > 1.5 ? 1 : a / 1.5) * (l / (l + 0.3));
       m += 0.06 * (mt - m);
       if (m < 0.03) m = 0.03;
-      // разложение: полураспад опада ≈ четверть года при a = 1, m = 0.5
-      let dec = KD * a * l * (0.5 + m);
+      // разложение: полураспад опада ≈ четверть года при a = 1, m = 0.5 (опыт урока: разложителей нет)
+      let dec = noDec ? 0 : KD * a * l * (0.5 + m);
       if (dec > l) dec = l;
       l -= dec;
       s += 0.85 * dec; // 15% уходит в воздух как CO₂
@@ -992,6 +1001,7 @@ export class World {
     const A = this.act, Lt = this.litter;
     let ms = 0, mn = 0;
     const [clo, chi] = NUT_CLAMP.corpse;
+    const noDec = this.experiment.noDecomposers;
     for (const k of this.corpses) {
       k.age++;
       let m = 1;
@@ -1004,6 +1014,7 @@ export class World {
         m = m < clo ? clo : m > chi ? chi : m;
       }
       let d = (0.3 + 0.001 * k.energy) * m;
+      if (noDec) d *= 0.15; // без бактерий и грибов туши только сохнут и их едят жуки
       if (d > k.energy) d = k.energy;
       k.energy -= d;
       if (soilOn && d > 0) {
@@ -1014,11 +1025,14 @@ export class World {
         this.flux.resp += d * 0.01;
       }
     }
-    if (mn) this.corpseRef += (ms / mn - this.corpseRef) * 0.002;
+    if (mn && !noDec) this.corpseRef += (ms / mn - this.corpseRef) * 0.002;
+    // опыт без разложителей: туши копятся — держим не больше 2500 (самые старые уходят), чтобы не тормозило
+    if (noDec && this.corpses.length > 2500) this.corpses.splice(0, this.corpses.length - 2500);
     if (this.tick % 10 === 0) {
       const keep: Corpse[] = [];
+      const maxAge = noDec ? 6000 : 1500; // без разложителей туши лежат годами (мумии)
       for (const k of this.corpses) {
-        if (k.energy > 0 && k.age < 1500) {
+        if (k.energy > 0 && k.age < maxAge) {
           keep.push(k);
           continue;
         }
@@ -1040,6 +1054,11 @@ export class World {
   /** Раз в 20 тактов: обновляем нормировку плодородия (τ = 3000 тактов) по взвешенному росту. */
   private updateNutRef(): void {
     const acc = this.nutAcc;
+    if (this.experiment.noDecomposers) {
+      // опыт урока: нормировка заморожена, иначе она за ~3000 тактов «спрятала» бы обеднение почвы
+      acc.wl = acc.fl = acc.ww = acc.fw = acc.nl = acc.nw = 0;
+      return;
+    }
     // в начале τ короче (как у среднего с поправкой на старт): нормировка сразу догоняет оседающую почву
     const k = 20 / Math.min(SOIL.TAU, Math.max(200, this.tick / 2));
     if (acc.wl > 0) {
@@ -1643,9 +1662,13 @@ export class World {
     this.log('🔥 Засуха — трава почти не растёт.', 'disaster');
   }
 
-  epidemic(): void {
-    const top = this.species.living()[0];
-    if (!top) return;
+  /**
+   * Инструмент «эпидемия»: по умолчанию — самый многочисленный вид и доля DIS.TOOL_SHARE
+   * (урок может выбрать вид hostId и долю share).
+   */
+  epidemic(hostId?: number, share: number = DIS.TOOL_SHARE): void {
+    const top = hostId === undefined ? this.species.living()[0] : this.species.all.get(hostId);
+    if (!top || top.extinct !== null) return;
     if (this.settings.disease) {
       // новая болезнь: заражаем долю вида злым штаммом — дальше волна идёт сама
       const hosts = this.creatures.filter((c) => c.alive && c.sp === top.id);
@@ -1665,7 +1688,7 @@ export class World {
       const first = hosts[Math.floor(Math.random() * hosts.length)];
       const P = this.newPathogen(top.id, first.x, first.y, DIS.TOOL_VIR);
       P.cases = oldSick;
-      const k = Math.min(hosts.length, Math.max(5, Math.round(DIS.TOOL_SHARE * hosts.length)));
+      const k = Math.min(hosts.length, Math.max(5, Math.round(share * hosts.length)));
       for (let i = 0; i < k; i++) {
         // частичная перетасовка Фишера — Йетса: k разных особей
         const j = i + Math.floor(Math.random() * (hosts.length - i));
