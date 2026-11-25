@@ -1669,4 +1669,48 @@ export class SurfaceView {
     if (this.frame % 30 === 0) this.renderPanel();
     else if (this.tab === 'micro' && this.frame % 2 === 0) this.drawCycle();
   }
+
+  // ---------------- для уроков и справочника 📚 ----------------
+
+  /** Сообщать, какая научная карточка появилась (по заголовку в .s-fact). */
+  observeFacts(cb: (id: string) => void): void {
+    const el = $(this.root, '.s-fact');
+    new MutationObserver(() => {
+      if (el.hidden) return;
+      const title = el.querySelector('h4')?.textContent;
+      const id = Object.keys(SURFACE_FACTS).find((k) => SURFACE_FACTS[k].title === title);
+      if (id) cb(id);
+    }).observe(el, { attributes: true, attributeFilter: ['hidden'], childList: true });
+  }
+
+  /** Показать карточку из справочника. */
+  openFact(id: string): void {
+    this.showFact(id);
+  }
+
+  changeSpeed(v: number): void {
+    this.setSpeed(v);
+  }
+
+  get speedNow(): number {
+    return this.speed;
+  }
+
+  /** Открыть вкладку боковой панели (и ген на графике). */
+  showTab(tab: string, gene?: GeneKey): void {
+    if (gene) {
+      this.gene = gene;
+      $<HTMLSelectElement>(this.root, '.s-gene').value = gene;
+    }
+    this.root.querySelector<HTMLButtonElement>(`.s-tabs [data-tab=${tab}]`)?.click();
+  }
+
+  /** Уроки: свежий мир в режиме «Правила». */
+  newWorld(env: SurfaceEnv, seed: number): void {
+    $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
+    this.world.brainMode = 'rules';
+    this.setEnv(env, seed);
+    // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта
+    $(this.root, '.s-back').hidden = true;
+  }
 }

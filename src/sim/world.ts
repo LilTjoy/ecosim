@@ -1064,6 +1064,9 @@ export class World {
     if (soilOn) this.soilPass();
     // трава обновляется частями: каждый тик — каждая 4-я клетка (×4 рост), так в 4 раза дешевле
     const phase = this.tick & 3;
+    // опыт урока «Принцип Гаузе»: убранный корм не отрастает, пока опыт идёт
+    const growBr = !this.blockActive('browse');
+    const growFo = !this.blockActive('forage');
     if (!soilOn) {
       for (let i = phase; i < g.length; i += 4) {
         const temp = t.baseTemp[i] + shift;
@@ -1076,8 +1079,8 @@ export class World {
         if (g[i] < max) g[i] = Math.min(max, g[i] + rate * 4 * max * warm);
         const info = BIOMES[t.biome[i]];
         // листва растёт медленно, но её много; ягоды и насекомые — только в тёплое время
-        if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
-        if (temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
+        if (growBr && br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm);
+        if (growFo && temp > 0.25 && fo[i] < info.forage) fo[i] = Math.min(info.forage, fo[i] + rate * 3 * info.forage * warm);
       }
       return;
     }
@@ -1125,8 +1128,8 @@ export class World {
         upt += u;
       }
       // листва (микориза помогает деревьям: после метеорита лес восстанавливается медленнее)
-      if (br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm * (W[i] === 2 ? 0.6 + 0.4 * MY[i] : 1));
-      if (temp > 0.25 && fo[i] < info.forage) {
+      if (growBr && br[i] < info.browse) br[i] = Math.min(info.browse, br[i] + rate * 1.2 * info.browse * warm * (W[i] === 2 ? 0.6 + 0.4 * MY[i] : 1));
+      if (growFo && temp > 0.25 && fo[i] < info.forage) {
         const addF = Math.min(info.forage - fo[i], rate * 3 * info.forage * warm * (0.5 + 0.5 * nu));
         fo[i] += addF;
         const u = 0.5 * UN * addF;
@@ -1935,5 +1938,51 @@ export class World {
       co2: 0,
     });
     if (this.history.length > 900) this.history.shift();
+  }
+
+  // ---------------- опыты для уроков 📚 (по умолчанию ничего не меняют) ----------------
+
+  private lessonTerrain: Terrain | null = null;
+  private lessonGen = 0;
+  /** Растёт после каждого reset() (новый мир = новый рельеф) — уроки замечают «↻ Новый мир». */
+  get resetGen(): number {
+    if (this.lessonTerrain !== this.terrain) {
+      this.lessonTerrain = this.terrain;
+      this.lessonGen++;
+    }
+    return this.lessonGen;
+  }
+
+  /** До какого такта корм не отрастает (0 — растёт как обычно). Действует только в том мире, где опыт начат. */
+  blocked = { browse: 0, forage: 0 };
+  private blockedTerrain: Terrain | null = null;
+
+  /** Опыт: убрать листву или ягоды и не давать им отрастать `ticks` тактов. */
+  removeResource(kind: 'browse' | 'forage', ticks: number): void {
+    if (this.blockedTerrain !== this.terrain) this.blocked = { browse: 0, forage: 0 };
+    this.blockedTerrain = this.terrain;
+    this[kind].fill(0);
+    this.blocked[kind] = this.tick + ticks;
+    this.log(kind === 'browse' ? '🍂 Опыт: листва исчезла' : '🫐 Опыт: ягоды и насекомые исчезли', 'disaster');
+  }
+
+  /** Вернуть корм досрочно (ничего не делает, если опыт уже кончился). */
+  restoreResource(kind: 'browse' | 'forage'): void {
+    if (this.blockedTerrain !== this.terrain || this.blocked[kind] <= this.tick) return;
+    this.blocked[kind] = 0;
+    this.log('🌿 Опыт окончен: корм снова растёт', 'info');
+  }
+
+  /** Опыт ещё идёт — этот корм не отрастает (вызывается из growGrass раз за такт, до кормёжки зверей). */
+  private blockActive(k: 'browse' | 'forage'): boolean {
+    if (!this.blocked[k]) return false;
+    if (this.blockedTerrain !== this.terrain) {
+      this.blocked[k] = 0; // мир создан заново — опыт забыт
+      return false;
+    }
+    if (this.tick < this.blocked[k]) return true;
+    this.blocked[k] = 0;
+    this.log('🌿 Опыт окончен: корм снова растёт', 'info');
+    return false;
   }
 }

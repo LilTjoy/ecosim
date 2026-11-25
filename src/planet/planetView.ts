@@ -14,6 +14,7 @@ import {
   STEP_INFO,
   type Assumptions,
   type PlanetParams,
+  type Sample,
   type SimResult,
 } from './model';
 
@@ -102,6 +103,12 @@ export class PlanetView {
   active = true;
   onDescend: ((env: SurfaceEnv, seed: number) => void) | null = null;
   onCompare: ((p: PlanetParams) => void) | null = null;
+  /** Справочник: вызывается, когда показана научная карточка. */
+  onFact: ((id: string) => void) | null = null;
+  /** Уроки: только эти карточки ставят паузу (даже при выключенной 💡). null — как обычно. */
+  focusFacts: Set<string> | null = null;
+  /** Растёт при каждой загрузке мира — уроки замечают, что планету поменяли. */
+  loadGen = 0;
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -130,6 +137,7 @@ export class PlanetView {
   }
 
   private load(p: PlanetParams, keepTime = false): void {
+    this.loadGen++;
     this.params = { ...p };
     this.result = simulate(this.params, this.assumptions, true);
     this.globe.setPlanet(this.params, this.result.derived);
@@ -355,9 +363,10 @@ export class PlanetView {
 
   /** Показать карточку, когда проигрывание проходит через событие (каждую тему — один раз за историю). */
   private autoFact(from: number, to: number): void {
-    if (!this.explain) return;
+    if (!this.explain && this.focusFacts === null) return;
     for (const e of this.result.events) {
       if (e.t <= from || e.t > to || !FACTS[e.id] || this.shownFacts.has(e.id)) continue;
+      if (this.focusFacts !== null && !this.focusFacts.has(e.id)) continue;
       this.shownFacts.add(e.id);
       this.now = e.t;
       this.playing = false;
@@ -366,7 +375,7 @@ export class PlanetView {
     }
   }
 
-  private showFact(id: string): void {
+  showFact(id: string): void {
     const f: Fact | undefined = FACTS[id] ?? WORLD_FACTS[id];
     if (!f) return;
     const step = STEP_INFO.find((s) => s.key === id);
@@ -385,6 +394,7 @@ export class PlanetView {
       ${chance}
       <div class="btns"><button data-go="1">Дальше ▶</button><button>✕</button></div>`;
     el.hidden = false;
+    this.onFact?.(id);
   }
 
   private hideFact(): void {
@@ -429,5 +439,24 @@ export class PlanetView {
       this.globe.frame(dt);
     }
     requestAnimationFrame(() => this.loop());
+  }
+
+  // ---------------- для уроков (📚) ----------------
+
+  /** Перейти к моменту истории. */
+  seek(t: number, play = false): void {
+    this.now = clamp(t, 0, this.result.end);
+    this.playing = play;
+    this.renderDynamic(true);
+  }
+
+  setSpeed(v: 0.1 | 0.3 | 1): void {
+    this.speed = v;
+    $<HTMLSelectElement>(this.root, '.p-speed').value = String(v);
+  }
+
+  /** Текущее состояние (ссылки — не изменять). */
+  snapshot(): { now: number; playing: boolean; params: PlanetParams; preset: keyof typeof PRESETS; result: SimResult; sample: Sample; gen: number } {
+    return { now: this.now, playing: this.playing, params: this.params, preset: this.preset, result: this.result, sample: this.sampleAt(this.now), gen: this.loadGen };
   }
 }
