@@ -1641,7 +1641,12 @@ export class World {
   /** Сколько травы может съесть существо на этой клетке (пловцы — водоросли, сухопутные — траву). */
   grassAccess(c: Creature, i: number): number {
     const water = BIOMES[this.terrain.biome[i]].water;
-    if (water) return c.g.swim > 0.5 ? 1 : 0;
+    if (water) {
+      const a = c.g.swim > 0.5 ? 1 : 0;
+      // ♾️ донный (панцирь и ноги) пасётся на мелководье — как краб или морской ёж
+      if (a === 0 && this.oe && EVO.BENTHIC && c.g.ph[P.BENTH] > 0 && this.terrain.biome[i] === B.Shallow) return 0.6;
+      return a;
+    }
     return clamp(1 - 1.2 * Math.max(0, c.g.swim - 0.3), 0, 1);
   }
 

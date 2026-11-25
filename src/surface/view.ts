@@ -267,6 +267,8 @@ export class SurfaceView {
   private books = new BookStore();
   /** ♾️ Рецепты, открытые за все миры (localStorage['ecosim.discoveries'] — только здесь, не в мире). */
   private collection = new Set<string>();
+  /** ♾️ Открытая эволюция для новых миров: выбор игрока (меню ▾ у «↻ Новый мир», localStorage) или ?oe=1 / ?oe=0. */
+  private oePref = false;
   /** ♾️ Тосты «🌟 Открытие»: очередь до 3, не чаще раза в 10 с. */
   private discQueue: string[] = [];
   private lastDiscToast = -1e9;
@@ -282,10 +284,17 @@ export class SurfaceView {
     this.tl.trap = DEV;
     this.tl.autoRaise = true;
     this.tl.small = ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4 || matchMedia('(max-width: 600px)').matches;
-    // ♾️ открытая эволюция: ?oe=1 включает, ?oe=0 выключает (до решения о значении по умолчанию)
+    // ♾️ открытая эволюция: ?oe=1 включает, ?oe=0 выключает; иначе — выбор из меню ▾ (по умолчанию выключена)
     const oeq = new URLSearchParams(location.search).get('oe');
-    if (oeq !== null && (oeq !== '0') !== this.world.settings.openEvo) {
-      this.world.settings.openEvo = oeq !== '0';
+    let oeSaved: string | null = null;
+    try {
+      oeSaved = localStorage.getItem('ecosim.openEvo');
+    } catch {
+      /* без localStorage — по умолчанию */
+    }
+    this.oePref = oeq !== null ? oeq !== '0' : oeSaved === '1';
+    if (this.oePref !== this.world.settings.openEvo) {
+      this.world.settings.openEvo = this.oePref;
       this.world.reset();
     }
     try {
@@ -380,8 +389,9 @@ export class SurfaceView {
    * Перенести сюда условия планеты. asked — игрока уже спросили (confirmNewWorld); иначе (уроки) о пропавших
    * ветках скажет тост.
    */
-  setEnv(env: SurfaceEnv, seed?: number, asked = false): void {
+  setEnv(env: SurfaceEnv, seed?: number, asked = false, oe = this.oePref): void {
     const lost = this.tl.branches.length > 1;
+    this.world.settings.openEvo = oe;
     this.world.reset(this.world.brainMode, seed, env);
     this.afterReset();
     if (lost && !asked) this.toast('⏳ Ветки прошлого мира закрыты — начат новый мир (закладки 📌 остались)');
@@ -2171,6 +2181,7 @@ export class SurfaceView {
       <button data-sd="new">↻ Новый мир <em>случайный сид</em></button>
       <button data-sd="same">🔁 Этот же мир с начала <em>тот же сид — та же история</em></button>
       <button data-sd="form">🔢 Мир по сиду…</button>
+      <button data-sd="oe">♾️ Открытая эволюция: <b>${this.oePref ? 'вкл' : 'выкл'}</b> <em>${this.oePref ? 'выключить' : 'включить'} — новые органы и открытия; начнётся этот же мир с начала</em></button>
       <div class="sd-form" hidden><input class="sd-in" placeholder="например 42 или 42-7" inputmode="numeric" maxlength="23" aria-label="Сид мира"><button data-sd="go">Создать</button></div>
       <div class="sd-err small" hidden></div>`;
     const st = $(this.root, '.s-stage').getBoundingClientRect(), bt = $(this.root, '.s-seedbtn').getBoundingClientRect();
@@ -2196,6 +2207,7 @@ export class SurfaceView {
       this.closeSeedMenu();
       $(this.root, '.s-reset').click();
     } else if (k === 'same') this.newBySeed(this.world.seed, this.world.salt);
+    else if (k === 'oe') this.toggleOE();
     else if (k === 'form') {
       $(el, '.sd-form').hidden = false;
       $<HTMLInputElement>(el, '.sd-in').focus();
@@ -2216,6 +2228,22 @@ export class SurfaceView {
       return;
     }
     this.newBySeed(seed, salt);
+  }
+
+  /** ♾️ Включить или выключить открытую эволюцию: тот же сид и те же условия планеты, мир с начала. */
+  private toggleOE(): void {
+    if (!this.confirmReset()) return;
+    this.oePref = !this.oePref;
+    try {
+      localStorage.setItem('ecosim.openEvo', this.oePref ? '1' : '0');
+    } catch {
+      /* выбор живёт до перезагрузки */
+    }
+    this.world.settings.openEvo = this.oePref;
+    this.world.reset(this.world.brainMode, this.world.seed, this.world.env, this.world.salt);
+    this.afterReset();
+    this.toast(this.oePref ? '♾️ Открытая эволюция включена: у зверей могут появиться новые органы — следите за вкладкой «🌟 Открытия»' : '♾️ Открытая эволюция выключена — классический мир');
+    if (this.oePref) this.queueFact('openevo', true);
   }
 
   private newBySeed(seed: number, salt: number): void {
@@ -2795,11 +2823,11 @@ export class SurfaceView {
     this.root.querySelector<HTMLButtonElement>(`.s-tabs [data-tab=${tab}]`)?.click();
   }
 
-  /** Уроки: свежий мир в режиме «Правила». */
+  /** Уроки: свежий мир в режиме «Правила» — без открытой эволюции (опыты уроков проверены на классическом мире). */
   newWorld(env: SurfaceEnv, seed: number): void {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
-    this.setEnv(env, seed);
+    this.setEnv(env, seed, false, false);
     // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта;
     // вместо неё — путь назад к обычной Земле («↻ Новый мир» повторяет условия опыта)
     $(this.root, '.s-back').hidden = true;

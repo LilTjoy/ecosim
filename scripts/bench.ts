@@ -11,7 +11,7 @@
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';
-import { BIOMES } from '../src/sim/terrain';
+import { B as TB, BIOMES } from '../src/sim/terrain';
 import * as MM from '../src/sim/modules';
 import * as BM from '../src/sim/bestiary';
 import * as HM from '../src/sim/heritage';
@@ -146,6 +146,8 @@ const tLand = () => { let n = 0; for (let i = 0; i < t1.biome.length; i++) if (!
 const landN = tLand();
 // бюджет тесноты: ожидаемые смерти Σ n·crowding (по тактам) — с ним сверяем смерти «болезнь»
 let budget = 0;
+// O10: трава мелководья — печатается при --oe=1 или --shg=1 (без них вывод прежний)
+const shg = { on: OE || !!flags.shg, sum: 0, k: 0, ben: 0, benSh: 0 };
 for (let t = 1; t <= T; t++) {
   w.step();
   if (OE) {
@@ -191,6 +193,13 @@ for (let t = 1; t <= T; t++) {
     for (const c of w.creatures) g[guild(c)]++;
     for (const k in g) if (g[k] === 0) { if (extinct[k] === undefined) extinct[k] = t; zero[k]++; lastZero[k] = t; }
     if (W.nut && W.soil) { clSum += clampShare(); clN++; }
+    // O10: трава мелководья (доля от плодородия) с 6000 такта; донные — сколько их и сколько на мелководье
+    if (shg.on && t >= 6000) {
+      let a = 0, n = 0;
+      for (let i = 0; i < t1b.length; i++) if (t1b[i] === TB.Shallow) { a += w.grass[i] / BIOMES[t1b[i]].fert; n++; }
+      shg.sum += a / Math.max(1, n); shg.k++;
+      if (OE) for (const c of w.creatures) if ((c.g.ph as Float32Array)[MM.P.BENTH] > 0) { shg.ben++; if (t1b[c.cell ?? 0] === TB.Shallow) shg.benSh++; }
+    }
   }
   if (t % EV === 0) {
     const g: Record<string, number> = { herb: 0, omni: 0, carn: 0, swim: 0 };
@@ -285,6 +294,7 @@ if (OE) {
     `\n OE body: EYE/ENDO herb=${kitMin[0]} omni=${kitMin[1]} carn=${kitMin[2]} swim=${kitMin[3]} fliers=${pc(fly, land)}% gliders=${pc(glide, land)}% of land(n=${land}) torpid=${torp}` +
     `\n OE senses: hidden=${hid} avoided=${(B?.avoidTot ?? 0) + [...(W.avoided as Map<number, number>).values()].reduce((x, y) => x + y, 0)} chan=${[...W.chan].map((x: number) => x.toFixed(2)).join('/')} airSnd=${f2(W.airSnd, 2)} | ${w.passport()}` +
     `\n OE her: palette=${(W.palette as number[]).map((k) => MM.KIND_NAMES[k]).join(',')} founders=${W.founderPlan.length} n0=${f2(W.founderPlan.reduce((a: number, x: any) => a + x.n, 0), 0)} maxSize=${f2(Math.max(...W.founderPlan.map((x: any) => x.g.size ?? 4)), 2)} palFounders=${W.founderPlan.filter((x: any) => Array.from(x.g.body.km as Int32Array).some((km) => km >>> 5 > MM.ORIGIN.PALETTE && km >>> 5 < 100)).length} blind=${W.founderPlan.filter((x: any) => !Array.from(x.g.body.km as Int32Array).some((km) => (km & 31) === MM.M.EYE)).length} chron=${chron0}` +
+    `\n OE benthic: on=${MM.EVO.BENTHIC ? 1 : 0} shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)} benthicAvg=${f2(shg.k ? shg.ben / shg.k : undefined, 1)} inShallowAvg=${f2(shg.k ? shg.benSh / shg.k : undefined, 1)} crab=${B?.found?.has('carcinization') ? B.found.get('carcinization').tick : '-'}` +
     `\n OE peak: ${MM.KIND_NAMES.slice(1).map((nm, j) => `${nm}${oe.peak[j + 1]}`).join(' ')}` +
     (BM.CONV_DIAG.on ? `\n CONVROWS ${JSON.stringify(BM.CONV_DIAG.rows.map((r) => r.map((x) => +x.toFixed(3))))}` : '') +
     `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
@@ -296,4 +306,5 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
   (W.outbreaks ? `\n outbreaks: ` + [...W.outbreaks, ...W.pathogens.values()].filter((P: any) => P.announced).slice(-10).map((P: any) => `${P.born}-${P.ended ?? '…'} «${P.name}»@${w.species.all.get(P.host)?.name} cases${P.cases} d${P.deaths} pk${P.peak} v${P.vir0.toFixed(2)}→${P.virMean.toFixed(2)}`).join(' | ') : '') + toolRep +
   (tool ? `\n toolSpecies at end: n=${tool.sp.count} extinct=${tool.sp.extinct}` : '') +
   `\n extinct(guild first hit 0): ${JSON.stringify(extinct)} zeroSamples(of ${T / 500}): ${JSON.stringify(zero)} lastZero: ${JSON.stringify(lastZero)}${rivers}\n top: ` +
-  w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | ') + oeRep);
+  w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | ') + oeRep +
+  (!OE && shg.on ? `\n shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)}` : ''));
