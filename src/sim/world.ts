@@ -5,6 +5,7 @@ import { SpeciesRegistry, type Species } from './species';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
+import type { Action } from './timeline';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -1787,6 +1788,113 @@ export class World {
     this.rng = mix32(this.rng ^ k);
     for (const c of this.creatures) c.rs = mix32(c.rs ^ k ^ c.id);
     if (this.player && !this.player.alive) this.player.rs = mix32(this.player.rs ^ k);
+  }
+
+  /**
+   * Действие игрока или урока (между шагами, на костях мира). Страница и машина времени меняют мир только так
+   * (плюс ввод и настройки, которые машина времени записывает сама): тогда перемотка повторяет историю точно.
+   */
+  apply(a: Action): void {
+    if (this.ctx) throw new Error('World.apply во время хода особи');
+    switch (a.k) {
+      case 'meteor':
+        this.meteor(a.x, a.y);
+        break;
+      case 'drought':
+        this.startDrought();
+        break;
+      case 'epidemic':
+        this.epidemic();
+        break;
+      case 'grass':
+        for (let i = 0; i + 1 < a.pts.length; i += 2) this.paintGrass(a.pts[i], a.pts[i + 1], a.r);
+        break;
+      case 'spawn': {
+        const sp = this.colonize({ ...a.g, hue: this.r() * 360 }, a.n, a.x, a.y);
+        this.log(`${a.icon} Вы поселили группу: «${sp.name}» (${a.n})`, 'player', a.x, a.y);
+        break;
+      }
+      case 'possess':
+        if (a.id === null) this.possess(null);
+        else {
+          const c = this.creatures.find((o) => o.id === a.id && o.alive);
+          if (c) this.possess(c);
+        }
+        break;
+      case 'settings':
+        Object.assign(this.settings, a.s);
+        break;
+      case 'experiment': {
+        const was = this.experiment.noDecomposers;
+        Object.assign(this.experiment, a.e);
+        if (!a.quiet && was !== this.experiment.noDecomposers)
+          this.log(this.experiment.noDecomposers ? '🧫 Опыт: бактерии и грибы почвы выключены' : '🧫 Опыт окончен: бактерии и грибы снова работают', this.experiment.noDecomposers ? 'disaster' : 'info');
+        break;
+      }
+      case 'rescue':
+        this.rescue(a.sp, a.n);
+        break;
+      case 'remove':
+        this.removeSpecies(a.sp);
+        break;
+      case 'nudge': {
+        const c = this.creatures.find((o) => o.id === a.id);
+        if (c) c.x += a.dx;
+        break;
+      }
+      case 'reseed':
+        this.reseed(a.salt);
+        break;
+      case 'resource':
+        this.removeResource(a.kind, a.ticks);
+        break;
+      case 'restoreRes':
+        this.restoreResource(a.kind);
+        break;
+      case 'undo':
+        break;
+    }
+  }
+
+  /** «Спасти вид»: n новых особей рядом с живыми сородичами (или, если вид уже вымер, — из его средних генов). */
+  private rescue(spId: number, n: number): void {
+    const sp = this.species.all.get(spId);
+    if (!sp || n <= 0) return;
+    const m = this.creatures.filter((c) => c.alive && c.sp === spId);
+    let x: number, y: number;
+    if (m.length) {
+      for (let i = 0; i < n; i++) {
+        const c = m[(this.r() * m.length) | 0];
+        const g = mutate(c.g, 0.02, this.r);
+        const [px, py] = this.nearbyLand(c.x, c.y, 40, g);
+        const ch = this.spawn(spId, g, px, py);
+        ch.generation = c.generation;
+        ch.mother = c.id;
+        const rec = this.ancestors.get(ch.id)!;
+        rec.mother = c.id;
+        rec.generation = c.generation;
+      }
+      ({ x, y } = m[0]);
+    } else {
+      const g0 = genome({ ...sp.mean, hue: sp.founder.hue, pattern: sp.founder.pattern }, this.brainMode === 'neural', this.r);
+      [x, y] = this.findHome(g0);
+      for (let i = 0; i < n; i++) {
+        const g = mutate(g0, 0.02, this.r);
+        const [px, py] = this.nearbyLand(x, y, 120, g);
+        this.spawn(spId, g, px, py);
+      }
+      sp.extinct = null; // вид снова живой: его численность снова считается
+    }
+    this.log(`🧬 Вы спасли «${sp.name}»: +${n}`, 'player', x, y);
+  }
+
+  /** «Убрать вид»: все его особи исчезают с острова (без туш). */
+  private removeSpecies(spId: number): void {
+    const sp = this.species.all.get(spId);
+    if (!sp) return;
+    for (const c of this.creatures) if (c.alive && c.sp === spId) this.die(c, 'вмешательство', false);
+    this.creatures = this.creatures.filter((c) => c.alive);
+    this.log(`🚫 Вы убрали «${sp.name}» с острова`, 'player');
   }
 
   /** Точный снимок мира (между шагами). */

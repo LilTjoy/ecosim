@@ -6,12 +6,17 @@ import type { Pathogen } from '../sim/microbes';
 import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { DAY, DIS, EARTH_ENV, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
+import { SNAP_DEV } from '../sim/snapshot';
+import { Timeline, type Action, type ActionInput } from '../sim/timeline';
 import { Camera } from './camera';
 import { SURFACE_FACTS } from './facts';
 import { MICROBE_GUILDS } from './microbes';
 import { SurfaceRenderer, type Lens } from './renderer';
 
 const $ = <T extends HTMLElement>(root: ParentNode, sel: string) => root.querySelector(sel) as T;
+
+/** dev-сборка vite: строгие проверки снимков и ловушка Math.random вокруг шага мира. */
+const DEV = (import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV === true;
 
 const WORLD_W = 3200;
 const WORLD_H = 2000;
@@ -170,6 +175,8 @@ export class SurfaceView {
   world = new World(WORLD_W, WORLD_H);
   cam = new Camera(WORLD_W, WORLD_H);
   renderer: SurfaceRenderer;
+  /** ⏪ Машина времени: записывает действия, ввод и снимки; мир шагает только через неё. */
+  tl = new Timeline();
   active = false;
   onBack: (() => void) | null = null;
 
@@ -209,6 +216,12 @@ export class SurfaceView {
     this.canvas = $(root, '.s-canvas');
     this.mini = $(root, '.s-mini');
     this.renderer = new SurfaceRenderer(this.canvas, this.world, this.cam);
+    SNAP_DEV.strict = DEV;
+    this.tl.trap = DEV;
+    this.tl.autoRaise = true;
+    this.tl.small = ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4 || matchMedia('(max-width: 600px)').matches;
+    this.tl.reset(this.world);
+    if (DEV) Object.assign(window, { __surface: this }); // проверки машины времени из браузера (только dev-сборка)
     this.bindUi();
     this.bindInput();
     new ResizeObserver(() => this.resize()).observe($(root, '.s-stage'));
@@ -227,6 +240,7 @@ export class SurfaceView {
   }
 
   private afterReset(): void {
+    this.tl.reset(this.world);
     this.renderer.rebuild();
     this.selected = null;
     this.selectedCell = null;
@@ -287,10 +301,10 @@ export class SurfaceView {
         this.canvas.style.cursor = this.tool === 'inspect' ? 'grab' : 'crosshair';
       };
     });
-    $(r, '[data-act=drought]').onclick = () => this.world.startDrought();
+    $(r, '[data-act=drought]').onclick = () => this.act({ k: 'drought' });
     $(r, '[data-act=epidemic]').onclick = () => {
       const top = this.world.species.living()[0];
-      this.world.epidemic();
+      this.act({ k: 'epidemic' });
       const P = top ? this.world.pathogens.get(top.id) : undefined;
       if (P) this.epiSel = P.id;
       this.setLens('disease');
@@ -388,7 +402,7 @@ export class SurfaceView {
       if (act === 'close') this.select(null);
       if (act === 'follow') this.follow = !this.follow;
       if (act === 'possess' && this.selected) {
-        this.world.possess(this.selected);
+        this.act({ k: 'possess', id: this.selected.id });
         this.follow = true;
         this.cam.flyTo(this.selected.x, this.selected.y, 2);
       }
@@ -399,7 +413,7 @@ export class SurfaceView {
     });
     $(r, '.s-player').addEventListener('click', (e) => {
       if ((e.target as HTMLElement).closest('[data-a=leave]')) {
-        this.world.possess(null);
+        this.act({ k: 'possess', id: null });
         this.renderPlayer();
       }
     });
@@ -416,7 +430,7 @@ export class SurfaceView {
       if (!b) return;
       const id = Number(b.dataset.heir);
       const heir = this.world.creatures.find((c) => c.id === id && c.alive) ?? null;
-      this.world.possess(heir);
+      this.act({ k: 'possess', id: heir?.id ?? null });
       if (heir) {
         this.select(heir);
         this.follow = true;
@@ -452,7 +466,7 @@ export class SurfaceView {
         const [a, b] = [...pointers.values()];
         pinch = Math.hypot(a.x - b.x, a.y - b.y);
       }
-      if (this.tool === 'grass') this.world.paintGrass(...this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), 50);
+      if (this.tool === 'grass') this.act({ k: 'grass', pts: this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), r: 50 });
     });
     c.addEventListener('pointermove', (e) => {
       const [x, y] = local(e);
@@ -471,12 +485,14 @@ export class SurfaceView {
       if (start && Math.hypot(x - start.x, y - start.y) > 5) moved = true;
       const p = this.world.player;
       if (p?.alive && this.tool === 'inspect') {
-        // ваше существо идёт туда, куда вы держите палец/мышь
+        // ваше существо идёт туда, куда вы держите палец/мышь (float32 — запись ввода точная; в прошлом не пишем)
         const [wx, wy] = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
-        this.world.input.dx = wx - p.x;
-        this.world.input.dy = wy - p.y;
+        if (this.inputFree) {
+          this.world.input.dx = Math.fround(wx - p.x);
+          this.world.input.dy = Math.fround(wy - p.y);
+        }
       } else if (this.tool === 'grass') {
-        this.world.paintGrass(...this.cursor, 50);
+        this.act({ k: 'grass', pts: [...this.cursor], r: 50 });
       } else if (moved) {
         this.cam.pan(x - prev.x, y - prev.y, c.clientWidth, c.clientHeight);
         this.follow = false;
@@ -488,7 +504,7 @@ export class SurfaceView {
       const [x, y] = local(e);
       pointers.delete(e.pointerId);
       if (this.tool === 'inspect') c.style.cursor = 'grab';
-      if (this.world.player?.alive && !this.keys.size) {
+      if (this.world.player?.alive && !this.keys.size && this.inputFree) {
         this.world.input.dx = 0;
         this.world.input.dy = 0;
       }
@@ -499,11 +515,11 @@ export class SurfaceView {
         if (hit) this.select(hit);
         else if (wx >= 0 && wy >= 0 && wx < WORLD_W && wy < WORLD_H) this.selectCell(this.world.terrain.index(wx, wy));
       }
-      else if (this.tool === 'meteor') this.world.meteor(wx, wy);
+      else if (this.tool === 'meteor') this.act({ k: 'meteor', x: wx, y: wy });
       else if (this.tool === 'spawn') {
         const p = PRESETS[this.preset];
-        const sp = this.world.colonize({ ...p.g, hue: Math.random() * 360 }, 8, wx, wy);
-        this.world.log(`${p.icon} Вы поселили группу: «${sp.name}» (8)`, 'info', wx, wy);
+        // цвет группы — из костей мира (World.apply), запись в летописи — тоже там
+        this.act({ k: 'spawn', g: { ...p.g }, n: 8, x: wx, y: wy, icon: p.icon, label: p.name });
       }
     };
     c.addEventListener('pointerup', up);
@@ -560,6 +576,7 @@ export class SurfaceView {
     const dy = (k.has('KeyS') || k.has('ArrowDown') ? 1 : 0) - (k.has('KeyW') || k.has('ArrowUp') ? 1 : 0);
     const p = this.world.player;
     if (p?.alive) {
+      if (!this.inputFree) return;
       if (k.size) {
         this.world.input.dx = dx;
         this.world.input.dy = dy;
@@ -1653,8 +1670,11 @@ export class SurfaceView {
     requestAnimationFrame(() => this.loop());
     if (!this.active) return;
     this.applyKeys();
-    const steps = this.modalOpen ? 0 : this.speed;
-    for (let i = 0; i < steps; i++) this.world.step();
+    if (this.tl.replaying) this.tl.advance(this.world);
+    else {
+      const steps = this.modalOpen ? 0 : this.speed;
+      for (let i = 0; i < steps; i++) this.tl.step(this.world);
+    }
     const w = this.canvas.clientWidth;
     const h = this.canvas.clientHeight;
     const p = this.world.player;
@@ -1676,6 +1696,23 @@ export class SurfaceView {
     }
     if (this.frame % 30 === 0) this.renderPanel();
     else if (this.tab === 'micro' && this.frame % 2 === 0) this.drawCycle();
+  }
+
+  // ---------------- действия ⏪ ----------------
+
+  /**
+   * Любое вмешательство в мир (инструменты, вселение, опыты уроков) — только здесь: машина времени
+   * записывает его и прикладывает к миру (World.apply). В прошлом оно пускает историю новой веткой.
+   */
+  act(a: ActionInput): void {
+    const full = { ...a, t: this.world.tick } as Action;
+    if (this.tl.visiting) this.tl.forkHere(this.world, full);
+    else this.tl.record(this.world, full);
+  }
+
+  /** Ввод игрока можно писать: не в прошлом и не во время пересчёта по записи. */
+  private get inputFree(): boolean {
+    return !this.tl.visiting && !this.tl.replaying;
   }
 
   // ---------------- для уроков и справочника 📚 ----------------

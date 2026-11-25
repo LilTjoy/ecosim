@@ -604,7 +604,7 @@ export const LESSONS: Lesson[] = [
           label: '🍂 Убрать листву на 2 года',
           run: (c) => {
             c.show('eco');
-            c.world.removeResource('browse', 2 * YEAR);
+            c.surface.act({ k: 'resource', kind: 'browse', ticks: 2 * YEAR });
             c.surface.changeSpeed(12);
             c.mem.tRm = c.world.tick;
             c.mem.t0 = c.world.tick;
@@ -638,7 +638,7 @@ export const LESSONS: Lesson[] = [
       {
         view: 'eco',
         text: 'Листва вернётся — но вернутся ли гиганты? Если вид исчез целиком, ниша может долго пустовать, пока её не займут потомки других видов или пришельцы. Можете поселить «🦣 Снежного гиганта» инструментом ➕.',
-        action: { label: '🌿 Вернуть листву сейчас', run: (c) => c.world.restoreResource('browse') },
+        action: { label: '🌿 Вернуть листву сейчас', run: (c) => c.surface.act({ k: 'restoreRes', kind: 'browse' }) },
         after: (c) => {
           const g = guilds(c.world);
           return g.giants > 0
@@ -660,7 +660,7 @@ export const LESSONS: Lesson[] = [
         },
       },
     ],
-    onExit: (c) => c.world.restoreResource('browse'),
+    onExit: (c) => c.surface.act({ k: 'restoreRes', kind: 'browse' }),
   },
   {
     id: 'microbes',
@@ -713,8 +713,8 @@ export const LESSONS: Lesson[] = [
           run: (c) => {
             const sw = decomposerSwitch(c.world);
             if (!sw) throw new Error('в этом мире нет микробов почвы');
-            sw.noDecomposers = true;
-            c.world.log('🧫 Опыт: бактерии и грибы почвы выключены', 'disaster');
+            // через машину времени ⏪ (World.apply пишет и строку летописи) — опыт повторяется при перемотке
+            c.surface.act({ k: 'experiment', e: { noDecomposers: true } });
             c.mem.tOff = c.world.tick;
             c.mem.t0 = c.world.tick;
           },
@@ -751,8 +751,7 @@ export const LESSONS: Lesson[] = [
           label: '🧫 Вернуть разложителей',
           run: (c) => {
             const sw = decomposerSwitch(c.world);
-            if (sw) sw.noDecomposers = false;
-            c.world.log('🧫 Опыт окончен: бактерии и грибы снова работают', 'info');
+            if (sw) c.surface.act({ k: 'experiment', e: { noDecomposers: false } });
             if (c.mem.Loff === undefined) c.mem.Loff = soilNow(c).L;
             c.mem.t0 = c.world.tick;
           },
@@ -790,8 +789,7 @@ export const LESSONS: Lesson[] = [
       },
     ],
     onExit: (c) => {
-      const sw = decomposerSwitch(c.world);
-      if (sw) sw.noDecomposers = false;
+      if (decomposerSwitch(c.world)?.noDecomposers) c.surface.act({ k: 'experiment', e: { noDecomposers: false }, quiet: true });
     },
   },
   {
@@ -838,7 +836,7 @@ export const LESSONS: Lesson[] = [
           label: '🦠 Запустить болезнь',
           clear: ['path', 'i0'],
           run: (c) => {
-            const e = startLessonEpidemic(c.world);
+            const e = startLessonEpidemic(c.world, () => c.surface.act({ k: 'epidemic' }));
             if (!e) throw new Error('в этом мире некого заражать');
             Object.assign(c.mem, { path: e.P.id, i0: e.P.cases, vir0: e.P.vir0, n0: e.n0, top: e.host, topName: e.hostName });
             c.mem.tStart = c.world.tick;

@@ -2,7 +2,8 @@
 // npm run bench -- <seed> <ticks> [rules|neural] [--soil=0|1] [--disease=0|1] [--rescue=0|1] [--rng=k] [--UN=..] [--BETA=..]
 // --tool=1 — инструмент «эпидемия» на такте 10000 (или --toolAt=N), отчёт через 3000 тактов
 // --trap=1 — Math.random внутри симуляции бросает исключение (по умолчанию для --tm=*)
-// --tm=det|fly — проверки машины времени (снимки, точная перемотка, эффект бабочки), см. scripts/tmBench.ts
+// --tm=det|fly|load|thin — проверки машины времени (снимки, точная перемотка, эффект бабочки, ветки и память),
+//   см. scripts/tmBench.ts и scripts/tmTimeline.ts
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';

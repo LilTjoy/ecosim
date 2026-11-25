@@ -5,6 +5,7 @@ import { World, type BrainMode } from '../src/sim/world';
 import { SNAP_CELLS, SNAP_DEV, uncoveredKeys, type WorldSnap } from '../src/sim/snapshot';
 import { mulberry32 } from '../src/lib/random';
 import { cpus, loadavg } from 'node:os';
+import { load, thin } from './tmTimeline';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
 
@@ -62,7 +63,9 @@ export function runTm(kind: string, ctx: Ctx): void {
   SNAP_DEV.strict = true; // непокрытое поле или дробное значение в целой колонке — исключение
   if (kind === 'det') return det(ctx);
   if (kind === 'fly') return fly(ctx);
-  throw new Error(`--tm=${kind}: есть det и fly (load и thin — на этапе 3)`);
+  if (kind === 'load') return load(ctx);
+  if (kind === 'thin') return thin(ctx);
+  throw new Error(`--tm=${kind}: есть det, fly, load и thin`);
 }
 
 // ---------------- det ----------------
@@ -95,6 +98,11 @@ function script(H: number, T: number, seed: number): Act[] {
   acts.push({ t: at(0.7), name: 'decomposers', f: (w) => { w.experiment.noDecomposers = false; } });
   acts.push({ t: at(0.75), name: 'removeForage', f: (w) => w.removeResource('forage', 10 * L) });
   acts.push({ t: at(0.8), name: 'reseed', f: (w) => w.reseed(12345) });
+  // действия этапа 2 (World.apply): поселить, спасти, убрать вид, бабочка
+  acts.push({ t: at(0.25), name: 'spawn', f: (w) => w.apply({ k: 'spawn', t: w.tick, g: { size: 6, diet: 0.9, social: 0.6 }, n: 8, x: 1600, y: 1000, icon: '🦊', label: 'Хищник' }) });
+  acts.push({ t: at(0.42), name: 'rescue', f: (w) => { const s = w.species.living()[2]; if (s) w.apply({ k: 'rescue', t: w.tick, sp: s.id, n: 5 }); } });
+  acts.push({ t: at(0.47), name: 'remove', f: (w) => { const s = w.species.living()[4]; if (s) w.apply({ k: 'remove', t: w.tick, sp: s.id }); } });
+  acts.push({ t: at(0.83), name: 'nudge', f: (w) => { const c = w.creatures[w.creatures.length >> 1]; if (c) w.apply({ k: 'nudge', t: w.tick, id: c.id, dx: 1e-6 }); } });
   acts.push({ t: at(0.85), name: 'meteor', f: (w) => w.meteor(1700, 1100) });
   acts.push({ t: at(0.88), name: 'possess null', f: (w) => w.possess(null) });
   acts.sort((a, b) => a.t - b.t);

@@ -145,11 +145,11 @@ export function outbreakById(w: World, id: number): Pathogen | null {
 export const outbreakSick = (P: Pathogen | null): number => (!P || P.ended !== null ? 0 : (P.curve.at(-1) ?? 0));
 
 /** Урок «Как растёт эпидемия»: заразить самый многочисленный вид новой болезнью. Возвращает вспышку или null. */
-export function startLessonEpidemic(w: World): { P: Pathogen; host: number; hostName: string; n0: number } | null {
+export function startLessonEpidemic(w: World, run: () => void = () => w.epidemic()): { P: Pathogen; host: number; hostName: string; n0: number } | null {
   const top = w.species.living()[0];
   if (!top || !w.settings.disease) return null;
   const n0 = top.count;
-  w.epidemic();
+  run(); // на странице — через машину времени (SurfaceView.act), в стенде — прямо
   const P = w.pathogens.get(top.id);
   return P ? { P, host: top.id, hostName: top.name, n0 } : null;
 }
