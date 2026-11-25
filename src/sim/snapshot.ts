@@ -48,7 +48,7 @@ export interface WorldSnap {
 
 // ---------------- списки полей (проверяются при компиляции и при запуске) ----------------
 
-export const STATES = ['wander', 'graze', 'flee', 'hunt', 'mate', 'scavenge', 'migrate', 'herd', 'swim', 'rest'] as const satisfies readonly State[];
+export const STATES = ['wander', 'graze', 'flee', 'hunt', 'mate', 'scavenge', 'migrate', 'herd', 'swim', 'rest', 'torpor'] as const satisfies readonly State[];
 export const _stateCheck: [Exclude<State, (typeof STATES)[number]>] extends [never] ? true : never = true;
 
 export const CRE_F64 = ['x', 'y', 'heading', 'v', 'energy', 'pv', 'reachK', 'fe', 'gx', 'gy', 'dung', 'vir', 'beta'] as const satisfies readonly (keyof Creature)[];
@@ -56,7 +56,11 @@ export const CRE_I32 = ['id', 'sp', 'age', 'generation', 'mother', 'father', 'ch
   'gt', 'lonely', 'pack', 'alarm', 'sick', 'immune', 'rs', 'dph', 'state', 'gi', 'flags'] as const;
 //  state = номер в STATES; gi = номер генома; flags = 1 жив | 2 игрок; mother/father null → −1
 export const _creI32Check: [Exclude<(typeof CRE_I32)[number], keyof Creature | 'gi' | 'flags'>] extends [never] ? true : never = true;
-type CreDone = (typeof CRE_F64)[number] | (typeof CRE_I32)[number] | 'g' | 'alive' | 'player' | 'cause' | 'activations';
+/** ♾️ Поля открытой эволюции — колонками только в мирах с ней (без неё они не меняются; при загрузке — по умолчанию). */
+export const CRE_F64_OE = ['avoidHue'] as const satisfies readonly (keyof Creature)[];
+export const CRE_I32_OE = ['torpor', 'wakeT', 'avoidPat', 'avoidT', 'mutT', 'cell'] as const satisfies readonly (keyof Creature)[];
+type CreDone = (typeof CRE_F64)[number] | (typeof CRE_I32)[number] | (typeof CRE_F64_OE)[number] | (typeof CRE_I32_OE)[number]
+  | 'g' | 'alive' | 'player' | 'cause' | 'activations';
 export const _creCheck: [Exclude<keyof Creature, CreDone>] extends [never] ? true : ['Поля особи не попали в снимок', Exclude<keyof Creature, CreDone>] = true;
 
 export const CORPSE_F = ['x', 'y', 'energy', 'size', 'hue', 'age', 'idx', 'e0', 'sp', 'sick'] as const satisfies readonly (keyof Corpse)[];
@@ -73,7 +77,7 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
+  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
 export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
@@ -219,21 +223,23 @@ export function captureWorld(w: WorldInternals): WorldSnap {
   const ghost: 0 | 1 = w.player && !w.player.alive ? 1 : 0;
   if (ghost) rows.push(w.player!);
   const n = rows.length;
-  const NF = CRE_F64.length, NI = CRE_I32.length;
+  const F64: readonly string[] = w.oe ? [...CRE_F64, ...CRE_F64_OE] : CRE_F64;
+  const I32: readonly string[] = w.oe ? [...CRE_I32, ...CRE_I32_OE] : CRE_I32;
+  const NF = F64.length, NI = I32.length;
   const f64 = new Float64Array(n * NF);
   const i32 = new Int32Array(n * NI);
   const cause: (string | null)[] = new Array(n);
   for (let i = 0; i < n; i++) {
     const c = rows[i];
     const C = c as unknown as Record<string, number>;
-    for (let k = 0; k < NF; k++) f64[i * NF + k] = C[CRE_F64[k]];
+    for (let k = 0; k < NF; k++) f64[i * NF + k] = C[F64[k]];
     for (let k = 0; k < NI; k++) {
-      const key = CRE_I32[k];
+      const key = I32[k];
       let v: number;
       if (key === 'state') v = STATES.indexOf(c.state);
       else if (key === 'gi') v = gi(c.g);
       else if (key === 'flags') v = (c.alive ? 1 : 0) | (c.player ? 2 : 0);
-      else if (key === 'mother' || key === 'father') v = c[key] ?? -1;
+      else if (key === 'mother' || key === 'father') v = c[key as 'mother'] ?? -1;
       else v = C[key];
       if ((v | 0) !== v) problem(`Снимок: поле особи «${key}» = ${v} не целое`);
       i32[i * NI + k] = v;
@@ -324,7 +330,7 @@ export function captureWorld(w: WorldInternals): WorldSnap {
   const s: WorldSnap = {
     v: SNAP_VERSION, tick: w.tick, seed: w.seed, salt: w.salt, mode: w.brainMode, env: w.env, dims: [w.width, w.height, w.cell],
     scal, cells, claim,
-    cre: { n, f64cols: [...CRE_F64], i32cols: [...CRE_I32], f64, i32, cause, ghost },
+    cre: { n, f64cols: [...F64], i32cols: [...I32], f64, i32, cause, ghost },
     gen: { cols: [...GEN_F], f64: gf, brain: gb, brains, blen, body: gbody, bkm, blvl, bshape },
     anc, corpses, ext, actN: 0, inN: 0, digest: 0, bytes: 0,
   };

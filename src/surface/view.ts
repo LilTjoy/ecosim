@@ -48,6 +48,7 @@ const STATE_NAMES: Record<Creature['state'], string> = {
   herd: 'держится стада',
   swim: 'плывёт',
   rest: 'отдыхает',
+  torpor: 'спит (спячка)',
 };
 
 /** Линзы 🔬 по кругу и их легенды. Цвета — как в renderer.lensColor. */

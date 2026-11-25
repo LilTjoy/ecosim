@@ -228,6 +228,26 @@ if (OE) {
       if (v >= 0.3) { cnt[gi][k]++; cnt[NG][k]++; }
     }
   }
+  // O7: средние по виду EYE и ENDO (видов ≥ 5 особей) — минимум по видам в каждой гильдии; летуны и планеры среди сухопутных
+  const spAcc = new Map<number, { n: number; eye: number; endo: number; g: number }>();
+  let land = 0, fly = 0, glide = 0, torp = 0;
+  for (const c of w.creatures) {
+    const ph = c.g.ph as Float32Array;
+    const e = spAcc.get(c.sp) ?? { n: 0, eye: 0, endo: 0, g: guildOf(c.g) };
+    e.n++; e.eye += ph[MM.P.EYE]; e.endo += ph[MM.P.ENDO]; spAcc.set(c.sp, e);
+    if (c.g.swim <= 0.6) { land++; if (ph[MM.P.FLY] >= 1) fly++; else if (ph[MM.P.FLY] >= 0.45) glide++; }
+    if ((c as any).torpor > 0) torp++;
+  }
+  // по гильдии: среднее по особям (= средних по видам, взвешенных численностью) и худший вид
+  const kitMin = [1, 1, 1, 1].map((_, gi) => {
+    let eye = 9, endo = 9, se = 0, sn = 0, N = 0;
+    for (const e of spAcc.values()) {
+      if (e.g !== gi) continue;
+      se += e.eye; sn += e.endo; N += e.n;
+      if (e.n >= 5) { eye = Math.min(eye, e.eye / e.n); endo = Math.min(endo, e.endo / e.n); }
+    }
+    return N ? `${(se / N).toFixed(2)}/${(sn / N).toFixed(2)}(min ${eye === 9 ? '-' : eye.toFixed(2)}/${endo === 9 ? '-' : endo.toFixed(2)})` : '-';
+  });
   const pc = (a: number, n: number) => (n ? (100 * a) / n : 0).toFixed(0);
   const mf = (gi: number) => MM.KIND_NAMES.slice(1).map((nm, j) => `${nm}${pc(cnt[gi][j + 1], gN[gi])}`).join(' ');
   const ft = (m: string) => oe.first[m] ?? '-';
@@ -238,6 +258,7 @@ if (OE) {
     `\n OE first: 🧪@${ft('🧪')} 🌱@${ft('🌱')} 🌟@${ft('🌟')} 💨@${ft('💨')} 🌳@${ft('🌳')} 🪞@${ft('🪞')} evoLines=${oe.evoLines} bottleneckLogs=${oe.bottle}` +
     `\n OE death: poisoned=${S.poisoned} poisonDeaths=${S.poisonDeaths} zaps=${S.zaps} carnDeaths=${oe.carnD} carnPoisoned=${oe.poisonD}` +
     `\n OE perf: msK=${(oe.msSum / Math.max(1, oe.creSum / 1000)).toFixed(3)} (мс на 1000 особей·такт) heapMB=${(process.memoryUsage().heapUsed / 1048576).toFixed(1)}` +
+    `\n OE body: EYE/ENDO herb=${kitMin[0]} omni=${kitMin[1]} carn=${kitMin[2]} swim=${kitMin[3]} fliers=${pc(fly, land)}% gliders=${pc(glide, land)}% of land(n=${land}) torpid=${torp}` +
     (B?.convDiag ? `\n convdiag: ${B.convDiag}` : '') +
     `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
     ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('');

@@ -2,7 +2,7 @@ import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
 import { clamp, mix32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
-import { ALL_KINDS, EARTH_EXPR, EVO, finish, newEvoStats, ORIGIN, type ExprCtx } from './modules';
+import { ALL_KINDS, EARTH_EXPR, EVO, finish, newEvoStats, ORIGIN, P, type ExprCtx } from './modules';
 import { B, BIOMES, Terrain } from './terrain';
 import { pathogenName, type Pathogen } from './microbes';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
@@ -43,8 +43,15 @@ export const DIS = { BETA: 0.0035, IMM: 3000, IMM_VAR: 2000, SPILL: 2e-6, SPILL_
   BOOST_RISK: 0.003, BOOST_T: 1500, RISK_CAP: 0.01 };
 /** Длительность болезни: мягкие штаммы болеют дольше (компромисс «заразность — вирулентность»). */
 const DUR = (v: number) => Math.round(220 + 160 * (1 - v));
+/** ♾️ Класс узора для запоминания окраски: 2 полосы, 0 пятна, 1 однотонный (как в adjective()). */
+export const patClass = (p: number): number => (p > 0.66 ? 2 : p < 0.33 ? 0 : 1);
+/** Разница оттенков по кругу (без ошибок на −5° и 364°). */
+export const hueDiff = (a: number, b: number): number => Math.abs((((a - b) % 360) + 540) % 360 - 180);
+export const hueNear = (a: number, b: number): boolean => hueDiff(a, b) < EVO.HUE_TOL;
+/** Где можно зарыться (индекс — B): мелководье (садовые угри), пляж, луг, саванна, лес, пустыня, тундра. */
+export const DIGGABLE = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0]);
 
-export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest';
+export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest' | 'torpor';
 
 export interface Creature {
   id: number;
@@ -94,6 +101,18 @@ export interface Creature {
   rs: number;
   /** Фаза выпадения навоза (0..31, со дня рождения): раз в 32 такта, но у каждого в свой такт. */
   dph: number;
+  // ---- ♾️ открытая эволюция (без неё не меняются) ----
+  /** Тактов спячки осталось (0 — не спит) и раньше какого такта не засыпать снова. */
+  torpor: number;
+  wakeT: number;
+  /** Выученное отвращение: окраска (оттенок, класс узора) отравившей добычи и до какого такта помнить. */
+  avoidHue: number;
+  avoidPat: number;
+  avoidT: number;
+  /** До какого такта у потомков чаще меняются органы (☢️). */
+  mutT: number;
+  /** Клетка, где особь стоит (после хода). */
+  cell: number;
 }
 
 /** Всё, из чего собирается особь (обязательное — кто, где; остальное — по умолчанию как у новорождённого). */
@@ -138,7 +157,7 @@ export interface WorldEvent {
 
 /** Мгновенные события для визуальных эффектов (сердечки, вспышки и т.п.). */
 export interface Fx {
-  kind: 'birth' | 'mate' | 'kill' | 'meteor' | 'newSpecies' | 'outbreak';
+  kind: 'birth' | 'mate' | 'kill' | 'meteor' | 'newSpecies' | 'outbreak' | 'discovery' | 'zap' | 'yuck' | 'mutagen';
   x: number;
   y: number;
   hue: number;
@@ -183,6 +202,11 @@ export interface SurfaceEnv {
   volcanism?: number;
   /** Стадия жизни на планете (0..7, как в model.ts). */
   lifeStage?: number;
+  /** ♾️ Яркость звезды (1 — Земля), мутность морей (0..0.6), давление (бар), есть ли магнитное поле. Нет — как на Земле. */
+  light?: number;
+  murk?: number;
+  pressure?: number;
+  magField?: boolean;
 }
 
 export const EARTH_ENV: SurfaceEnv = { name: 'Земля', sea: 0.3, tempOffset: 0, o2: 0.21, gravity: 1, seasonAmp: 0.16, landLife: true, starTint: [1, 1, 1], volcanism: 1, lifeStage: 7 };
@@ -348,6 +372,13 @@ export class World {
   nextOrigin = ORIGIN.FRESH;
   /** Счётчики эволюции тела. */
   evoStats = newEvoStats();
+  /** Освещённость этого такта (кэш daylight). */
+  dl = 1;
+  /** Нормировка обмена по основателям: средние METAB и UPKEEP (набор стоит столько же, сколько прежний зверь). */
+  metRef = 1;
+  upRef = 0;
+  /** Кэш множителя кислорода для обмена без бескислородного модуля (пересчёт в начале такта). */
+  private air0 = 1;
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -408,6 +439,19 @@ export class World {
       // до выхода на сушу живут только морские существа
       const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
       this.colonize(g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
+    }
+    this.metRef = 1;
+    this.upRef = 0;
+    this.dl = this.daylight;
+    if (this.oe && this.creatures.length) {
+      // обмен основателей — эталон: набор этого мира стоит ровно столько, сколько прежний зверь
+      let met = 0, up = 0;
+      for (const c of this.creatures) {
+        met += c.g.ph[P.METAB];
+        up += c.g.ph[P.UPKEEP];
+      }
+      this.metRef = met / this.creatures.length;
+      this.upRef = up / this.creatures.length;
     }
     this.log(
       mode === 'neural' ? 'Мир создан. Мозги случайные — посмотрим, кто научится выживать.' : 'Мир создан. Жизнь начинается.',
@@ -661,8 +705,14 @@ export class World {
 
   passable(g: Genome, idx: number): boolean {
     const b = this.terrain.biome[idx];
-    if (b === B.Deep) return g.swim > 0.5;
-    if (b === B.Shallow) return g.swim > 0.15;
+    if (!this.oe) {
+      if (b === B.Deep) return g.swim > 0.5;
+      if (b === B.Shallow) return g.swim > 0.15;
+      return true;
+    }
+    // летуны перелетают воду; донные (с панцирем и ногами) ходят по мелководью
+    if (b === B.Deep) return g.swim > 0.5 || g.ph[P.FLY] >= 1;
+    if (b === B.Shallow) return g.swim > 0.15 || g.ph[P.FLY] >= 1 || (EVO.BENTHIC && g.ph[P.BENTH] > 0);
     return true;
   }
 
@@ -723,6 +773,13 @@ export class World {
       beta: o.beta ?? 0,
       rs: o.rs,
       dph: o.dph ?? 0,
+      torpor: o.torpor ?? 0,
+      wakeT: o.wakeT ?? 0,
+      avoidHue: o.avoidHue ?? -999,
+      avoidPat: o.avoidPat ?? -1,
+      avoidT: o.avoidT ?? 0,
+      mutT: o.mutT ?? 0,
+      cell: o.cell ?? this.terrain.index(o.x, o.y),
     };
   }
 
@@ -741,6 +798,11 @@ export class World {
   }
 
   maxEnergy(g: Genome): number {
+    return this.oe ? 40 * g.size * g.size * g.ph[P.FATK] : 40 * g.size * g.size;
+  }
+
+  /** Запас без жирового «бака» (порог готовности к размножению при открытой эволюции). */
+  baseEnergy(g: Genome): number {
     return 40 * g.size * g.size;
   }
 
@@ -759,12 +821,16 @@ export class World {
   /** Может ли `a` съесть `b`. Стая позволяет брать добычу крупнее. */
   canEat(a: Creature, b: Creature): boolean {
     if (a.g.diet < 0.35 || a.sp === b.sp) return false;
-    return b.g.size < this.preyLimit(a);
+    if (b.g.size >= this.preyLimit(a)) return false;
+    // летуна над водой нелетающий не достанет
+    if (this.oe && this.isWater[b.cell] === 1 && b.g.ph[P.FLY] >= 1 && a.g.ph[P.FLY] < 1) return false;
+    return true;
   }
 
   /** Самая крупная добыча, которую хищник может одолеть. Стая позволяет брать крупнее. */
   preyLimit(a: Creature): number {
     const pack = 1 + Math.min(0.8, a.pack * 0.25 * a.g.social);
+    if (this.oe) return a.g.size * (0.45 + a.g.diet * 0.75) * pack * (1 + 0.2 * a.g.ph[P.CLAW]);
     return a.g.size * (0.45 + a.g.diet * 0.75) * pack;
   }
 
@@ -774,10 +840,25 @@ export class World {
    */
   captureChance(a: Creature, b: Creature): number {
     const r = b.g.size / this.preyLimit(a);
-    return clamp(1.25 - r * 1.15, 0.04, 1);
+    if (!this.oe) return clamp(1.25 - r * 1.15, 0.04, 1);
+    const A = a.g.ph, Bp = b.g.ph;
+    // панцирь и рога, клешни отбиваются (против хищника своего размера), летун и планер уходят от нелетающих
+    let ch = (1.25 - r * 1.15) * (1 - 0.55 * Bp[P.DEF]) * (1 - 0.25 * Bp[P.CLAW] * Math.min(1, b.g.size / a.g.size));
+    if (Bp[P.FLY] >= 1 && A[P.FLY] < 1) ch *= 0.7;
+    else if (Bp[P.FLY] >= 0.45 && A[P.FLY] < 0.45) ch *= 0.85;
+    if (b.torpor > 0) ch *= 1.5; // спящего застать врасплох легче
+    if (a.g.diet > 0.65) ch += 0.3 * A[P.TOXIN]; // яд хищника
+    if (this.zapOn(a, b)) ch += 0.25 * A[P.EORGAN]; // электрический удар в воде
+    return clamp(ch, 0.04, 1);
+  }
+
+  /** ⚡ Электрический орган бьёт добычу только в воде. */
+  private zapOn(a: Creature, b: Creature): boolean {
+    return a.g.ph[P.EORGAN] > 0.6 && this.isWater[b.cell] === 1;
   }
 
   ready(c: Creature): boolean {
+    if (this.oe) return c.cooldown <= 0 && c.age > this.maturity(c.g) && c.energy > this.baseEnergy(c.g) * 0.6;
     return c.cooldown <= 0 && c.age > this.maturity(c.g) && c.energy > this.maxEnergy(c.g) * 0.6;
   }
 
@@ -790,6 +871,7 @@ export class World {
    * а запас энергии — как size², поэтому крупным жить выгоднее, но они дольше растут.
    */
   private cost(c: Creature, v: number, idx: number): number {
+    if (this.oe) return this.costOE(c, v, idx);
     const { size, sense, speed, swim } = c.g;
     const m = size * Math.sqrt(size);
     // мало кислорода — обмен веществ менее выгоден; гравитация утяжеляет движение
@@ -805,6 +887,35 @@ export class World {
     const b = this.terrain.biome[idx];
     const wet = b === B.Deep || b === B.Shallow ? 0.03 * m * v * v * (1 - swim) : 0;
     return base + muscles + move + eyes + gills + climate + wet;
+  }
+
+  /** ♾️ Расход с телом: обмен (теплокровность, органы), жир, глаза, климат (мех, антифриз, нора), полёт, спячка, симбионты. */
+  private costOE(c: Creature, v: number, idx: number): number {
+    const { size, sense, speed, swim } = c.g;
+    const ph = c.g.ph;
+    const m = size * Math.sqrt(size);
+    const b = this.terrain.biome[idx], water = b === B.Deep || b === B.Shallow;
+    // бескислородный обмен смягчает нехватку кислорода
+    const an = ph[P.ANAER];
+    const air = an > 0 ? Math.pow(0.21 / Math.max(0.02, this.env.o2), 0.3 * (1 - 0.8 * an)) : this.air0;
+    const base0 = 0.05 * m * air;
+    const base = base0 * (ph[P.METAB] / this.metRef + ph[P.UPKEEP] - this.upRef);
+    const muscles = 0.006 * m * speed * speed;
+    const move = 0.008 * m * v * v * this.env.gravity * (1 + 0.4 * ph[P.FAT]);
+    const eyes = 0.0008 * sense * (0.3 + 0.7 * ph[P.EYEQ]);
+    const gills = 0.012 * swim * m;
+    const T = this.temp(idx), pref = c.g.tempPref;
+    let d = Math.max(0, Math.abs(T - pref) - ph[P.TOL]);
+    if (T > pref) d *= 1 + 0.8 * ph[P.FUR]; // в мехе жарко
+    let climate = 0.6 * m * d * d * (4 / size);
+    if (T < 0.15) climate += 0.8 * m * (0.15 - T) * (1 - ph[P.PROTECT]); // мороз без защиты
+    if (ph[P.DIG] > 0 && DIGGABLE[b] === 1) climate *= 1 - EVO.DIG_WARM * ph[P.DIG]; // в норе ровнее
+    const wet = water ? 0.03 * m * v * v * (1 - swim) : 0;
+    const flyingOverSea = ph[P.FLY] >= 1 && water && swim < 0.5;
+    let total = base + muscles + move + eyes + gills + climate + (flyingOverSea ? 0.03 * m : wet * (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow ? 0.3 : 1));
+    if (c.torpor > 0) total *= 1 - 0.85 * ph[P.TORPOR];
+    if (ph[P.PSYM] > 0 && b !== B.Forest && b !== B.Deep) total -= 0.24 * base0 * ph[P.PSYM] * this.dl * (this.env.light ?? 1);
+    return total;
   }
 
   // ---------------- пространственный хеш ----------------
@@ -947,7 +1058,7 @@ export class World {
   }
 
   private senseRange(c: Creature, idx: number): number {
-    const night = 0.65 + 0.35 * this.daylight;
+    const night = 0.65 + 0.35 * this.dl;
     return c.g.sense * BIOMES[this.terrain.biome[idx]].sense * night;
   }
 
@@ -958,6 +1069,8 @@ export class World {
     const cl = this.climate;
     if (cl.shift !== cl.target) cl.shift += clamp(cl.target - cl.shift, -cl.rate, cl.rate);
     this.shiftNow = cl.shift === 0 ? this.season.shift : this.season.shift + cl.shift;
+    this.dl = this.daylight;
+    this.air0 = Math.pow(0.21 / Math.max(0.02, this.env.o2), 0.3);
     if (this.drought > 0 && --this.drought === 0) {
       this.log('🌧 Засуха закончилась.', 'info');
       this.birch = 1500; // эффект Бёрча: после дождя почва «вздыхает»
@@ -968,11 +1081,13 @@ export class World {
 
     const born: Creature[] = [];
     const soilOn = this.settings.soil;
-    const disOn = this.settings.disease;
+    const oe = this.oe;
     for (const c of this.creatures) {
       if (!c.alive) continue;
       this.ctx = c; // всё случайное в ходе этой особи — из её личных костей
       const idx = this.terrain.index(c.x, c.y);
+      // без модуля спячки (≥ 0.3) спячки не бывает: torporTick только у тех, кто может уснуть или спит
+      if (oe && (c.torpor > 0 || c.g.ph[P.TORPOR] > 0.3) && this.torporTick(c, idx)) continue;
       const p = this.perceive(c, this.senseRange(c, idx));
       let throttle: number;
       if (c.player) throttle = this.thinkPlayer(c);
@@ -982,11 +1097,13 @@ export class World {
 
       const v = this.move(c, throttle);
       const idx2 = this.terrain.index(c.x, c.y);
+      c.cell = idx2;
       c.energy -= this.cost(c, v, idx2);
       c.age++;
       if (c.cooldown > 0) c.cooldown--;
       if (c.cooldownHunt > 0) c.cooldownHunt--;
       this.feed(c, idx2, p.prey);
+      if (!c.alive) continue; // ♾️ отравился ядовитой добычей (без открытой эволюции не бывает)
       // навоз выпадает порциями: в воде — сразу в «почву», на суше — в опад
       // такт — по возрасту и личной фазе, а не по номеру: одно лишнее рождение сдвигает все номера (номера
       // в решениях не участвуют); фаза случайная, а не «от рождения» — с одной лишь фазой рождения навоз выпадал
@@ -1008,36 +1125,7 @@ export class World {
         if (c.lonely > 700) born.push(this.breed(c, null));
       }
 
-      const max = this.maxEnergy(c.g);
-      if (c.energy > max) c.energy = max;
-      let risk = 0;
-      const wasSick = c.sick > 0;
-      if (!disOn) risk = this.crowdRisk.get(c.sp) ?? 0;
-      else if (wasSick) {
-        // лихорадка ≈ 0.02·m при v = 0.5 (40% основного обмена); смерть — из бюджета тесноты, вес ∝ v²
-        c.energy -= DIS.FEVER * c.vir * c.g.size * Math.sqrt(c.g.size) * 0.5;
-        const w2 = (c.vir * c.vir) / (this.meanV2.get(c.sp) ?? 0.25);
-        risk = (this.sickRisk.get(c.sp) ?? 0) * (w2 < 0.25 ? 0.25 : w2 > 3 ? 3 : w2);
-      } else {
-        risk = this.healthyRisk.get(c.sp) ?? 0; // == crowding(), пока в виде никто не болеет
-        if (c.immune > 0) c.immune--;
-        else if (p.sickB > 0) {
-          if (this.r() < DIS.BETA * p.sickB) this.infect(c, p.srcV + (this.r() + this.r() + this.r() - 1.5) * DIS.MUT);
-        } else if (p.n >= 6 && !this.pathogens.has(c.sp)) this.trySpill(c, p.n);
-      }
-      if (c.energy <= 0) this.die(c, disOn && wasSick ? 'болезнь' : 'голод');
-      else if (risk && this.r() < risk) this.die(c, 'болезнь');
-      else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
-      else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5) this.die(c, 'утонул');
-      // выздоровление — только если пережил этот такт (иначе die() уже записал исход)
-      if (wasSick && c.alive && --c.sick === 0) {
-        c.immune = DIS.IMM + ((this.r() * DIS.IMM_VAR) | 0);
-        const P = this.pathogens.get(c.sp);
-        if (P) {
-          P.recovered++;
-          P.outW++;
-        }
-      }
+      this.mortality(c, idx2, p);
     }
     this.ctx = null;
 
@@ -1050,6 +1138,77 @@ export class World {
     }
     if (this.tick % 500 === 0) this.migrantsFromAfar();
     if (this.tick % 1000 === 0) this.pruneAncestors();
+  }
+
+  /**
+   * Конец хода особи: потолок запаса, болезнь (лихорадка, заражение, выздоровление), голод, теснота, старость, утопление.
+   * `p === null` — спящий (спячка): ни с кем не встречается, но болеет, стареет и голодает как все.
+   */
+  private mortality(c: Creature, idx2: number, p: { sickB: number; srcV: number; n: number } | null): void {
+    const disOn = this.settings.disease;
+    const max = this.maxEnergy(c.g);
+    if (c.energy > max) c.energy = max;
+    let risk = 0;
+    const wasSick = c.sick > 0;
+    if (!disOn) risk = this.crowdRisk.get(c.sp) ?? 0;
+    else if (wasSick) {
+      // лихорадка ≈ 0.02·m при v = 0.5 (40% основного обмена); смерть — из бюджета тесноты, вес ∝ v²
+      c.energy -= DIS.FEVER * c.vir * c.g.size * Math.sqrt(c.g.size) * 0.5;
+      const w2 = (c.vir * c.vir) / (this.meanV2.get(c.sp) ?? 0.25);
+      risk = (this.sickRisk.get(c.sp) ?? 0) * (w2 < 0.25 ? 0.25 : w2 > 3 ? 3 : w2);
+    } else {
+      risk = this.healthyRisk.get(c.sp) ?? 0; // == crowding(), пока в виде никто не болеет
+      if (c.immune > 0) c.immune--;
+      else if (!p) {
+        // спящий в норе (спячка): ни с кем не встречается — не заражается
+      } else if (p.sickB > 0) {
+        if (this.r() < DIS.BETA * p.sickB) this.infect(c, p.srcV + (this.r() + this.r() + this.r() - 1.5) * DIS.MUT);
+      } else if (p.n >= 6 && !this.pathogens.has(c.sp)) this.trySpill(c, p.n);
+    }
+    if (c.energy <= 0) this.die(c, disOn && wasSick ? 'болезнь' : 'голод');
+    else if (risk && this.r() < risk) this.die(c, 'болезнь');
+    else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
+    else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5 && !(this.oe && c.g.ph[P.FLY] >= 1)) this.die(c, 'утонул');
+    // выздоровление — только если пережил этот такт (иначе die() уже записал исход)
+    if (wasSick && c.alive && --c.sick === 0) {
+      c.immune = DIS.IMM + ((this.r() * DIS.IMM_VAR) | 0);
+      const P = this.pathogens.get(c.sp);
+      if (P) {
+        P.recovered++;
+        P.outW++;
+      }
+    }
+  }
+
+  /**
+   * ♾️ Спячка v2: зимой (или в засуху) травоядный со «спячкой» засыпает на 150 тактов, пока запас между 20% и 50%;
+   * спит в той же клетке, тратит меньше, легче достаётся хищнику. true — ход особи на этом закончен.
+   */
+  private torporTick(c: Creature, idx: number): boolean {
+    const tp = c.g.ph[P.TORPOR];
+    if (tp > 0.3 && !c.player && (c.g.diet <= 0.65 || this.drought > 0)) {
+      const mx = this.maxEnergy(c.g);
+      const winter = (this.shiftNow < -0.04 && this.temp(idx) < c.g.tempPref - 0.1) || this.drought > 0;
+      if (c.torpor > 0) {
+        if (--c.torpor === 0) {
+          if (winter && c.energy > mx * 0.1) c.torpor = 150;
+          else {
+            c.wakeT = this.tick + 100;
+            c.state = 'wander';
+          }
+        }
+      } else if (winter && this.tick > c.wakeT && c.energy < mx * 0.5 && c.energy > mx * 0.2 && c.state !== 'hunt') c.torpor = 150;
+    } else c.torpor = 0;
+    if (c.torpor <= 0) return false;
+    c.state = 'torpor';
+    c.v = 0;
+    c.cell = idx;
+    c.energy -= this.cost(c, 0, idx);
+    c.age++;
+    if (c.cooldown > 0) c.cooldown--;
+    if (c.cooldownHunt > 0) c.cooldownHunt--;
+    this.mortality(c, idx, null);
+    return true;
   }
 
   deaths = new Map<string, number>();
@@ -1469,7 +1628,8 @@ export class World {
     const idx = this.terrain.index(c.x, c.y);
     const b = this.terrain.biome[idx];
     let mul = BIOMES[b].move;
-    if (BIOMES[b].water) mul = 0.25 + 0.75 * c.g.swim;
+    if (this.oe) mul = this.moveMulOE(c, b, idx, mul);
+    else if (BIOMES[b].water) mul = 0.25 + 0.75 * c.g.swim;
     // плавники на суше мешают
     else mul *= 1 - 0.55 * Math.max(0, c.g.swim - 0.3);
     const v = c.g.speed * throttle * mul;
@@ -1488,6 +1648,27 @@ export class World {
     return v;
   }
 
+  /** ♾️ Множитель скорости с телом: плавники и форма в воде, ноги, панцирь и перепонки на суше, полёт, холоднокровность. */
+  private moveMulOE(c: Creature, b: B, idx: number, mul: number): number {
+    const ph = c.g.ph, swim = c.g.swim;
+    if (BIOMES[b].water) {
+      if (ph[P.FLY] >= 1 && swim < 0.5) mul = 1.2;
+      else {
+        mul = (0.25 + 0.75 * swim) * ph[P.WATERMUL];
+        if (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow) mul = Math.max(mul, 0.55 + 0.25 * (1 - c.g.body.shape));
+      }
+    } else {
+      mul *= (1 - 0.55 * Math.max(0, swim - 0.3)) * ph[P.LANDMUL];
+      const legs = ph[P.LEGS];
+      if (legs > 2 && mul < 1) mul += (1 - mul) * 0.2 * (legs - 2); // лишние ноги — по бездорожью
+      if (ph[P.FLY] >= 0.45 && (b === B.Forest || b === B.Savanna)) mul *= 1.25; // планирует с деревьев
+    }
+    // холоднокровный в холоде вял (ящерица на рассвете)
+    const e = Math.min(1, ph[P.ENDO] / 0.8);
+    if (e < 1) mul *= (0.9 + 0.1 * e) * (1 - (1 - e) * clamp((c.g.tempPref - 0.12 - this.temp(idx)) * 4, 0, 0.6));
+    return mul;
+  }
+
   private feed(c: Creature, idx: number, prey: Creature | null): void {
     // трава (или водоросли — для пловцов)
     const plant = this.plantValue(c) * this.grassAccess(c, idx);
@@ -1504,7 +1685,8 @@ export class World {
       if (bite > 0) {
         this.grass[idx] -= bite;
         // правило Джармана — Белла: крупные лучше переваривают грубую пищу
-        const digest = 42 * Math.pow(c.g.size / 4, 0.3);
+        let digest = 42 * Math.pow(c.g.size / 4, 0.3);
+        if (this.oe) digest *= 1 - 0.2 * c.g.ph[P.ANAER]; // бескислородный обмен — меньше энергии из той же травы
         c.energy += bite * digest * plant;
         this.bump(c.sp, 0, bite * 0.2);
         if (this.settings.soil) this.eatDung(c, bite);
@@ -1539,15 +1721,36 @@ export class World {
         if (this.r() > this.captureChance(c, target)) {
           // добыча отбилась: хищник тратит силы, а крупная жертва может ранить
           c.cooldownHunt = 40;
-          c.energy -= this.maxEnergy(c.g) * (target.g.size > c.g.size * 0.8 ? 0.08 : 0.02);
+          // рогатая добыча ранит сильнее
+          c.energy -= this.maxEnergy(c.g) * (target.g.size > c.g.size * 0.8 ? 0.08 : 0.02) * (this.oe ? 1 + EVO.HORN_HURT * target.g.ph[P.HORN] : 1);
           target.alarm = 30;
           return;
         }
+        const zap = this.oe && this.zapOn(c, target);
         this.die(target, `съеден (${this.species.all.get(c.sp)?.name ?? 'хищник'})`, false);
         c.energy += (target.energy + this.maxEnergy(target.g) * 0.5) * meat;
         c.kills++;
         this.bump(c.sp, target.sp, 1);
         this.fx.push({ kind: 'kill', x: target.x, y: target.y, hue: target.g.hue });
+        if (zap) {
+          this.evoStats.zaps++;
+          this.fx.push({ kind: 'zap', x: target.x, y: target.y, hue: 55 });
+        }
+        // ☠️ ядовитая добыча (травоядная или всеядная): хищник отравлен и запоминает её окраску
+        const tox = this.oe ? target.g.ph[P.TOXIN] : 0;
+        if (tox > 0.1 && target.g.diet < 0.65) {
+          c.energy -= this.maxEnergy(c.g) * EVO.TOX_HIT * tox;
+          c.avoidHue = target.g.hue;
+          c.avoidPat = patClass(target.g.pattern);
+          c.avoidT = this.tick + Math.round(EVO.TASTE_T * (c.avoidPat !== 1 ? 1.25 : 0.75)); // контрастный узор помнится дольше
+          this.evoStats.poisoned++;
+          this.fx.push({ kind: 'yuck', x: c.x, y: c.y, hue: 100 });
+          if (c.energy <= 0 || this.r() < EVO.TOX_DIE * tox) {
+            this.evoStats.poisonDeaths++;
+            this.die(c, 'отравился');
+            return;
+          }
+        }
       }
     }
     // падаль
@@ -1655,7 +1858,7 @@ export class World {
 
   private breed(a: Creature, b: Creature | null): Creature {
     const innov = this.oe
-      ? { boost: 1 /* ☢️ мутаген (×EVO.MUT_BOOST) — позже */, newOrigin: () => this.nextOrigin++, stats: this.evoStats }
+      ? { boost: a.mutT > this.tick || (b?.mutT ?? 0) > this.tick ? EVO.MUT_BOOST : 1, newOrigin: () => this.nextOrigin++, stats: this.evoStats }
       : undefined;
     let g = b ? crossover(a.g, b.g, this.r, this.expr) : { ...a.g };
     g = mutate(g, this.settings.mutationRate, this.r, this.expr, innov);
@@ -1692,6 +1895,15 @@ export class World {
     if (b) b.lonely = 0;
     // материнские антитела: детёныш переболевшей матери первое время не заражается
     child.immune = a.immune > 0 ? DIS.MAT_IMM : 0;
+    if (this.oe) {
+      // ☢️ всплеск мутаций держится и у потомков; отвращение к ядовитой окраске мать «передаёт» детёнышу
+      child.mutT = Math.max(a.mutT, b?.mutT ?? 0);
+      if (a.avoidT > this.tick) {
+        child.avoidHue = a.avoidHue;
+        child.avoidPat = a.avoidPat;
+        child.avoidT = a.avoidT;
+      }
+    }
 
     this.fx.push({ kind: b ? 'mate' : 'birth', x: a.x, y: a.y, hue: a.g.hue });
     if (isNew) {
