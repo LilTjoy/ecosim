@@ -77,11 +77,12 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
+  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0', 'chan', 'airSnd', 'avoided'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
 export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
-  'microBase', 'leachK', 's0', 'isWater', 'fx', 'ctx', 'lessonTerrain', 'lessonGen'] as const;
+  'microBase', 'leachK', 's0', 'isWater', 'fx', 'ctx', 'lessonTerrain', 'lessonGen',
+  'sv2', 'sh2', 'sa2', 'st2', 'ssm', 'chanBuf'] as const; // ♾️ sv2…chanBuf — радиусы текущей особи внутри такта
 
 /** Поля World, о которых снимок не знает (методы и подмены функций стенда пропускаются). */
 export function uncoveredKeys(w: World): string[] {

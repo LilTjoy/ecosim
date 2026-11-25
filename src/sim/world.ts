@@ -1,6 +1,6 @@
 import { HID, IN, OUT, think as runBrain } from './brain';
 import { crossover, distance, genome, GENE_KEYS, MATE_LIMIT, mutate, type GeneKey, type Genome } from './genome';
-import { clamp, mix32 } from '../lib/random';
+import { clamp, mix32, mulberry32 } from '../lib/random';
 import { SpeciesRegistry, type Species } from './species';
 import { ALL_KINDS, EARTH_EXPR, EVO, finish, newEvoStats, ORIGIN, P, type ExprCtx } from './modules';
 import { B, BIOMES, Terrain } from './terrain';
@@ -50,6 +50,16 @@ export const hueDiff = (a: number, b: number): number => Math.abs((((a - b) % 36
 export const hueNear = (a: number, b: number): boolean => hueDiff(a, b) < EVO.HUE_TOL;
 /** Где можно зарыться (индекс — B): мелководье (садовые угри), пляж, луг, саванна, лес, пустыня, тундра. */
 export const DIGGABLE = new Uint8Array([0, 1, 1, 1, 1, 1, 0, 1, 1, 0, 0]);
+/** Перемешивающий хеш (id, окно тактов) → [0, 1): стабилен 8 тактов и не тратит случайных чисел. */
+export function hash01(id: number, t: number): number {
+  let h = Math.imul(id, 0x9e3779b1) ^ Math.imul(t, 0x85ebca6b);
+  h ^= h >>> 15;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 13;
+  return (h >>> 0) / 4294967296;
+}
+/** Что чует особь (радиусы, px): для колец и подсказок осмотра. */
+export interface Senses { vision: number; hearing: number; echo: number; smell: number; heat: number; electric: number }
 
 export type State = 'wander' | 'graze' | 'flee' | 'hunt' | 'mate' | 'scavenge' | 'migrate' | 'herd' | 'swim' | 'rest' | 'torpor';
 
@@ -379,6 +389,18 @@ export class World {
   upRef = 0;
   /** Кэш множителя кислорода для обмена без бескислородного модуля (пересчёт в начале такта). */
   private air0 = 1;
+  /** «Паспорт мира»: проводимость каналов — звук, запах, тепло, ток (свет не трогаем). */
+  chan = new Float32Array([1, 1, 1, 1]);
+  /** Как далеко слышно в воздухе: √давления, в пределах [0.3, 1.5]. */
+  airSnd = 1;
+  /** Сколько раз хищники обошли добычу из-за окраски, по видам добычи (для апосематизма). */
+  private avoided = new Map<number, number>();
+  /** Квадраты радиусов каналов текущей воспринимающей особи (считаются в senseRange прямо перед perceive). */
+  private sv2 = 0;
+  private sh2 = 0;
+  private sa2 = 0;
+  private st2 = 0;
+  private ssm = 0;
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -435,6 +457,15 @@ export class World {
     this.species.bodyW = this.oe ? EVO.BODY_W : 0;
     this.nextOrigin = ORIGIN.FRESH;
     this.evoStats = newEvoStats();
+    this.avoided.clear();
+    this.chan = new Float32Array([1, 1, 1, 1]);
+    this.airSnd = 1;
+    if (this.oe) {
+      // свой поток: основатели и рельеф от паспорта не зависят
+      const pr = mulberry32(seed ^ 0xc4a77e);
+      for (let i = 0; i < 4; i++) this.chan[i] = 1 + EVO.JIT * (2 * pr() - 1);
+      this.airSnd = clamp(Math.sqrt(env.pressure ?? 1), 0.3, 1.5);
+    }
     for (const f of FOUNDERS) {
       // до выхода на сушу живут только морские существа
       const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
@@ -457,6 +488,7 @@ export class World {
       mode === 'neural' ? 'Мир создан. Мозги случайные — посмотрим, кто научится выживать.' : 'Мир создан. Жизнь начинается.',
       'info',
     );
+    if (this.oe) this.log(this.passport(), 'info');
   }
 
   /** Почва без случайностей: тёплый старт около равновесия (поток случайных чисел основателей не меняется). */
@@ -1013,6 +1045,9 @@ export class World {
     let srcV = 0;
     const wantMate = this.ready(c);
     const hungry = c.energy < this.maxEnergy(c.g) * 0.85;
+    const oe = this.oe;
+    const r2 = range * range;
+    const sv2 = this.sv2;
     this.forNear(c.x, c.y, range, (o, d2) => {
       if (o === c || !o.alive) return;
       if (o.sp === c.sp) {
@@ -1022,23 +1057,28 @@ export class World {
           fy += o.y;
           hx += Math.cos(o.heading);
           hy += Math.sin(o.heading);
-          if (o.alarm > 0 && !alarm) alarm = o;
+          if (!oe && o.alarm > 0 && !alarm) alarm = o;
           if (o.sick > 0) {
             sickB += o.beta;
             srcV = o.vir;
           }
         }
+        // ♾️ громкий голос поднимает тревогу дальше (с набором — ровно 0.36). Слагаемое уха (1.28·(EAR − 0.3)) убрано:
+        // уши дрейфуют выше набора, тревога разливалась по стадам, всеядные «бегали» вместо еды (ворота O2)
+        if (oe && o.alarm > 0 && !alarm && d2 < r2 * Math.min(1, 0.36 + 0.5 * o.g.ph[P.VOICE])) alarm = o;
         if (wantMate && d2 < mateD && this.ready(o) && this.compatible(c, o)) {
           mateD = d2;
           mate = o;
         }
         return;
       }
+      // ♾️ чужих замечаем только тем каналом, которым их можно заметить (обычно хватает зрения — одно сравнение)
+      if (oe && d2 >= sv2 && !this.detects(o, d2)) return;
       // от хищника, который нас почти не может одолеть, не бегаем (слон не боится льва)
       if (d2 < threatD && this.canEat(o, c) && this.captureChance(o, c) > 0.15) {
         threatD = d2;
         threat = o;
-      } else if (hungry && this.canEat(c, o)) {
+      } else if (hungry && this.canEat(c, o) && !(oe && this.skipPrey(c, o, d2, range))) {
         // не гонимся за теми, кто заметно быстрее, если они не совсем рядом
         // всеядные охотятся только на лёгкую добычу — медленную или совсем рядом
         const reach = c.g.diet > 0.65 ? 1.1 : 0.85;
@@ -1058,8 +1098,103 @@ export class World {
   }
 
   private senseRange(c: Creature, idx: number): number {
+    if (this.oe) return this.senseRangeOE(c, idx);
     const night = 0.65 + 0.35 * this.dl;
     return c.g.sense * BIOMES[this.terrain.biome[idx]].sense * night;
+  }
+
+  /**
+   * ♾️ Радиус восприятия по каналам: зрение (свет, ночь, муть, светящийся орган), слух, эхо, нюх, ток, тепло.
+   * Квадраты радиусов — в this.sv2… для detects() этой же особи. Не кэшируется (≈30 операций): без кэша
+   * снимок машины времени не обязан хранить вчерашние радиусы.
+   */
+  private senseRangeOE(c: Creature, idx: number): number {
+    const b = this.terrain.biome[idx];
+    const ch = this.chanRanges(c, b);
+    const rv = ch[0], rh = ch[1], ra = Math.max(ch[2], ch[3], ch[4]), rt = ch[5], smell = ch[3];
+    const kin = smell * (1 + 1.5 * c.g.ph[P.SCENT]); // феромоны: сородичи чуют друг друга дальше (своих не фильтруем)
+    this.sv2 = rv * rv;
+    this.sh2 = rh * rh;
+    this.sa2 = ra * ra;
+    this.st2 = rt * rt;
+    this.ssm = smell;
+    return Math.min(EVO.RCAP * c.g.sense, Math.max(rv, rh, ra, rt, kin, 1));
+  }
+
+  private chanBuf = new Float32Array(6);
+  /** Радиусы каналов на биоме b: [зрение, слух, эхо, нюх, ток, тепло] (общий буфер — копируйте сразу). */
+  private chanRanges(c: Creature, b: B): Float32Array {
+    const sg = c.g.sense, water = BIOMES[b].water, ph = c.g.ph, env = this.env, J = this.chan, murk = env.murk ?? 0;
+    const night = 0.65 + 0.35 * this.dl;
+    const light = (env.light ?? 1) * (b === B.Deep ? 1 - 0.85 * murk : b === B.Shallow ? 1 - 0.5 * murk : 1);
+    const out = this.chanBuf;
+    out[0] = sg * BIOMES[b].sense * Math.max(night * light, 0.8 * ph[P.PHOTO]) * ph[P.EYEQ]; // светящийся орган — фонарик
+    const snd = (water ? 1.5 : b === B.Forest ? 0.85 : this.airSnd) * J[0];
+    out[1] = sg * ph[P.EAR] * snd;
+    out[2] = sg * Math.min(ph[P.EAR], ph[P.VOICE]) * snd;
+    out[3] = sg * 0.8 * ph[P.NOSE] * (water ? 0.8 : 1) * J[1];
+    out[4] = sg * (water ? 1 : b === B.Swamp ? 0.4 : 0) * (0.4 * ph[P.AMPUL] + 0.9 * Math.min(ph[P.AMPUL], ph[P.EORGAN])) * J[3];
+    out[5] = water ? 0 : sg * 0.5 * ph[P.PIT] * J[2]; // вода поглощает инфракрасное
+    return out;
+  }
+
+  /** Радиусы чувств особи там, где она стоит (для колец и 💡). Без открытой эволюции — одно «зрение». */
+  senses(c: Creature): Senses {
+    const idx = this.terrain.index(c.x, c.y);
+    if (!this.oe) {
+      const r = c.g.sense * BIOMES[this.terrain.biome[idx]].sense * (0.65 + 0.35 * this.dl);
+      return { vision: r, hearing: 0, echo: 0, smell: 0, heat: 0, electric: 0 };
+    }
+    const ch = this.chanRanges(c, this.terrain.biome[idx]);
+    return { vision: ch[0], hearing: ch[1], echo: ch[2], smell: ch[3], heat: ch[5], electric: ch[4] };
+  }
+
+  /** ♾️ Замечает ли текущая воспринимающая особь (её радиусы — в sv2…) чужака o на расстоянии² d2. */
+  private detects(o: Creature, d2: number): boolean {
+    const op = o.g.ph;
+    return d2 < this.sv2 * (1 + op[P.PHOTO] * (1 - this.dl)) // светящихся видно ночью
+      || d2 < this.sa2
+      || ((o.v > 0.3 || op[P.VOICE] > 0.2) && d2 < this.sh2 * (1 + op[P.VOICE])) // движущихся и кричащих слышно
+      || (op[P.ENDO] > 0.3 && d2 < this.st2); // тепловые ямки видят только теплокровных
+  }
+
+  /** ♾️ Не трогать добычу: окраска отравившей (если не очень голоден) или зверь зарылся. */
+  private skipPrey(c: Creature, o: Creature, d2: number, range: number): boolean {
+    if (c.avoidT > this.tick && c.energy >= EVO.HUNGRY * this.maxEnergy(c.g)
+        && patClass(o.g.pattern) === c.avoidPat && hueNear(o.g.hue, c.avoidHue)) {
+      this.avoided.set(o.sp, (this.avoided.get(o.sp) ?? 0) + 1);
+      return true;
+    }
+    if (this.hidden(o)) {
+      const sniff = c.g.ph[P.NOSE] >= 0.5 || c.g.ph[P.PIT] >= 0.5; // чуткий нос или тепловые ямки выкопают
+      return !(sniff && d2 < 0.16 * range * range);
+    }
+    return false;
+  }
+
+  /** ♾️ Зверь зарылся: роющие лапы, мягкий грунт, стоит или ползёт; решение держится 8 тактов (без случайных чисел). */
+  hidden(o: Creature): boolean {
+    const dg = o.g.ph[P.DIG];
+    return this.oe && dg > 0.1 && DIGGABLE[this.terrain.biome[o.cell]] === 1 && o.v < 0.35 * o.g.speed
+      && hash01(o.id, this.tick >> 3) < EVO.DIG_HIDE * dg;
+  }
+
+  /** ♾️ «🌍 В этом мире: …» — чем этот мир отличается для чувств. */
+  passport(): string {
+    if (!this.oe) return '';
+    const J = this.chan, w: string[] = [];
+    const two = (v: number, lo: string, hi: string) => {
+      if (v < 0.92) w.push(lo);
+      else if (v > 1.08) w.push(hi);
+    };
+    two(J[0], 'глухой воздух', 'звонкий воздух');
+    two(J[1], 'запахи держатся слабо', 'запахи долго висят в воздухе');
+    two(J[2], 'тепло рассеивается', 'тёплые тела видны издалека');
+    two(J[3], 'пресная, плохо проводящая вода', 'солёная, хорошо проводящая ток вода');
+    if ((this.env.light ?? 1) < 0.6) w.push('тусклое солнце');
+    if ((this.env.murk ?? 0) > 0.4) w.push('мутные моря');
+    if (this.airSnd < 0.6) w.push('разреженный воздух, звуки тихие');
+    return '🌍 В этом мире: ' + (w.length ? w.join(', ') : 'всё как обычно');
   }
 
   // ---------------- шаг ----------------
@@ -1450,7 +1585,9 @@ export class World {
     }
     let best = { angle: c.heading, score: here, dist: 0, here };
     const far = here < 0.12 ? 3.5 : 1.2;
-    const r = c.g.sense * far;
+    let r = c.g.sense * far;
+    // ♾️ компас: магнитное чувство помогает уйти далеко, когда климат не тот (если у планеты есть магнитное поле)
+    if (this.oe && this.env.magField !== false && c.g.ph[P.MAG] > 0 && Math.abs(this.temp(idx) - c.g.tempPref) > 0.15) r *= 1 + 2 * c.g.ph[P.MAG];
     for (let k = 0; k < 8; k++) {
       const a = this.r() * Math.PI * 2;
       const d = r * (0.2 + this.r() * 0.8);
@@ -1522,7 +1659,7 @@ export class World {
     if (p.threat) {
       steer(Math.atan2(c.y - p.threat.y, c.x - p.threat.x));
       c.state = 'flee';
-      c.alarm = Math.round(40 * c.g.social);
+      c.alarm = this.oe ? Math.round(40 * c.g.social * (1 + c.g.ph[P.VOICE])) : Math.round(40 * c.g.social);
       return 1;
     }
     if (p.alarm && c.g.social > 0.3) {
@@ -1551,7 +1688,8 @@ export class World {
     }
     // 4. падаль
     if (c.energy < max * 0.8) {
-      const k = this.nearestCorpse(c, c.g.sense);
+      // ♾️ падаль чуют носом: нюх дальше глаз, но не дальше 1.15·sense (при 1.3 хищники объедали всеядных, ворота O2)
+      const k = this.nearestCorpse(c, this.oe ? Math.min(1.15 * c.g.sense, Math.max(c.g.sense, 2 * this.ssm)) : c.g.sense);
       if (k) {
         steer(Math.atan2(k.y - c.y, k.x - c.x));
         c.state = 'scavenge';
