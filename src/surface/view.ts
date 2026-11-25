@@ -1,4 +1,4 @@
-import { clamp } from '../lib/random';
+import { clamp, mix32 } from '../lib/random';
 import { plural } from '../lib/text';
 import { FIELD_ICON, type Fact } from '../planet/facts';
 import { GENE_INFO, GENE_KEYS, type GeneKey, type Genome } from '../sim/genome';
@@ -7,7 +7,9 @@ import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { DAY, DIS, EARTH_ENV, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
 import { SNAP_DEV } from '../sim/snapshot';
-import { Timeline, type Action, type ActionInput } from '../sim/timeline';
+import { Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch } from '../sim/timeline';
+import { TimelineBar } from './timelineBar';
+import { TmPanel } from './tmPanel';
 import { Camera } from './camera';
 import { SURFACE_FACTS } from './facts';
 import { MICROBE_GUILDS } from './microbes';
@@ -89,7 +91,7 @@ const spColor = (sp: Species, l = 62) => `hsl(${sp.hue},65%,${l}%)`;
 
 const TEMPLATE = /* html */ `
 <div class="s-layout">
-  <section class="s-stage">
+  <section class="s-stage tm-on">
     <canvas class="s-canvas"></canvas>
     <div class="s-hud">
       <div class="s-env"></div>
@@ -124,6 +126,11 @@ const TEMPLATE = /* html */ `
     <div class="s-spawn" hidden></div>
     <div class="s-lenslegend" hidden></div>
     <canvas class="s-mini" title="Миникарта: нажмите, чтобы перейти"></canvas>
+    <div class="s-timeline"></div>
+    <button class="s-tlopen" hidden title="⏪ Машина времени: показать шкалу истории">⏪</button>
+    <div class="s-visit" hidden></div>
+    <div class="tm-menu" hidden></div>
+    <div class="s-toast" hidden></div>
     <div class="s-inspect" hidden></div>
     <div class="s-player" hidden></div>
     <div class="p-fact s-fact" hidden></div>
@@ -137,6 +144,7 @@ const TEMPLATE = /* html */ `
       <button data-tab="charts">Графики</button>
       <button data-tab="micro">Микромир</button>
       <button data-tab="log">Летопись</button>
+      <button data-tab="time" title="Машина времени: ветки истории и их сравнение">⏳ Ветки</button>
     </nav>
     <div class="s-tab" data-tab="species"><div class="s-spcard"></div><ol class="s-splist"></ol></div>
     <div class="s-tab" data-tab="tree" hidden>
@@ -168,6 +176,7 @@ const TEMPLATE = /* html */ `
       <div class="s-legend s-soillegend"></div>
     </div>
     <div class="s-tab" data-tab="log" hidden><ol class="s-log"></ol></div>
+    <div class="s-tab" data-tab="time" hidden></div>
   </aside>
 </div>`;
 
@@ -210,6 +219,17 @@ export class SurfaceView {
   /** Схема круговорота: текущие потоки, их «обычный» уровень и фазы бегущих точек. */
   private cyc = { v: [] as number[], ref: [] as number[], ph: [0, 0, 0, 0, 0, 0, 0], tick: -1 };
   private htmlCache = new WeakMap<HTMLElement, string>();
+  // ⏪ машина времени
+  private bar!: TimelineBar;
+  private tmPanel!: TmPanel;
+  /** С какой скоростью продолжить, когда вернёмся из прошлого. */
+  private resume = 1;
+  private wasPast = false;
+  private seenRestores = 0;
+  /** Следующий клик инструментом (метеорит, поселение из меню «Что если…») пускает новую ветку. */
+  private forkNext = false;
+  private toastTimer: ReturnType<typeof setTimeout> | undefined;
+  private bannerSig = '';
 
   constructor(private root: HTMLElement) {
     root.innerHTML = TEMPLATE;
@@ -221,6 +241,28 @@ export class SurfaceView {
     this.tl.autoRaise = true;
     this.tl.small = ((navigator as { deviceMemory?: number }).deviceMemory ?? 8) <= 4 || matchMedia('(max-width: 600px)').matches;
     this.tl.reset(this.world);
+    this.tl.onToast = (t) => this.toast(t);
+    this.tl.onReplayEnd = (same) => same && this.queueFact('tm_seed', true);
+    this.bar = new TimelineBar($(root, '.s-timeline'), $(root, '.s-tlopen'), {
+      tl: this.tl,
+      world: this.world,
+      scrub: (t) => this.scrub(t),
+      stepSnap: (d) => this.stepSnap(d),
+      openMenu: () => this.openMenu(),
+      seek: (t, stop, then) => this.seek(t, stop, then),
+      forkWithout: (ref) => this.forkWithoutUi(ref),
+      intervene: (t) => this.seek(t, Infinity, () => this.openMenu()),
+      rescue: (name, tEnd) => this.rescueUi(name, tEnd),
+      setOpen: (on) => this.setBarOpen(on),
+      toast: (t) => this.toast(t),
+    });
+    this.tmPanel = new TmPanel($(root, '.s-tab[data-tab=time]'), {
+      tl: this.tl,
+      world: this.world,
+      switchTo: (id) => this.switchBranch(id),
+      showFact: (id) => this.showFact(id),
+      toast: (t) => this.toast(t),
+    });
     if (DEV) Object.assign(window, { __surface: this }); // проверки машины времени из браузера (только dev-сборка)
     this.bindUi();
     this.bindInput();
@@ -241,6 +283,14 @@ export class SurfaceView {
 
   private afterReset(): void {
     this.tl.reset(this.world);
+    this.seenRestores = this.tl.restores;
+    this.wasPast = false;
+    this.forkNext = false;
+    this.closeMenu();
+    this.bar.hideTip();
+    $(this.root, '.s-stage').classList.remove('tm-past');
+    $(this.root, '.s-visit').hidden = true;
+    this.bannerSig = '';
     this.renderer.rebuild();
     this.selected = null;
     this.selectedCell = null;
@@ -281,10 +331,15 @@ export class SurfaceView {
     });
     const mode = $<HTMLSelectElement>(r, '.s-mode');
     mode.onchange = () => {
+      if (!this.confirmReset()) {
+        mode.value = this.world.brainMode;
+        return;
+      }
       this.world.reset(mode.value as BrainMode, undefined, this.world.env);
       this.afterReset();
     };
     $(r, '.s-reset').onclick = () => {
+      if (!this.confirmReset()) return;
       this.world.reset(this.world.brainMode, undefined, this.world.env);
       this.afterReset();
     };
@@ -439,7 +494,29 @@ export class SurfaceView {
     });
   }
 
+  /**
+   * Скорость. В прошлом пуск — это «▶ Как было» (запись полная) или новая ветка: прошлое не перезаписывается.
+   */
   private setSpeed(v: number): void {
+    const tl = this.tl;
+    if (tl.visiting || tl.replaying) {
+      if (v === 0) return;
+      this.resume = v;
+      if (tl.replaying) return;
+      if (tl.active.exact && tl.asWas(this.world)) {
+        this.toast('▶ Как было: та же история с тем же случаем — до настоящего');
+        this.syncTime();
+        return;
+      }
+      const b = tl.forkHere(this.world, null);
+      if (b) this.toast(`🌿 Новая ветка ${b.letter}: история пошла по-другому${tl.active.exact ? '' : ' (слишком длинная запись управления)'}`);
+      this.syncTime();
+      return;
+    }
+    this.setSpeedUi(v);
+  }
+
+  private setSpeedUi(v: number): void {
     this.speed = v;
     this.root.querySelectorAll('[data-speed]').forEach((x) => x.classList.toggle('active', Number((x as HTMLElement).dataset.speed) === v));
   }
@@ -560,9 +637,16 @@ export class SurfaceView {
       if (e.code === 'Escape') {
         this.select(null);
         this.focus(null);
+        this.closeMenu();
+        this.bar.hideTip();
       }
       if (e.code === 'KeyM' && !e.ctrlKey && !e.metaKey) {
         this.cycleLens();
+        return;
+      }
+      // ⏪ [ ] — по снимкам (не в this.keys: иначе applyKeys обнулит ввод вашего существа)
+      if (e.code === 'BracketLeft' || e.code === 'BracketRight') {
+        if (!e.repeat) this.stepSnap(e.code === 'BracketLeft' ? -1 : 1);
         return;
       }
       this.keys.add(e.code);
@@ -789,7 +873,8 @@ export class SurfaceView {
     }
     if (!p.alive) {
       el.hidden = true;
-      if (!this.modalOpen) this.openDynasty(p);
+      // в прошлом и во время пересчёта — не мешаем: записанный выбор наследника придёт сам
+      if (!this.modalOpen && !this.tl.visiting && !this.tl.replaying) this.openDynasty(p);
       return;
     }
     const sp = this.world.species.all.get(p.sp);
@@ -804,7 +889,7 @@ export class SurfaceView {
 
   private openDynasty(dead: Creature): void {
     this.modalOpen = true;
-    this.setSpeed(0);
+    this.setSpeedUi(0);
     const heirs = this.world.descendants(dead.id).sort((a, b) => b.generation - a.generation || b.energy - a.energy).slice(0, 8);
     const sp = this.world.species.all.get(dead.sp);
     const el = $(this.root, '.s-modal');
@@ -823,7 +908,8 @@ export class SurfaceView {
   private closeModal(): void {
     this.modalOpen = false;
     $(this.root, '.s-modal').hidden = true;
-    if (this.speed === 0) this.setSpeed(1);
+    // в прошлом пуск был бы «Как было» — модальное окно этого не решает
+    if (this.speed === 0 && !this.tl.visiting && !this.tl.replaying) this.setSpeedUi(1);
   }
 
   // ---------------- инспектор ----------------
@@ -962,7 +1048,9 @@ export class SurfaceView {
     const dayIcon = t < 0.2 || t > 0.8 ? '🌙' : t < 0.3 ? '🌅' : t > 0.7 ? '🌇' : '☀️';
     $(this.root, '.s-time').innerHTML = `<span>${s.icon} ${s.name}, год ${w.year}</span><span>${dayIcon} день ${Math.floor(w.tick / DAY)}</span><span>🐾 ${w.creatures.length}</span><span>🧬 ${w.species.living().length} видов</span>${
       w.drought > 0 ? '<span>🔥 засуха</span>' : ''
-    }${w.micro.sick > 0 ? `<span class="s-sick" title="Открыть «Микромир» и линзу болезней">🤒 больных ${w.micro.sick}</span>` : ''}`;
+    }${w.micro.sick > 0 ? `<span class="s-sick" title="Открыть «Микромир» и линзу болезней">🤒 больных ${w.micro.sick}</span>` : ''}${
+      this.tl.branches.length > 1 ? `<span class="s-chip" style="border-color:${this.tl.active.color}">🌿 ветка ${this.tl.active.letter}</span>` : ''
+    }${this.tl.visiting || this.tl.replaying ? '<span class="s-chip past">⏳ прошлое</span>' : ''}`;
     const at = this.cursor ?? [this.cam.x, this.cam.y];
     const reg = w.terrain.regionAt(at[0], at[1]);
     const water = w.terrain.waterAt(at[0], at[1]);
@@ -988,6 +1076,7 @@ export class SurfaceView {
     else if (this.tab === 'web') this.drawWeb();
     else if (this.tab === 'charts') this.drawCharts();
     else if (this.tab === 'micro') this.renderMicro();
+    else if (this.tab === 'time') this.tmPanel.render();
     else this.renderLog();
   }
 
@@ -1239,6 +1328,9 @@ export class SurfaceView {
     const top = this.world.species.living().slice(0, 8);
     const [ctx, w, h] = this.canvasCtx($(this.root, '.s-pop'), 160);
     const n = hist.length;
+    // x — по тактам: восстановленная из снимка история слева может быть прорежена
+    const h0 = n ? hist[0].tick : 0;
+    const hs = n > 1 ? Math.max(1, hist[n - 1].tick - h0) : 1;
     if (n > 1) {
       const max = Math.max(5, ...hist.flatMap((s) => top.map((sp) => s.counts.get(sp.id) ?? 0)));
       for (const sp of top) {
@@ -1246,13 +1338,13 @@ export class SurfaceView {
         ctx.lineWidth = 1.6;
         ctx.beginPath();
         let started = false;
-        hist.forEach((s, i) => {
+        hist.forEach((s) => {
           const v = s.counts.get(sp.id);
           if (v === undefined) {
             started = false;
             return;
           }
-          const x = (i / (n - 1)) * w;
+          const x = ((s.tick - h0) / hs) * w;
           const y = h - 4 - (v / max) * (h - 10);
           started ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
           started = true;
@@ -1273,13 +1365,13 @@ export class SurfaceView {
         g.lineWidth = 1.6;
         g.beginPath();
         let started = false;
-        hist.forEach((s, i) => {
+        hist.forEach((s) => {
           const m = s.means.get(sp.id);
           if (!m) {
             started = false;
             return;
           }
-          const x = (i / (n - 1)) * gw;
+          const x = ((s.tick - h0) / hs) * gw;
           const y = gh - 4 - ((m[this.gene] - info.min) / (info.max - info.min)) * (gh - 10);
           started ? g.lineTo(x, y) : g.moveTo(x, y);
           started = true;
@@ -1684,7 +1776,10 @@ export class SurfaceView {
     this.renderer.draw(this.selected, this.family, this.cursor);
     this.frame++;
     if (this.frame % 3 === 0) this.renderer.drawMinimap(this.mini, w, h);
+    this.syncTime();
     if (this.frame % 15 === 0) {
+      this.bar.draw();
+      this.renderBanner();
       this.renderHud();
       this.renderPlayer();
       this.checkEvents();
@@ -1705,14 +1800,362 @@ export class SurfaceView {
    * записывает его и прикладывает к миру (World.apply). В прошлом оно пускает историю новой веткой.
    */
   act(a: ActionInput): void {
-    const full = { ...a, t: this.world.tick } as Action;
-    if (this.tl.visiting) this.tl.forkHere(this.world, full);
-    else this.tl.record(this.world, full);
+    const tl = this.tl, w = this.world;
+    if (tl.locked && (tl.visiting || tl.replaying) && !tl.lessonAllowed(a.k)) return;
+    const full = { ...a, t: w.tick } as Action;
+    if (this.forkNext || tl.visiting || tl.replaying) {
+      // в прошлом (или из меню «Что если…») поступок пускает историю новой веткой
+      this.forkNext = false;
+      const b = tl.forkHere(w, full);
+      if (b) this.branchToast(b);
+    } else {
+      tl.record(w, full);
+      if (UNDOABLE.has(a.k)) this.offerUndo(full);
+    }
+    this.afterAction();
   }
 
   /** Ввод игрока можно писать: не в прошлом и не во время пересчёта по записи. */
   private get inputFree(): boolean {
     return !this.tl.visiting && !this.tl.replaying;
+  }
+
+  // ---------------- ⏪ машина времени: шкала, прошлое, ветки ----------------
+
+  /** Урок: шкала на замке (в прошлое и на новые ветки нельзя), запись идёт дальше. */
+  lockTime(on: boolean): void {
+    if (on) this.tl.lock(this.world);
+    else this.tl.unlock();
+    this.closeMenu();
+    this.bar.hideTip();
+    this.syncTime();
+    this.bar.draw();
+  }
+
+  /** Новый мир сотрёт ветки — спросить, если их больше одной. */
+  private confirmReset(): boolean {
+    return this.tl.branches.length <= 1 || confirm('Начать новый мир? Ветки и снимки этого мира пропадут.');
+  }
+
+  private afterAction(): void {
+    this.syncTime();
+    this.renderHud();
+    this.renderPlayer();
+    this.bar.draw();
+  }
+
+  /**
+   * Состояние машины времени поменялось: мир восстановлен из снимка (выбор, панели), вошли в прошлое
+   * или вернулись (скорость, баннер, отметка tm-past).
+   */
+  private syncTime(): void {
+    const tl = this.tl;
+    if (tl.restores !== this.seenRestores) {
+      this.seenRestores = tl.restores;
+      this.afterRestore(false);
+    }
+    const past = !!tl.visiting || tl.replaying;
+    if (past !== this.wasPast) {
+      this.wasPast = past;
+      $(this.root, '.s-stage').classList.toggle('tm-past', past);
+      if (past) {
+        if (this.speed > 0) this.resume = this.speed;
+        this.setSpeedUi(0);
+        this.queueFact('tm_frozen');
+      } else {
+        this.setSpeedUi(this.resume || 1);
+        this.forkNext = false;
+      }
+      this.renderBanner();
+      this.renderHud();
+    }
+  }
+
+  /** Мир восстановлен из снимка: те же особи — по id, карточки прошлых событий не повторять. */
+  private afterRestore(rebuilt: boolean): void {
+    if (rebuilt) this.renderer.rebuild();
+    else this.renderer.onRestore();
+    const w = this.world;
+    if (this.selected) {
+      const id = this.selected.id;
+      const c = w.creatures.find((x) => x.id === id) ?? null;
+      if (!c) this.toast('Этой особи в этот момент нет');
+      this.selected = c;
+      this.family = new Set(c ? w.descendants(c.id).map((d) => d.id) : []);
+      if (!c) this.follow = false;
+    }
+    const fs = this.renderer.focusSpecies;
+    if (fs !== null && !w.species.all.has(fs)) this.renderer.focusSpecies = null;
+    this.lastEventTick = w.tick;
+    this.cyc.tick = -1;
+    this.renderHud();
+    this.renderPanel();
+    this.renderPlayer();
+    this.renderInspector();
+    this.renderBanner();
+    this.bar.draw();
+  }
+
+  private setBarOpen(on: boolean): void {
+    this.bar.setOpen(on);
+    $(this.root, '.s-stage').classList.toggle('tm-on', on);
+    if (on) this.queueFact('tm_frozen');
+    else {
+      this.closeMenu();
+      this.bar.hideTip();
+    }
+  }
+
+  /** Перетаскивание по шкале: ближайший снимок линии (или настоящее). */
+  private scrub(t: number): void {
+    const tl = this.tl, w = this.world;
+    if (tl.locked || tl.disabled) return;
+    const A = tl.active;
+    let best = null as ReturnType<typeof tl.nearestSnap>;
+    let d = Math.abs(A.headTick - t); // «настоящее»
+    for (const s of tl.lineageSnaps(A)) if (s.tick <= A.headTick && Math.abs(s.tick - t) < d) (d = Math.abs(s.tick - t)), (best = s);
+    if (!best) {
+      if (tl.visiting || tl.replaying) tl.toPresent(w);
+    } else if (!(tl.visiting && tl.visiting.snap === best && !tl.replaying)) tl.visit(w, best);
+    this.syncTime();
+  }
+
+  /** [ ] и ⏪ ⏩: на снимок назад или вперёд (за последним — настоящее). */
+  private stepSnap(dir: -1 | 1): void {
+    const tl = this.tl, w = this.world;
+    if (tl.disabled) return;
+    if (tl.locked) {
+      this.toast('🔒 Во время урока машина времени на паузе');
+      return;
+    }
+    const T = w.tick;
+    const L = tl.lineageSnaps(tl.active).filter((s) => s.tick <= tl.active.headTick);
+    if (dir < 0) {
+      const s = [...L].reverse().find((x) => x.tick < T);
+      if (s) tl.visit(w, s);
+    } else if (tl.visiting || tl.replaying) {
+      const s = L.find((x) => x.tick > T);
+      if (s && s.tick < tl.active.headTick) tl.visit(w, s);
+      else tl.toPresent(w);
+    }
+    this.syncTime();
+  }
+
+  /** Точно встать в такт t (или в ближайший снимок, если он дальше 600 тактов); then — когда дошли. */
+  private seek(t: number, stopBefore = Infinity, then?: () => void): void {
+    const tl = this.tl;
+    if (tl.locked || tl.disabled) return;
+    const exact = tl.seekExact(this.world, t, stopBefore, then && (() => then()));
+    if (!exact && tl.visiting) {
+      this.toast(`Ближе нет снимка — вы в дне ${Math.floor(this.world.tick / DAY)}`);
+      then?.();
+    }
+    this.syncTime();
+  }
+
+  private switchBranch(id: number): void {
+    const tl = this.tl;
+    if (tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    const b = tl.branch(id);
+    if (tl.switchTo(this.world, id)) this.toast(`↪ Ветка ${b.letter} · ${b.name}: день ${Math.floor(this.world.tick / DAY)}`);
+    this.syncTime();
+    this.renderPanel();
+  }
+
+  private branchToast(b: Branch): void {
+    this.toast(`🌿 Новая ветка ${b.letter}: ${b.name}`, [{ label: '⏳ Сравнить', run: () => this.openTab('time') }]);
+  }
+
+  /** Поступок в настоящем: тост с «↶ Отменить» на 10 с. */
+  private offerUndo(a: Action): void {
+    const ref = this.tl.lastUndoable();
+    if (ref < 0 || this.tl.disabled) return;
+    const text: Partial<Record<Action['k'], string>> = {
+      meteor: '☄️ Метеорит упал.', drought: '🔥 Началась засуха.', epidemic: '🦠 Эпидемия началась.',
+      spawn: a.k === 'spawn' ? `${a.icon} Группа «${a.label}» поселена.` : '', remove: '🚫 Вид убран.', rescue: '🧬 Вид спасён.',
+    };
+    this.toast(text[a.k] ?? actionText(a), [{ label: '↶ Отменить', run: () => this.undoUi(ref) }], 10000);
+  }
+
+  private undoUi(ref: number): void {
+    const tl = this.tl;
+    const a = ref < tl.actLen() ? tl.actAt(tl.active, ref) : null;
+    if (a && tl.undoLast(this.world, ref)) {
+      this.toast(`↶ Отменено: ${actionText(a)}`);
+      this.syncTime();
+      this.afterAction();
+      return;
+    }
+    this.syncTime();
+    if (a) this.toast('Отменить уже нельзя — но можно посмотреть, что было бы без этого', [{ label: '🌿 Что если бы этого не было?', run: () => this.forkWithoutUi(ref) }], 10000);
+  }
+
+  /** ✕ «Что если бы этого не было?»: точно за миг до действия — и новая ветка без него. */
+  private forkWithoutUi(ref: number): void {
+    const tl = this.tl;
+    if (tl.locked || tl.disabled) return;
+    const a = tl.actAt(tl.active, ref);
+    const ok = tl.forkWithout(this.world, ref, true, (b) => {
+      if (b) {
+        this.branchToast(b);
+        if (a.k === 'meteor') this.queueFact('tm_whatif', true);
+      }
+      this.syncTime();
+    });
+    if (!ok) this.toast('Перед этим действием нет снимка поблизости — точно вернуться туда нельзя');
+    else this.toast('⏳ Перематываю к мигу перед действием…');
+    this.syncTime();
+  }
+
+  /** 🧬 Спасти вид незадолго до его вымирания. */
+  private rescueUi(name: string, tEnd: number): void {
+    this.seek(Math.max(0, tEnd - 30), Infinity, () => {
+      const sp = [...this.world.species.all.values()].find((x) => x.name === name);
+      if (sp) this.branchAct({ k: 'rescue', sp: sp.id, n: 8 });
+    });
+  }
+
+  /** Вмешательство из меню «Что если…» — всегда новая ветка (в прошлом и в настоящем). */
+  private branchAct(a: ActionInput): void {
+    const tl = this.tl;
+    if (tl.locked) return this.toast('🔒 Во время урока новые ветки недоступны');
+    const b = tl.forkHere(this.world, { ...a, t: this.world.tick } as Action);
+    if (b) {
+      this.branchToast(b);
+      if (a.k === 'reseed' || a.k === 'nudge') this.queueFact('tm_butterfly');
+    }
+    this.afterAction();
+  }
+
+  // ---------------- меню «Что если…» ----------------
+
+  private openMenu(): void {
+    const tl = this.tl, w = this.world;
+    if (tl.locked) return this.toast('🔒 Во время урока машина времени на паузе');
+    if (tl.disabled || tl.replaying) return;
+    const el = $(this.root, '.tm-menu');
+    const d = Math.floor(w.tick / DAY);
+    const row = (k: string, icon: string, label: string, hint = '', extra = '') =>
+      `<button data-m="${k}" ${extra}><span class="ic">${icon}</span><span>${label}${hint ? `<em>${hint}</em>` : ''}</span></button>`;
+    // виды, которые в этой линии позже вымрут (в прошлом) или недавно вымерли (в настоящем)
+    const later = tl.lineageMarks(tl.active).filter((m) => m.kind === 'extinct' && m.t > w.tick);
+    const living = w.species.living();
+    const doomed = tl.visiting ? living.filter((sp) => later.some((m) => m.text.includes(`«${sp.name}»`))).slice(0, 6)
+      : [...w.species.all.values()].filter((sp) => sp.extinct !== null && sp.peak >= 10).sort((a, b) => (b.extinct ?? 0) - (a.extinct ?? 0)).slice(0, 6);
+    const undo: number[] = [];
+    for (let i = tl.actLen() - 1; i >= 0 && undo.length < 5; i--) {
+      const a = tl.actAt(tl.active, i);
+      if (UNDOABLE.has(a.k) && (!tl.visiting || a.t >= w.tick)) undo.push(i);
+    }
+    const mr = w.settings.mutationRate;
+    el.innerHTML = `<div class="row"><b>Что если… (день ${d})</b><button data-m="close" class="x">✕</button></div>
+      <div class="muted small">Каждое вмешательство пускает историю новой веткой — прошлое не перезапишется.</div>
+      ${row('reseed', '🎲', 'Бросить кости заново', 'всё то же, кроме случайности')}
+      ${row('nudge', '🦋', 'Взмах крыла бабочки', 'сдвинуть одну особь на миллионную долю пикселя')}
+      ${row('meteor', '☄️', 'Метеорит сюда', 'выберите место на карте')}
+      ${PRESETS.map((p, i) => row('spawn', p.icon, p.name, '8 особей — нажмите на карту', `data-p="${i}"`)).join('')}
+      ${doomed.length ? `<div class="tm-sub">🧬 ${tl.visiting ? 'Спасти вид (позже вымрет):' : 'Вернуть вымерший вид:'}</div>${doomed.map((sp) => row('rescue', '🧬', `Спасти «${sp.name}»`, '', `data-sp="${sp.id}"`)).join('')}` : ''}
+      <div class="tm-sub">🚫 Убрать вид <em>а если бы их не было?</em></div>
+      ${living.slice(0, 8).map((sp) => row('remove', '🚫', `«${sp.name}»`, `${sp.count}`, `data-sp="${sp.id}"`)).join('')}
+      ${row('mut2', '🧪', 'Мутации ×2', `сейчас ${Math.round(mr * 100)}% на ген`)}
+      ${row('mut05', '🧪', 'Мутации ×½')}
+      ${undo.length ? `<div class="tm-sub">✕ Отменить в новой ветке:</div>${undo.map((i) => {
+        const a = tl.actAt(tl.active, i);
+        return row('without', '✕', `Отменить: ${actionText(a)} дня ${Math.floor(a.t / DAY)}`, '', `data-ref="${i}"`);
+      }).join('')}` : ''}`;
+    el.hidden = false;
+    el.onclick = (e) => {
+      const b = (e.target as HTMLElement).closest('[data-m]') as HTMLElement | null;
+      if (!b) return;
+      const k = b.dataset.m;
+      this.closeMenu();
+      if (k === 'reseed') this.branchAct({ k: 'reseed', salt: mix32(Date.now()) });
+      else if (k === 'nudge') {
+        const c = this.selected?.alive ? this.selected : w.creatures[w.creatures.length >> 1];
+        if (c) this.branchAct({ k: 'nudge', id: c.id, dx: 1e-6 });
+      } else if (k === 'meteor' || k === 'spawn') {
+        // следующий клик по карте — вмешательство новой веткой
+        if (k === 'spawn') {
+          this.preset = Number(b.dataset.p);
+          this.root.querySelectorAll('.s-spawn [data-p]').forEach((x) => x.classList.toggle('active', Number((x as HTMLElement).dataset.p) === this.preset));
+        }
+        $<HTMLButtonElement>(this.root, `[data-tool=${k}]`).click();
+        this.forkNext = true;
+        this.toast(k === 'meteor' ? '☄️ Выберите место на карте — упадёт в новой ветке' : `${PRESETS[this.preset].icon} Нажмите на карту — поселим в новой ветке`);
+      } else if (k === 'rescue') this.branchAct({ k: 'rescue', sp: Number(b.dataset.sp), n: 8 });
+      else if (k === 'remove') this.branchAct({ k: 'remove', sp: Number(b.dataset.sp) });
+      else if (k === 'mut2' || k === 'mut05') this.branchAct({ k: 'settings', s: { ...w.settings, mutationRate: mr * (k === 'mut2' ? 2 : 0.5) } });
+      else if (k === 'without') this.forkWithoutUi(Number(b.dataset.ref));
+    };
+  }
+
+  private closeMenu(): void {
+    const el = this.root.querySelector<HTMLElement>('.tm-menu');
+    if (el) el.hidden = true;
+  }
+
+  // ---------------- баннер прошлого и тосты ----------------
+
+  private renderBanner(): void {
+    const tl = this.tl, w = this.world;
+    const el = $(this.root, '.s-visit');
+    const past = !!tl.visiting || tl.replaying;
+    if (!past) {
+      el.hidden = true;
+      this.bannerSig = '';
+      return;
+    }
+    const A = tl.active;
+    const dHead = Math.floor(A.headTick / DAY);
+    const d = Math.floor(w.tick / DAY);
+    let html: string;
+    if (tl.replaying) {
+      const until = tl.play!.until;
+      html = `<div class="v-text">⏳ перематываю… день ${d} → ${Math.floor(until / DAY)}</div><div class="v-btns"><button data-v="present">⏭ В настоящее (день ${dHead})</button></div>`;
+    } else {
+      const ex = A.exact;
+      html = `<div class="v-text">⏳ Вы в прошлом: год ${w.year}, ${w.season.name.toLowerCase()}, день ${d} · ветка ${A.letter}</div>
+        <div class="v-btns">
+          <button data-v="aswas" ${ex ? 'title="Та же история с тем же случаем — до настоящего"' : 'disabled title="Запись управления слишком длинная — можно только пустить новую ветку"'}>▶ Как было</button>
+          <button data-v="reseed" title="Всё то же, кроме случайности — новая ветка">🎲 Новый случай</button>
+          <button data-v="menu">🛠 Вмешаться…</button>
+          <button data-v="present">⏭ В настоящее (день ${dHead})</button>
+        </div>
+        <div class="v-hint">Любое вмешательство создаст новую ветку — прошлое не перезапишется</div>`;
+    }
+    el.hidden = false;
+    if (html === this.bannerSig) return;
+    this.bannerSig = html;
+    el.innerHTML = html;
+    el.onclick = (e) => {
+      const b = (e.target as HTMLElement).closest('[data-v]') as HTMLElement | null;
+      if (!b || (b as HTMLButtonElement).disabled) return;
+      const k = b.dataset.v;
+      if (k === 'aswas') this.setSpeed(this.resume || 1);
+      else if (k === 'reseed') this.branchAct({ k: 'reseed', salt: mix32(Date.now()) });
+      else if (k === 'menu') this.openMenu();
+      else if (k === 'present') {
+        tl.toPresent(this.world);
+        this.syncTime();
+      }
+    };
+  }
+
+  /** Короткое сообщение над шкалой; кнопки — действия (тост закрывается). */
+  toast(text: string, btns: { label: string; run: () => void }[] = [], ms = btns.length ? 8000 : 4000): void {
+    const el = this.root.querySelector<HTMLElement>('.s-toast');
+    if (!el) return;
+    el.innerHTML = `<span>${text.replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' })[c]!)}</span>${btns.map((b, i) => `<button data-i="${i}">${b.label}</button>`).join('')}<button class="x" data-i="x">✕</button>`;
+    el.hidden = false;
+    el.onclick = (e) => {
+      const b = (e.target as HTMLElement).closest('[data-i]') as HTMLElement | null;
+      if (!b) return;
+      el.hidden = true;
+      clearTimeout(this.toastTimer);
+      if (b.dataset.i !== 'x') btns[Number(b.dataset.i)].run();
+    };
+    clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => (el.hidden = true), ms);
   }
 
   // ---------------- для уроков и справочника 📚 ----------------

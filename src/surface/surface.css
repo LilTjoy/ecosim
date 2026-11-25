@@ -170,3 +170,123 @@
   .s-fact .btns button { padding: 6px 10px; font-size: 13px; }
   .p-descend { top: auto; bottom: 76px; }
 }
+
+/* ---- ⏪ Машина времени: шкала, баннер прошлого, меню «Что если…», тосты, вкладка «Ветки» ---- */
+.s-timeline {
+  position: absolute; left: 12px; right: 244px; bottom: 12px; height: 64px; z-index: 1;
+  background: rgba(10,12,16,0.82); backdrop-filter: blur(6px); border: 1px solid #2a2f37; border-radius: 10px;
+  display: flex; gap: 6px; padding: 4px 6px; box-sizing: border-box;
+}
+.s-timeline[hidden], .s-tlopen[hidden], .s-visit[hidden], .tm-menu[hidden], .s-toast[hidden], .tl-tip[hidden], .tl-more[hidden] { display: none; }
+.tl-btns { display: grid; grid-template-columns: repeat(2, 30px); grid-auto-rows: 25px; gap: 4px; flex: none; align-content: center; }
+.tl-btns button { padding: 0; font-size: 14px; display: grid; place-items: center; }
+.tl-btns .tl-narrow { display: none; }
+.tl-canvas { flex: 1; min-width: 0; height: 100%; cursor: ew-resize; touch-action: none; display: block; }
+.tl-hide { flex: none; align-self: flex-start; padding: 0 6px; height: 20px; font-size: 11px; line-height: 1; }
+.s-timeline.locked .tl-canvas { cursor: not-allowed; opacity: 0.55; }
+.tl-tip, .tl-more {
+  position: absolute; bottom: calc(100% + 6px); z-index: 4; background: rgba(16,19,24,0.97); border: 1px solid #39404a;
+  border-radius: 10px; padding: 8px 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.55); font-size: 12px; box-sizing: border-box;
+}
+.tl-line { color: #c4c9bb; line-height: 1.35; }
+.tl-line.major { color: #f1f2ea; }
+.tl-line span { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tl-tipbtns { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tl-tipbtns button { font-size: 11.5px; padding: 3px 8px; }
+.tl-more { left: 6px; display: flex; flex-direction: column; gap: 4px; }
+.tl-more button { text-align: left; font-size: 13px; }
+.s-tlopen { position: absolute; left: 12px; bottom: 12px; width: 42px; height: 42px; padding: 0; font-size: 18px; background: rgba(10,12,16,0.8); border: 1px solid #2a2f37; border-radius: 10px; z-index: 1; }
+.s-stage.tm-on .s-inspect, .s-stage.tm-on .s-player { bottom: 86px; max-height: calc(100% - 214px); }
+.s-stage.tm-on .s-fact { bottom: 86px !important; }
+.s-stage:not(.tm-on) .s-inspect, .s-stage:not(.tm-on) .s-player { left: 64px; }
+.s-visit {
+  position: absolute; left: 12px; right: 244px; bottom: 82px; z-index: 3; display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px;
+  background: rgba(24,22,14,0.93); border: 1px solid #6b5a22; border-radius: 10px; padding: 6px 10px; box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+}
+.s-stage:not(.tm-on) .s-visit { bottom: 12px; left: 64px; }
+.v-text { font-size: 13px; font-weight: 600; color: #f3dc8a; }
+.v-btns { display: flex; flex-wrap: wrap; gap: 4px; }
+.v-btns button { font-size: 12.5px; padding: 3px 9px; }
+.v-hint { flex-basis: 100%; font-size: 11px; color: var(--muted); }
+.s-stage.tm-on.tm-past .s-inspect, .s-stage.tm-on.tm-past .s-player { bottom: 166px; max-height: calc(100% - 294px); }
+.s-stage.tm-on.tm-past .s-fact { bottom: 166px !important; }
+.s-toast {
+  position: absolute; left: 50%; transform: translateX(-50%); bottom: 86px; z-index: 4; max-width: min(560px, calc(100% - 24px));
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 7px 10px; font-size: 13px;
+  background: rgba(20,24,30,0.96); border: 1px solid #4a5566; border-radius: 10px; box-shadow: 0 8px 28px rgba(0,0,0,0.55);
+}
+.s-stage:not(.tm-on) .s-toast { bottom: 64px; }
+.s-stage.tm-past .s-toast { bottom: 166px; }
+.s-toast span { flex: 1 1 200px; }
+.s-toast button { font-size: 12px; padding: 3px 9px; }
+.s-toast button.x { padding: 2px 7px; }
+.tm-menu {
+  position: absolute; left: 12px; bottom: 86px; width: 320px; max-height: calc(100% - 110px); overflow-y: auto; z-index: 4;
+  background: rgba(16,19,24,0.97); border: 1px solid #39404a; border-radius: 12px; padding: 10px; box-sizing: border-box;
+  display: flex; flex-direction: column; gap: 3px; box-shadow: 0 10px 40px rgba(0,0,0,0.6);
+}
+.s-stage.tm-past .tm-menu { bottom: 166px; max-height: calc(100% - 190px); }
+.tm-menu .row { display: flex; justify-content: space-between; align-items: center; }
+.tm-menu > button { display: grid; grid-template-columns: 22px 1fr; gap: 6px; text-align: left; font-size: 13px; padding: 5px 8px; align-items: start; }
+.tm-menu > button .ic { text-align: center; }
+.tm-menu em { display: block; font-style: normal; font-size: 11px; color: var(--muted); }
+.tm-sub { font-size: 12px; color: var(--muted); margin-top: 6px; }
+.tm-sub em { display: inline; }
+.s-hud .s-chip.past { color: #f3dc8a; border-color: #6b5a22; }
+.tm-tree { width: 100%; display: block; background: #121417; border-radius: 8px; cursor: pointer; }
+.tm-acts:empty { display: none; }
+.tm-acts { background: #15181c; border-radius: 8px; padding: 8px 10px; display: flex; flex-direction: column; gap: 4px; }
+.tm-acthead { display: flex; align-items: center; gap: 6px; }
+.tm-acthead b { flex: 1; }
+.tm-acthead input { flex: 1; min-width: 0; }
+.tm-actbtns { display: flex; flex-wrap: wrap; gap: 4px; }
+.tm-actbtns button { font-size: 12px; padding: 3px 9px; }
+.tm-actbtns button.danger { border-color: #a0463c; color: #ffb3a8; }
+.tm-cmp { display: flex; flex-direction: column; gap: 4px; }
+.tm-cmp h4 span { color: var(--muted); font-weight: 400; }
+.tm-cmp h4 { justify-content: flex-start; gap: 4px; flex-wrap: wrap; }
+.tm-cmp a { cursor: pointer; color: #9ecbff; }
+.tm-bc { font-size: 13px; }
+.tm-bc b { color: var(--accent); }
+.tm-c { width: 100%; height: 80px; display: block; background: #121417; border-radius: 8px; }
+.tm-c.sm { height: 54px; }
+.tm-guilds { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin-top: 4px; }
+.tm-lead { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 6px; }
+.tm-lead > div { background: #15181c; border-radius: 8px; padding: 6px 8px; font-size: 12px; }
+.tm-lead ol { margin: 4px 0 0; padding-left: 18px; }
+.tm-lead li { line-height: 1.4; }
+.tm-lead i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; margin-right: 4px; }
+.tm-new { font-style: normal; font-size: 10px; color: #c9e86b; border: 1px solid #56682a; border-radius: 6px; padding: 0 4px; }
+.tm-sum { margin: 4px 0 0; padding-left: 18px; font-size: 12.5px; line-height: 1.45; }
+.tm-empty { font-size: 13px; color: #c4c9bb; background: #15181c; border-radius: 8px; padding: 10px 12px; line-height: 1.45; }
+
+@media (max-width: 900px) {
+  .s-timeline, .s-visit { right: 156px; }
+}
+@media (max-width: 600px) {
+  .s-timeline { left: 8px; right: 8px; bottom: 8px; height: 52px; }
+  .tl-btns { grid-auto-flow: column; grid-template-columns: none; grid-auto-columns: 32px; grid-auto-rows: none; grid-template-rows: 40px; }
+  .tl-btns .tl-wide, .tl-hide { display: none; }
+  .tl-btns .tl-narrow { display: grid; }
+  .s-stage.tm-on .s-mini { bottom: 68px; width: 150px; height: 94px; }
+  .s-stage.tm-on .s-lenslegend { bottom: 170px; }
+  .s-stage.tm-on .s-fact { bottom: 68px !important; }
+  .s-stage.tm-on .s-inspect, .s-stage.tm-on .s-player { bottom: 68px; }
+  .s-visit { left: 8px; right: 8px; bottom: 66px; padding: 5px 8px; gap: 4px 6px; }
+  .s-stage:not(.tm-on) .s-visit { left: 58px; right: 8px; bottom: 8px; }
+  .v-text { font-size: 12px; }
+  .v-btns button { font-size: 12px; padding: 3px 7px; }
+  .v-hint { display: none; }
+  .s-stage.tm-on.tm-past .s-mini, .s-stage.tm-on.tm-past .s-lenslegend { display: none; }
+  .s-stage.tm-on.tm-past .s-inspect, .s-stage.tm-on.tm-past .s-player { bottom: 154px; max-height: calc(100% - 264px); }
+  .s-stage.tm-on.tm-past .s-fact { bottom: 154px !important; max-height: calc(100% - 214px); }
+  .s-toast { left: 8px; right: 8px; transform: none; max-width: none; bottom: 68px; }
+  .s-stage.tm-past .s-toast { bottom: 154px; }
+  .tm-menu { left: 8px; right: 8px; width: auto; bottom: 68px; max-height: 72%; }
+  .s-stage.tm-past .tm-menu { bottom: 154px; max-height: calc(100% - 174px); }
+}
+/* открыта научная карточка — тост уходит наверх, чтобы не закрыть её кнопки */
+.s-stage:has(.s-fact:not([hidden])) .s-toast { bottom: auto; top: 58px; }
+/* семь вкладок: переносятся во вторую строку, а не уезжают за край */
+.s-tabs { flex-wrap: wrap; row-gap: 2px; }
+.s-tabs button { flex: 1 1 auto; padding: 6px 5px; }

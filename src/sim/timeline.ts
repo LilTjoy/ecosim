@@ -145,6 +145,8 @@ export interface Branch {
   /** Запись полная: «Как было» повторит историю точно. */
   exact: boolean;
   bg: null | { job: number; target: number; tick: number };
+  /** Имена и цвета видов, которых ветка видела в рядах (для сравнения: у другой ветки свой реестр видов). */
+  names: Map<number, { name: string; hue: number }>;
   // служебное
   schedA: number;
   schedI: number;
@@ -281,13 +283,13 @@ interface Play {
   gi: number;
 }
 
-export type DropWhy = 'tier' | 'budget' | 'undo';
+export type DropWhy = 'tier' | 'budget' | 'undo' | 'delete';
 export interface TimelineStats {
   captures: number;
   captureMs: number[];
   guardChecks: number;
   desyncs: number;
-  dropped: { tier: number; budget: number; undo: number };
+  dropped: { tier: number; budget: number; undo: number; delete: number };
   lastReplay: null | 'same' | 'diverged';
 }
 
@@ -309,8 +311,14 @@ export class Timeline {
   autoRaise = false;
   snapEvery = TM.SNAP_EVERY;
   onToast: (text: string) => void = () => {};
+  /** «Как было» дошёл до настоящего: same — до бита то же. */
+  onReplayEnd: ((same: boolean) => void) | null = null;
+  /** Идёт урок: шкала заблокирована (в прошлое и на новые ветки нельзя), запись продолжается. */
+  locked = false;
+  /** Счётчик восстановлений мира из снимка (страница по нему обновляет выбор, панели и шкалу). */
+  restores = 0;
   onDrop: ((s: SnapMeta, why: DropWhy) => void) | null = null;
-  stats: TimelineStats = { captures: 0, captureMs: [], guardChecks: 0, desyncs: 0, dropped: { tier: 0, budget: 0, undo: 0 }, lastReplay: null };
+  stats: TimelineStats = { captures: 0, captureMs: [], guardChecks: 0, desyncs: 0, dropped: { tier: 0, budget: 0, undo: 0, delete: 0 }, lastReplay: null };
   private seq = 0;
   private bseq = 0;
   private base = { dx: 0, dy: 0, run: false, set: '', exp: '' };
@@ -318,6 +326,19 @@ export class Timeline {
 
   get replaying(): boolean {
     return this.play !== null;
+  }
+
+  /** Урок: заблокировать шкалу (из прошлого — сначала в настоящее). */
+  lock(w: World): void {
+    if (this.visiting || this.play) this.toPresent(w);
+    this.locked = true;
+  }
+  unlock(): void {
+    this.locked = false;
+  }
+  /** Что можно делать во время урока, если вдруг мы в прошлом (страница туда не пускает): только опыты урока. */
+  lessonAllowed(k: Action['k']): boolean {
+    return k === 'resource' || k === 'restoreRes' || k === 'experiment' || k === 'epidemic';
   }
 
   get maxBytes(): number {
@@ -504,7 +525,8 @@ export class Timeline {
 
   /** Встать в снимок прошлого (только для чтения, пока не вмешались). */
   visit(w: World, s: SnapMeta): void {
-    if (this.disabled) return;
+    if (this.disabled || this.locked) return;
+    this.restores++;
     if (!this.visiting && !this.play) this.captureHead(w);
     this.play = null;
     w.loadState(s.snap, this.lineageHistory(this.active, s.tick));
@@ -520,7 +542,7 @@ export class Timeline {
    */
   seekExact(w: World, tick: number, stopBefore = Infinity, then?: (w: World) => void): boolean {
     const s = this.nearestSnap(this.active, tick, stopBefore);
-    if (!s || this.disabled) return false;
+    if (!s || this.disabled || this.locked) return false;
     this.visit(w, s);
     if (tick - s.tick > TM.RESIM_MAX) return false; // слишком далеко от снимка: стоим в нём (then не зовём)
     this.startPlay(w, 'seek', tick, stopBefore, then);
@@ -530,7 +552,7 @@ export class Timeline {
   /** ▶ «Как было (те же кости)»: из прошлого — по записи до настоящего ветки, без новой ветки. */
   asWas(w: World): boolean {
     const h = this.active.head;
-    if (!this.visiting || !h || !this.active.exact || this.disabled) return false;
+    if (!this.visiting || !h || !this.active.exact || this.disabled || this.locked) return false;
     this.startPlay(w, 'asWas', h.tick, h.snap.actN);
     return true;
   }
@@ -540,6 +562,7 @@ export class Timeline {
     const h = this.active.head;
     if ((!this.visiting && !this.play) || !h) return;
     this.play = null;
+    this.restores++;
     w.loadState(h.snap, this.lineageHistory(this.active, h.tick));
     this.visiting = null;
     this.releaseHead(this.active);
@@ -594,7 +617,7 @@ export class Timeline {
    */
   forkWithout(w: World, ref: number, withActions = true, then?: (b: Branch | null) => void): boolean {
     const A = this.active;
-    if (this.disabled || ref < 0 || ref >= this.actLen(A)) return false;
+    if (this.disabled || this.locked || ref < 0 || ref >= this.actLen(A)) return false;
     const a = this.actAt(A, ref);
     const sched: Action[] = [];
     for (let i = ref + 1; i < this.actLen(A); i++) {
@@ -630,8 +653,9 @@ export class Timeline {
       this.toPresent(w);
       return true;
     }
-    if (!t.head || this.disabled) return false;
+    if (!t.head || this.disabled || this.locked) return false;
     this.play = null;
+    this.restores++;
     if (!this.visiting) this.captureHead(w);
     const h = t.head;
     w.loadState(h.snap, this.lineageHistory(t, h.tick));
@@ -650,7 +674,7 @@ export class Timeline {
    */
   undoLast(w: World, ref = this.lastUndoable()): boolean {
     const b = this.active;
-    if (this.visiting || this.play || this.disabled || ref < this.aOff(b) || ref >= this.actLen(b)) return false;
+    if (this.visiting || this.play || this.disabled || this.locked || ref < this.aOff(b) || ref >= this.actLen(b)) return false;
     const a = this.actAt(b, ref), tm = a.t;
     if (w.tick - tm > TM.UNDO_WINDOW) return false;
     if (this.branches.some((x) => x.parent === b.id && (x.forkTick > tm || (x.forkTick === tm && x.parentActN > ref)))) return false;
@@ -712,6 +736,29 @@ export class Timeline {
     return seen.size;
   }
 
+  /** Удалить ветку: только лист и не активную. */
+  deleteBranch(id: number): boolean {
+    const b = this.branches.find((x) => x.id === id);
+    if (!b || b === this.active || b.parent === null || this.branches.some((x) => x.parent === id)) return false;
+    for (const x of this.branches) for (const s of x.snaps) s.forks.delete(id);
+    for (const s of b.snaps) this.drop(s, 'delete');
+    this.releaseHead(b);
+    this.branches = this.branches.filter((x) => x !== b);
+    this.thin();
+    return true;
+  }
+
+  /** Имя вида по id так, как его видела ветка (общие виды — у предков). */
+  spName(b: Branch, id: number): { name: string; hue: number } | null {
+    for (let x: Branch | null = b; x; ) {
+      const n = x.names.get(id);
+      if (n) return n;
+      if (x.parent === null || id >= x.nxFork) return null;
+      x = this.parentOf(x);
+    }
+    return null;
+  }
+
   /** Прореживание: ярусы по возрасту, архив графиков, затем бюджет памяти (§3.6). */
   thin(): void {
     const A = this.active;
@@ -752,15 +799,15 @@ export class Timeline {
   // ---------------- внутреннее ----------------
 
   private newBranch(parent: number | null, forkTick: number, parentActN: number, parentInN: number, nxFork: number, intervention: Action | null): Branch {
-    const k = this.branches.length;
     const id = this.bseq++;
+    const k = id; // буква и цвет — по номеру ветки: после удаления ветки буквы не повторяются
     const b: Branch = {
       id, letter: BRANCH_LETTERS[k % BRANCH_LETTERS.length] + (k >= BRANCH_LETTERS.length ? String(Math.floor(k / BRANCH_LETTERS.length) + 1) : ''),
       name: '', color: BRANCH_COLORS[k % BRANCH_COLORS.length], icon: '🌿',
       parent, forkTick, forkSnap: null, parentActN, parentInN, nxFork, intervention,
       actions: [], input: new InputLog(), scheduled: null, scheduledIn: null,
       rows: [], marks: [], samples: [], snaps: [], head: null, headTick: forkTick,
-      exact: parent === null ? true : this.active.exact, bg: null,
+      exact: parent === null ? true : this.active.exact, bg: null, names: new Map(),
       schedA: 0, schedI: 0, gPrev: [0, 0, 0, 0], gMark: [-1e9, -1e9, -1e9, -1e9], gGone: [false, false, false, false], sampleBytes: 0, sThin: 0, rThin: 0,
     };
     this.branches.push(b);
@@ -843,6 +890,10 @@ export class Timeline {
     if (T % TM.ROW_EVERY === 0) {
       const row = rowOf(w);
       b.rows.push(row);
+      for (const id of row.ids) if (!b.names.has(id)) {
+        const sp = w.species.all.get(id);
+        if (sp) b.names.set(id, { name: sp.name, hue: sp.hue });
+      }
       this.guildMarks(b, row);
     }
     const n = trailing(w.events, T);
@@ -1073,6 +1124,7 @@ export class Timeline {
     this.stats.lastReplay = 'diverged';
     this.onToast('⚠️ История разошлась с записью (другая версия игры или браузер)');
     this.play = null;
+    this.restores++;
     w.loadState(s.snap, this.lineageHistory(this.active, s.tick));
     this.visiting = { tick: s.tick, snap: s };
     this.cur = [s.snap.actN, s.snap.inN];
@@ -1085,6 +1137,7 @@ export class Timeline {
     this.replayActs(w, p.stopBefore);
     if (this.play !== p) return;
     this.play = null;
+    this.restores++;
     if (p.kind === 'asWas') {
       const h = this.active.head!;
       const same = this.digestNow(w) === h.snap.digest;
@@ -1097,6 +1150,7 @@ export class Timeline {
       this.visiting = null;
       this.releaseHead(this.active);
       this.resetBase(w);
+      this.onReplayEnd?.(same);
     } else {
       this.visiting = { tick: w.tick, snap: null };
       this.resetBase(w);

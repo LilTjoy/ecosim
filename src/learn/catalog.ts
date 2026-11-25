@@ -27,7 +27,7 @@ export const ISLAND_KEYS = ['rivers', 'soils', 'permafrost', 'succession'];
 
 export const FIELD_ORDER: Field[] = ['Астрономия', 'Физика', 'Химия', 'Геология', 'Климат', 'Биология', 'Вероятность'];
 
-export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro';
+export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro' | 'time';
 
 export type SimLink =
   | { view: 'planet'; params?: Partial<PlanetParams>; event?: string; match?: string; t?: number; label?: string }
@@ -62,6 +62,7 @@ function surfaceLink(key: string, source: CardSource): SimLink | undefined {
   if (key === 'cycle') return { view: 'eco', tab: 'charts' };
   if (GENES.includes(key)) return { view: 'eco', tab: 'charts', gene: key as GeneKey };
   if (key === 'browse') return { view: 'eco', tab: 'web' };
+  if (key.startsWith('tm_')) return { view: 'eco', tab: 'time', label: '▶ Открыть «⏳ Ветки»' };
   if (key === 'oxygen') return { view: 'eco', env: { o2: 0.08 }, envName: 'Мир с O₂ 8%', label: '▶ Новый мир: O₂ 8%' };
   return { view: 'eco' };
 }

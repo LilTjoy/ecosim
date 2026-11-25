@@ -156,6 +156,13 @@ export class SurfaceRenderer {
     this.updateOverlay();
   }
 
+  /** Мир восстановлен из снимка (тот же рельеф): частицы и следы прошлого момента — прочь, слой травы/почвы — заново. */
+  onRestore(): void {
+    this.particles = [];
+    this.wakes = [];
+    this.updateOverlay();
+  }
+
   /** Перерисовать рельеф (новый мир). */
   rebuild(): void {
     const t = this.world.terrain;

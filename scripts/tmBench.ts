@@ -5,7 +5,7 @@ import { World, type BrainMode } from '../src/sim/world';
 import { SNAP_CELLS, SNAP_DEV, uncoveredKeys, type WorldSnap } from '../src/sim/snapshot';
 import { mulberry32 } from '../src/lib/random';
 import { cpus, loadavg } from 'node:os';
-import { load, thin } from './tmTimeline';
+import { cmp, load, thin } from './tmTimeline';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
 
@@ -65,7 +65,8 @@ export function runTm(kind: string, ctx: Ctx): void {
   if (kind === 'fly') return fly(ctx);
   if (kind === 'load') return load(ctx);
   if (kind === 'thin') return thin(ctx);
-  throw new Error(`--tm=${kind}: есть det, fly, load и thin`);
+  if (kind === 'cmp') return cmp(ctx);
+  throw new Error(`--tm=${kind}: есть det, fly, load, thin и cmp`);
 }
 
 // ---------------- det ----------------

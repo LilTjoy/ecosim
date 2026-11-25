@@ -240,6 +240,8 @@ export class LessonEngine {
     lp.step = s;
     load().last = id;
     save();
+    // опыт на «Поверхности»: машина времени на замке (в прошлое и на ветки нельзя), запись идёт дальше
+    if (L.steps.some((x) => x.view === 'eco')) this.base.surface.lockTime(true);
     this.enter(s);
     document.body.classList.add('lesson-on');
     this.el.hidden = false;
@@ -297,6 +299,7 @@ export class LessonEngine {
     this.base.planet.focusFacts = null;
     // опыт на «Поверхности» шёл на 12× — дальше мир идёт своим ходом (кнопка «🌍 Обычная Земля» вернёт обычный мир)
     if (L.steps.some((s) => s.view === 'eco')) this.base.surface.endLesson();
+    this.base.surface.lockTime(false);
     abortTwin();
     this.lesson = null;
   }

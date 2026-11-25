@@ -6,6 +6,7 @@ import { World, type BrainMode } from '../src/sim/world';
 import type { WorldSnap } from '../src/sim/snapshot';
 import { Timeline, TM, TIERS, keepAuto, type Action, type ActionInput, type SnapMeta } from '../src/sim/timeline';
 import { mulberry32 } from '../src/lib/random';
+import { comparePair } from '../src/sim/tmCompare';
 import { cpus, loadavg } from 'node:os';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
@@ -325,5 +326,44 @@ export function thin({ flags }: Ctx): void {
   console.log(`tm=thin ticks=${end}${small ? ' small' : ''} actions=${main.actions.length} branches=${tl.branches.length}`);
   console.log(`TM thin: ${ok ? 'ok' : 'FAIL'} tierDrops=${tierDrops.length} neededAgain=${needed} budgetDrops=${budget} maxSnaps=${maxN} final=${tl.snapCount()} ${JSON.stringify(kinds)} maxBytes=${MB(maxB)}MB (lim ${MB(lim)}) samples=${main.samples.length} archive max ${sampMB.toFixed(1)}MB root=${+root} full@${fullAt}`);
   console.log(` autos kept: ${autos.join(' ')}`);
+  if (!ok) process.exitCode = 1;
+}
+
+// ---------------- cmp (этап 5: сравнение веток) ----------------
+
+/**
+ * Ветка без вмешательства из прошлого — тот же мир (Брей — Кёртис 0%, «История повторилась в точности»);
+ * ветка «новый случай» — другой; общий предок и nxShared; удаление листа.
+ */
+export function cmp({ T, mk }: Ctx): void {
+  const w = mk();
+  const tl = new Timeline();
+  tl.trap = true;
+  tl.reset(w);
+  const half = Math.round(T / 2 / TM.SNAP_EVERY) * TM.SNAP_EVERY;
+  while (w.tick < T) tl.step(w);
+  const A = tl.active;
+  const snap = tl.lineageSnaps(A).find((s) => s.tick === half)!;
+  // Б: из прошлого без вмешательства — история та же
+  tl.visit(w, snap);
+  const B = tl.forkHere(w, null)!;
+  while (w.tick < T) tl.step(w);
+  const pAB = comparePair(tl, A, B)!;
+  // В: из того же снимка — бросить кости заново
+  tl.switchTo(w, A.id);
+  tl.visit(w, snap);
+  const C = tl.forkHere(w, { k: 'reseed', salt: 12345, t: w.tick })!;
+  while (w.tick < T) tl.step(w);
+  const pAC = comparePair(tl, A, C)!;
+  const pBC = comparePair(tl, B, C)!;
+  const exact = pAB.pct === 0 && pAB.bullets.some((b) => b.fact === 'tm_seed') && pAB.td === half && pAB.tc === T;
+  const differ = pAC.td === half && pAC.nx === C.nxFork && pAC.pct > 0 && !pAC.bullets.some((b) => b.fact === 'tm_seed');
+  const sib = pBC.td === half && pBC.pct === pAC.pct;
+  const names = pAC.leaders.every((L) => L.every((x) => !x.name.startsWith('вид #')));
+  const del = !tl.deleteBranch(A.id) && !tl.deleteBranch(C.id) && tl.deleteBranch(B.id) && tl.branches.length === 2 && !tl.lineageSnaps(A).some((s) => s.forks.has(B.id));
+  const ok = exact && differ && sib && names && del;
+  console.log(`TM cmp: ${ok ? 'ok' : 'FAIL'} same=${+exact} (pct ${pAB.pct}, ${pAB.bullets.length} bullets) reseed=${+differ} (pct ${pAC.pct}% at day ${Math.floor(pAC.tc / 150)}, td ${pAC.td}) siblings=${+sib} names=${+names} delete=${+del}`);
+  for (const b of pAC.bullets) console.log(`  · ${b.text}`);
+  console.log(`  лидеры А: ${pAC.leaders[0].map((x) => `${x.name} ${x.n}${x.fresh ? ' (новый)' : ''}`).join(', ')} | В: ${pAC.leaders[1].map((x) => `${x.name} ${x.n}${x.fresh ? ' (новый)' : ''}`).join(', ')}`);
   if (!ok) process.exitCode = 1;
 }
