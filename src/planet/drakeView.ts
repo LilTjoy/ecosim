@@ -1,4 +1,5 @@
 import { mulberry32 } from '../lib/random';
+import { plural } from '../lib/text';
 import { PRESETS } from './model';
 import type { McStats } from './stats';
 
@@ -220,11 +221,3 @@ export class DrakeView {
   }
 }
 
-function plural(n: number, one: string, few: string, many: string): string {
-  const k = Math.floor(n) % 100;
-  const k1 = k % 10;
-  if (k > 10 && k < 20) return many;
-  if (k1 === 1) return one;
-  if (k1 >= 2 && k1 <= 4) return few;
-  return many;
-}

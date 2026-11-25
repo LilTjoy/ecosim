@@ -20,8 +20,10 @@ for (let k = 0; k < 128; k++) {
  * UN = 0.15 (а не 0.25): иначе под стадами луга истощаются так, что четверть суши упирается в границы множителя.
  * SG = 0: опад от старения — это отмирающие корни (питание из почвы), надземный корм не убывает;
  * со SG = 1 стада гигантов заметно уступали мелким травоядным (стенд, 32 прогона).
+ * DUNG = 0.95: навоз возвращает почти всё, что растение взяло из почвы (5% остаётся в теле → в тушу);
+ * листва деревьев навоза не даёт (её рост почву не тратит), ягоды — полдоли, как и берут. Навоз ≤ усвоения.
  */
-export const SOIL = { KD: 4.6e-4, KR: 1 / 6000, KL: 2e-5, UN: 0.15, KS: 2e-4, CN: 9e-4, DUNG: 0.8, SMAX: 2.5, LMAX: 6, TAU: 3000, SG: 0 };
+export const SOIL = { KD: 4.6e-4, KR: 1 / 6000, KL: 2e-5, UN: 0.15, KS: 2e-4, CN: 9e-4, DUNG: 0.95, SMAX: 2.5, LMAX: 6, TAU: 3000, SG: 0 };
 /** Границы множителя роста от плодородия (суша, вода; суженные — запасная ручка №1) и множителя скорости разложения туш. */
 export const NUT_CLAMP: { land: [number, number]; water: [number, number]; corpse: [number, number] } = { land: [0.75, 1.2], water: [0.7, 1.25], corpse: [0.5, 1.8] };
 
@@ -913,14 +915,6 @@ export class World {
         c.energy -= DIS.FEVER * c.vir * c.g.size * Math.sqrt(c.g.size) * 0.5;
         const w2 = (c.vir * c.vir) / (this.meanV2.get(c.sp) ?? 0.25);
         risk = (this.sickRisk.get(c.sp) ?? 0) * (w2 < 0.25 ? 0.25 : w2 > 3 ? 3 : w2);
-        if (--c.sick === 0) {
-          c.immune = DIS.IMM + ((Math.random() * DIS.IMM_VAR) | 0);
-          const P = this.pathogens.get(c.sp);
-          if (P) {
-            P.recovered++;
-            P.outW++;
-          }
-        }
       } else {
         risk = this.healthyRisk.get(c.sp) ?? 0; // == crowding(), пока в виде никто не болеет
         if (c.immune > 0) c.immune--;
@@ -932,6 +926,15 @@ export class World {
       else if (risk && Math.random() < risk) this.die(c, 'болезнь');
       else if (c.age > this.lifespan(c.g)) this.die(c, 'старость');
       else if (this.terrain.biome[idx2] === B.Deep && c.g.swim < 0.5) this.die(c, 'утонул');
+      // выздоровление — только если пережил этот такт (иначе die() уже записал исход)
+      if (wasSick && c.alive && --c.sick === 0) {
+        c.immune = DIS.IMM + ((Math.random() * DIS.IMM_VAR) | 0);
+        const P = this.pathogens.get(c.sp);
+        if (P) {
+          P.recovered++;
+          P.outW++;
+        }
+      }
     }
 
     this.creatures = this.creatures.filter((c) => c.alive);
@@ -1393,7 +1396,7 @@ export class World {
       this.browse[idx] -= bite;
       c.energy += bite * 26 * Math.pow(c.g.size / 4, 0.3);
       this.bump(c.sp, -3, bite * 0.2);
-      if (this.settings.soil) this.eatDung(c, bite * 0.5);
+      // листва (деревья) растёт без счёта почвы — значит, и навоза из неё нет: иначе питание из ничего
     }
     // ягоды и насекомые: ценная пища для всеядных
     const fe = this.forageEff(c);
@@ -1402,7 +1405,7 @@ export class World {
       this.forage[idx] -= bite;
       c.energy += bite * 28 * fe;
       this.bump(c.sp, -2, bite * 0.2);
-      if (this.settings.soil) this.eatDung(c, bite);
+      if (this.settings.soil) this.eatDung(c, bite * 0.5); // ягоды взяли из почвы полдоли травы — столько и вернётся
     }
     if (c.g.diet < 0.3) return;
     // цена универсальности: всеядный переваривает мясо хуже настоящего хищника
@@ -1514,13 +1517,14 @@ export class World {
   }
 
   /** Вспышка закончилась: в архив, виду — передышка. */
-  private endPathogen(P: Pathogen): void {
+  private endPathogen(P: Pathogen, silent = false): void {
     P.ended = this.tick;
     const sp = this.species.all.get(P.host);
     if (sp) sp.lastOutbreak = this.tick;
     this.pathogens.delete(P.host);
     this.outbreaks.push(P);
     if (this.outbreaks.length > 30) this.outbreaks.shift();
+    if (silent) return;
     if (P.announced) this.log(`✔ «${P.name}» отступила: переболели ${P.recovered}, погибли ${P.deaths}`, 'disease');
     else if (!this.fizzleLogged && sp) {
       this.fizzleLogged = true;
@@ -1643,10 +1647,21 @@ export class World {
       // новая болезнь: заражаем долю вида злым штаммом — дальше волна идёт сама
       const hosts = this.creatures.filter((c) => c.alive && c.sp === top.id);
       if (!hosts.length) return;
+      // против нового штамма иммунитета нет ни у кого
+      let oldSick = 0;
+      for (const c of hosts) {
+        c.immune = 0;
+        if (c.sick > 0) oldSick++;
+      }
+      // прежняя вспышка вида — молча в архив; её больные дальше считаются за новую болезнь
       const old = this.pathogens.get(top.id);
-      if (old) this.endPathogen(old);
+      if (old) {
+        old.cases -= oldSick;
+        this.endPathogen(old, true);
+      }
       const first = hosts[Math.floor(Math.random() * hosts.length)];
       const P = this.newPathogen(top.id, first.x, first.y, DIS.TOOL_VIR);
+      P.cases = oldSick;
       const k = Math.min(hosts.length, Math.max(5, Math.round(DIS.TOOL_SHARE * hosts.length)));
       for (let i = 0; i < k; i++) {
         // частичная перетасовка Фишера — Йетса: k разных особей
@@ -1654,8 +1669,7 @@ export class World {
         const c = hosts[j];
         hosts[j] = hosts[i];
         hosts[i] = c;
-        c.immune = 0; // против нового штамма иммунитета нет
-        this.infect(c, DIS.TOOL_VIR);
+        if (c.sick === 0) this.infect(c, DIS.TOOL_VIR);
       }
       this.boost.set(top.id, this.tick + DIS.BOOST_T);
       this.announcePathogen(P, false); // запись в летопись — ниже, своя
@@ -1811,6 +1825,7 @@ export class World {
         if (ns > 0) {
           let sr = Math.min(DIS.RISK_CAP, want / ns);
           if ((this.boost.get(sp.id) ?? 0) > this.tick) sr = Math.max(sr, DIS.BOOST_RISK); // только инструмент «эпидемия»
+          else this.boost.delete(sp.id);
           this.sickRisk.set(sp.id, sr);
           this.meanV2.set(sp.id, sickV2.get(sp.id)! / ns);
           const rest = n > ns ? Math.max(0, want - sr * ns) / (n - ns) : 0;
@@ -1818,6 +1833,8 @@ export class World {
           else this.healthyRisk.delete(sp.id);
         } else {
           this.sickRisk.delete(sp.id);
+          this.meanV2.delete(sp.id);
+          if ((this.boost.get(sp.id) ?? Infinity) <= this.tick) this.boost.delete(sp.id);
           if (risk > 0) this.healthyRisk.set(sp.id, risk);
           else this.healthyRisk.delete(sp.id);
         }
@@ -1838,6 +1855,11 @@ export class World {
       if (s) for (const k of GENE_KEYS) sp.mean[k] = s[k] / n;
       if (n === 0 && this.tick - sp.born > 40) {
         sp.extinct = this.tick;
+        this.meanV2.delete(sp.id);
+        this.boost.delete(sp.id);
+        this.sickRisk.delete(sp.id);
+        this.healthyRisk.delete(sp.id);
+        this.crowdRisk.delete(sp.id);
         if (sp.peak >= 10) this.log(`💀 Вид «${sp.name}» вымер (на пике было ${sp.peak})`, 'extinct');
       }
     }
@@ -1853,10 +1875,10 @@ export class World {
     for (const id of sums.keys()) means.set(id, { ...this.species.all.get(id)!.mean });
     let grass = 0;
     for (let i = 0; i < this.grass.length; i++) grass += this.grass[i];
-    // почва — по каждой 4-й клетке
+    // почва — по каждой 4-й клетке, сдвиг выборки меняется от записи к записи
     const S = this.soil, W = this.isWater, t = this.terrain;
     let sl = 0, ll = 0, ml = 0, fl = 0, nl = 0, my = 0, nm = 0, pl = 0, nw = 0;
-    for (let i = this.tick & 3; i < S.length; i += 4) {
+    for (let i = (this.tick / 20) & 3; i < S.length; i += 4) {
       if (W[i] === 1) {
         pl += (this.grass[i] / BIOMES[t.biome[i]].fert) * this.nut[i];
         nw++;

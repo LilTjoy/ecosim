@@ -38,6 +38,10 @@ if (typeof sp0 === 'function') W.soilPass = function (this: any) { const t = per
 let gN = 0, gW = 0, gNw = 0, gWw = 0, clSum = 0, clN = 0;
 const nr0 = W.updateNutRef;
 if (typeof nr0 === 'function') W.updateNutRef = function (this: any) { const a = this.nutAcc; gN += a.nl; gW += a.wl; gNw += a.nw; gWw += a.ww; nr0.call(this); };
+// баланс питания почвы: навоз (dungIn) против усвоения растениями (uptake) — суммы за весь прогон
+let dungS = 0, uptS = 0, carrS = 0;
+const rec0 = W.record;
+if (typeof rec0 === 'function') W.record = function (this: any) { if (this.flux) { dungS += this.flux.dungIn; uptS += this.flux.uptake; carrS += this.flux.carrionIn; } rec0.call(this); };
 const [clo, chi] = ((WM as any).NUT_CLAMP?.land ?? [0.6, 1.3]) as number[];
 // доля суши у границ множителя; и доля, у которой «сырой» множитель вышел бы за исходные 0.6/1.3 (§11.3 G4)
 let rawSum = 0;
@@ -130,6 +134,7 @@ for (let t = 1; t <= T; t++) {
       if (W.myc) for (let i = 0; i < nu.length; i++) if (t1.biome[i] === 5 || t1.biome[i] === 6) { my += W.myc[i]; nm++; }
       extra += ` | nutRef=${f2(W.nutRef?.land)}/${f2(W.nutRef?.water)} nutG=${f2(gW ? gN / gW : undefined, 3)}/${f2(gWw ? gNw / gWw : undefined, 3)} clAvg%=${f2(clN ? 100 * clSum / clN : undefined, 1)} raw%=${f2(clN ? 100 * rawSum / clN : undefined, 1)} nutW=${f2(ws ? wn / ws : undefined, 3)} clamp%=${f2(100 * clampN / Math.max(1, nl), 1)} S=${f2(sS / nl)} L=${f2(sL / nl)} mic=${f2(sM / nl)} fix=${f2(sF / nl)} myc=${f2(nm ? my / nm : undefined)} plank=${f2(pl / Math.max(1, nw))}`;
       if (W.micro?.corpsesRecycled !== undefined) extra += ` recyc=${W.micro.corpsesRecycled} bones=${W.boneMarks?.length ?? '-'}`;
+      if (uptS > 0) extra += ` dung/upt=${f2(dungS / uptS, 3)} carr/upt=${f2(carrS / uptS, 3)}`;
     }
     // болезни (если уже есть)
     let disD = 0;

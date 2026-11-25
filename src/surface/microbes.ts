@@ -1,4 +1,5 @@
 // Микромир для интерфейса: «невидимые жители» острова — карточки во вкладке «Микромир».
+import { plural } from '../lib/text';
 import { B } from '../sim/terrain';
 import type { World } from '../sim/world';
 import type { Lens } from './renderer';
@@ -44,7 +45,7 @@ export const MICROBE_GUILDS: Guild[] = [
   {
     icon: '🫘', name: 'Азотфиксаторы', who: 'клубеньковые бактерии, цианобактерии', role: 'берут азот из воздуха, первыми заселяют голую землю',
     lens: 'fert', fact: 'nitrogen',
-    metric: (w) => `покрывают ${pct(last(w)?.fix ?? 0)} суши`,
+    metric: (w) => `активность азотфиксаторов на суше ${pct(last(w)?.fix ?? 0)}`,
   },
   {
     icon: '🕸', name: 'Микориза', who: 'грибница', role: 'кормит деревья в обмен на сахар',
@@ -70,7 +71,7 @@ export const MICROBE_GUILDS: Guild[] = [
     lens: 'microbes', fact: 'methane',
     metric: (w) => {
       const n = swamps(w);
-      return n ? `болот: ${n} клеток` : 'болот на острове нет — только в желудках';
+      return n ? `болот: ${n} ${plural(n, 'клетка', 'клетки', 'клеток')}` : 'болот на острове нет — только в желудках';
     },
   },
   {

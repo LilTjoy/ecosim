@@ -1,4 +1,5 @@
 import { clamp } from '../lib/random';
+import { plural } from '../lib/text';
 import { FIELD_ICON, type Fact } from '../planet/facts';
 import { GENE_INFO, GENE_KEYS, type GeneKey, type Genome } from '../sim/genome';
 import type { Pathogen } from '../sim/microbes';
@@ -55,10 +56,26 @@ const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; cap
     caption: 'Фитопланктон. Цветёт там, куда реки несут питательные вещества',
     grad: 'linear-gradient(90deg,#0b1f4d,#1b8fbf 55%,#7fe07a)', lo: 'пусто', hi: 'цветёт',
   },
-  disease: { title: '☣️ Болезни', fact: 'sir', caption: '<b class="red">●</b> болеют · <b class="blue">●</b> переболели · остальные здоровы' },
+  disease: { title: '☣️ Болезни', fact: 'sir', caption: '<b class="red">●</b> болеют · <b class="blue">●</b> защищены (переболели или иммунитет от матери) · остальные здоровы' },
 };
 
 const pct = (v: number) => `${Math.round(v * 100)}%`;
+/**
+ * Условная температура мира → °C, по порогам отрисовки и биомов: морской лёд (0.04) ≈ −3 °C, снег (0.1) ≈ 0 °C,
+ * граница тундры (0.2) ≈ +5 °C, пустыни (0.66) ≈ +25 °C.
+ */
+const TEMP_C = [[-0.2, -35], [0.04, -3], [0.1, 0], [0.2, 5], [0.5, 15], [0.66, 25], [1, 42]];
+const tempC = (t: number) => {
+  if (t <= TEMP_C[0][0]) return TEMP_C[0][1];
+  for (let k = 1; k < TEMP_C.length; k++) {
+    const [t1, c1] = TEMP_C[k];
+    if (t <= t1) {
+      const [t0, c0] = TEMP_C[k - 1];
+      return Math.round(c0 + ((t - t0) / (t1 - t0)) * (c1 - c0));
+    }
+  }
+  return TEMP_C[TEMP_C.length - 1][1];
+};
 /** Сколько больных у болезни сейчас. */
 const nowSick = (P: Pathogen) => (P.ended === null ? P.curve[P.curve.length - 1] ?? 0 : 0);
 
@@ -179,6 +196,7 @@ export class SurfaceView {
   /** Карточки ждут своей очереди, пока открыта предыдущая. */
   private factQueue: string[] = [];
   private factNow: string | null = null;
+  private factTimer: ReturnType<typeof setTimeout> | undefined;
   /** Какая болезнь на графике «Эпидемии». */
   private epiSel: number | null = null;
   /** Схема круговорота: текущие потоки, их «обычный» уровень и фазы бегущих точек. */
@@ -203,7 +221,7 @@ export class SurfaceView {
     $(this.root, '.s-back').hidden = !this.onBack || env === EARTH_ENV;
     if (env.o2 > 0.25 || env.o2 < 0.17 || env.gravity > 1.2 || env.gravity < 0.8) this.queueFact('oxygen');
     if (!env.landLife) this.queueFact('stromatolites');
-    if (env.o2 < 0.15) this.queueFact('o2decay');
+    if (env.o2 < 0.1) this.queueFact('o2decay'); // как в мире: гниение медленнее только ниже 10%
   }
 
   private afterReset(): void {
@@ -215,6 +233,11 @@ export class SurfaceView {
     this.family.clear();
     this.renderer.focusSpecies = null;
     this.lastEventTick = 0;
+    // карточки прошлого мира здесь ни к чему
+    this.factQueue = [];
+    this.factNow = null;
+    clearTimeout(this.factTimer);
+    $(this.root, '.s-fact').hidden = true;
     this.closeModal();
     this.resize();
     this.cam.fit(this.canvas.clientWidth, this.canvas.clientHeight);
@@ -265,7 +288,8 @@ export class SurfaceView {
       const P = top ? this.world.pathogens.get(top.id) : undefined;
       if (P) this.epiSel = P.id;
       this.setLens('disease');
-      this.queueFact('rinderpest', true);
+      // без болезней (SIR) инструмент просто выкашивает вид — тогда и карточка другая
+      this.queueFact(this.world.settings.disease ? 'rinderpest' : 'disease', true);
       this.openTab('micro');
     };
     $(r, '[data-act=lens]').onclick = () => this.cycleLens();
@@ -376,8 +400,10 @@ export class SurfaceView {
     $(r, '.s-fact').addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest('button');
       if (!b) return;
-      if (b.dataset.lens) this.setLens(b.dataset.lens as Lens);
+      // сначала закрыть: setLens покажет карточку линзы, и её нельзя тут же спрятать
+      const lens = b.dataset.lens;
       this.closeFact();
+      if (lens) this.setLens(lens as Lens);
     });
     $(r, '.s-modal').addEventListener('click', (e) => {
       const b = (e.target as HTMLElement).closest('[data-heir]') as HTMLElement | null;
@@ -612,10 +638,16 @@ export class SurfaceView {
         if (c.sick > 0) sick++;
         else if (c.immune > 0) imm++;
       }
-      txt = n ? `Рядом: ${n} зверей · болеют ${sick} · переболели ${imm}` : 'Рядом никого нет';
-    } else if (b.water) txt = `🌊 Планктон ${pct(clamp(w.grass[i] / b.fert, 0, 1) * w.nut[i])} · питательных веществ ×${w.soil[i].toFixed(2)}`;
+      txt = n ? `Рядом: ${n} ${plural(n, 'зверь', 'зверя', 'зверей')} · болеют ${sick} · защищены ${imm}` : 'Рядом никого нет';
+    } else if (b.water) txt = `🌊 Планктон ${pct(this.planktonAt(i))} · питательных веществ ×${w.soil[i].toFixed(2)}`;
     else txt = `Почва ×${w.nut[i].toFixed(2)} · микробы ${pct(w.mic[i])} · азотфиксаторы ${pct(w.fix[i])}`;
     el.textContent = txt + (water ? ` · 〰 ${water}` : '');
+  }
+
+  /** Густота планктона в водной клетке, 0..1 (как красит линза). */
+  private planktonAt(i: number): number {
+    const w = this.world;
+    return clamp(clamp(w.grass[i] / BIOMES[w.terrain.biome[i]].fert, 0, 1) * w.nut[i], 0, 1);
   }
 
   private focus(id: number | null): void {
@@ -639,7 +671,18 @@ export class SurfaceView {
 
   /** Показать карточку один раз. Если открыта другая — встаёт в очередь (now — показать сразу, а ту отложить). */
   private queueFact(id: string, now = false): void {
-    if (!this.explain || this.shownFacts.has(id)) return;
+    if (!this.explain) return;
+    if (now) {
+      // уже ждёт в очереди — показать сейчас
+      const q = this.factQueue.indexOf(id);
+      if (q >= 0) {
+        this.factQueue.splice(q, 1);
+        if (!$(this.root, '.s-fact').hidden && this.factNow) this.factQueue.unshift(this.factNow);
+        this.showFact(id);
+        return;
+      }
+    }
+    if (this.shownFacts.has(id)) return;
     this.shownFacts.add(id);
     if (!$(this.root, '.s-fact').hidden && this.factNow) {
       if (!now) {
@@ -656,6 +699,7 @@ export class SurfaceView {
     if (!f) return;
     const el = $(this.root, '.s-fact');
     this.factNow = id;
+    this.shownFacts.add(id); // прочитанную вручную не показываем ещё раз сами
     el.innerHTML = `<div class="tag">${FIELD_ICON[f.field]} ${f.field}</div><h4>${f.title}</h4><p>${f.text}</p>${
       f.earth ? `<p class="earth">🌍 ${f.earth}</p>` : ''
     }<div class="btns">${f.action && f.action.lens !== this.renderer.lens ? `<button data-lens="${f.action.lens}" class="act">${f.action.label}</button>` : ''}<button>Понятно</button></div>`;
@@ -665,9 +709,10 @@ export class SurfaceView {
   private closeFact(): void {
     $(this.root, '.s-fact').hidden = true;
     this.factNow = null;
+    clearTimeout(this.factTimer);
     if (!this.factQueue.length) return;
     // следующая карточка — после паузы, чтобы не сыпались одна за другой
-    setTimeout(() => {
+    this.factTimer = setTimeout(() => {
       if (!$(this.root, '.s-fact').hidden) return;
       const id = this.factQueue.shift();
       if (id && this.explain) this.showFact(id);
@@ -830,7 +875,8 @@ export class SurfaceView {
     const b = BIOMES[bi];
     const reg = t.regionAt(x, y);
     const water = t.waterAt(x, y);
-    const deg = Math.round(15 + (w.temp(i) - 0.5) * 80);
+    // вечные снега гор — всегда мороз (они там из-за высоты, а не из-за широты)
+    const deg = bi === B.Snow ? Math.min(-3, tempC(w.temp(i))) : tempC(w.temp(i));
     const bar = (label: string, v: number, color: string, note = '') =>
       `<div class="crow"><span>${label}</span><div class="gbar"><div style="width:${clamp(v, 0, 1) * 100}%;background:${color}"></div></div></div>${note ? `<div class="muted small cnote">${note}</div>` : ''}`;
     const fact = (id: string) => ` <a data-fact="${id}">?</a>`;
@@ -838,7 +884,7 @@ export class SurfaceView {
     rows.push(`<div class="small">🟫 Почва: <b>${soilName(t, i)}</b>${fact('soils')} · 🌡 ≈ ${deg} °C</div>`);
     if (b.water) {
       rows.push(bar(`Питательные вещества ×${w.soil[i].toFixed(2)}`, (w.soil[i] - 0.3) / 1.4, '#5ec7e8'));
-      const pl = clamp(w.grass[i] / b.fert, 0, 1) * w.nut[i];
+      const pl = this.planktonAt(i);
       rows.push(bar(`🌊 Планктон ${pct(pl)}${fact('plankton')}`, pl, 'linear-gradient(90deg,#1b8fbf,#7fe07a)'));
     } else {
       const nut = w.nut[i];
@@ -903,7 +949,7 @@ export class SurfaceView {
       const i = w.terrain.index(at[0], at[1]);
       const bi = w.terrain.biome[i] as B;
       const b = BIOMES[bi];
-      if (b.water) txt += ` · планктон ${pct(clamp(w.grass[i] / b.fert, 0, 1) * w.nut[i])}`;
+      if (b.water) txt += ` · планктон ${pct(this.planktonAt(i))}`;
       else {
         const a = w.act[i];
         const st = bi === B.Swamp ? 'задыхаются (болото)' : a > 0.6 ? 'активны' : a >= 0.15 ? 'медленно' : w.temp(i) < 0.25 ? 'спят (мороз)' : 'медленно';
@@ -1242,7 +1288,7 @@ export class SurfaceView {
       if (a > 0 && (b === 0 || b === -2 || b === -3)) graze += v;
     }
     // Растения → Животные → Туши и помёт → Разложители → Перегной и опад → Минеральные → Растения; + реки → море
-    const v = [graze, fe.dungIn + fe.carrionIn, fe.corpseDecay, fe.litterIn, fe.decomp, fe.uptake, fe.runoff];
+    const v = [graze, fe.dungIn + fe.carrionIn, fe.corpseDecay, fe.carrionIn + fe.dungIn, fe.decomp, fe.uptake, fe.runoff];
     const c = this.cyc;
     const dt = c.tick < 0 || w.tick < c.tick ? -1 : w.tick - c.tick;
     v.forEach((x, i) => {
@@ -1278,7 +1324,7 @@ export class SurfaceView {
       ['🟫', 'Перегной и опад', '#8d6a48'],
       ['⚗️', 'Минеральные вещества', '#7fc3d8'],
     ];
-    const EDGE = ['поедают', 'смерть, помёт', 'гниение', 'опад', 'минерализация', 'корни'];
+    const EDGE = ['поедают', 'смерть, помёт', 'гниение', 'перегной', 'минерализация', 'корни'];
     // круг — эллипс: слева остаётся место для «рек»
     const cx = W / 2 + 10;
     const cy = 126;
@@ -1581,7 +1627,8 @@ export class SurfaceView {
   private renderLog(): void {
     const factFor = (kind: string, text: string) =>
       kind === 'species' ? 'species' : kind === 'extinct' ? 'extinct' : kind === 'migration' && text.startsWith('🧭') ? 'migration'
-        : text.startsWith('🦠') ? 'sir' : text.startsWith('✔') ? 'virulence' : text.startsWith('🍄') ? 'carcass' : text.startsWith('🌊') ? 'bloom' : '';
+        : text.includes('заглохла') ? 'r0' : text.includes('расплодились') || text.startsWith('🦠 Эпидемия') ? 'disease'
+        : text.startsWith('🦠 Новая болезнь') ? 'rinderpest' : text.startsWith('🦠') ? 'sir' : text.startsWith('✔') ? 'virulence' : text.startsWith('🍄') ? 'carcass' : text.startsWith('🌊') ? 'bloom' : '';
     $(this.root, '.s-log').innerHTML = this.world.events
       .slice()
       .reverse()

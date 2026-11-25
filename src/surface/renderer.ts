@@ -44,8 +44,17 @@ const OV = 3;
 
 interface TilePair {
   ground: HTMLCanvasElement;
+  /** Реки тайла (только если в нём есть русла): рисуются непрозрачно и под линзой. */
+  rivers: HTMLCanvasElement | null;
   deco: HTMLCanvasElement;
 }
+
+/** Шляпки грибов по видам (4 — мухомор). */
+const MUSH_CAPS = ['#d8b88c', '#a8703f', '#7f5230', '#c08a50', '#cf3527'];
+/** Крапинки мухомора: dx, dy в долях размера. */
+const AMANITA_SPOTS = [-0.28, -0.12, 0.1, -0.28, 0.32, -0.08];
+/** Лапы туши: u — вдоль тела, d — наклон. */
+const CORPSE_LEGS = [0.5, 0.1, 0.3, -0.05, -0.4, 0.12, -0.6, -0.08];
 
 /** Быстрый детерминированный шум 0..1 по координатам. */
 function hash2(x: number, y: number): number {
@@ -128,6 +137,8 @@ export class SurfaceRenderer {
   private glowCyan = this.makeGlow(90, 210, 255);
   private glowGreen = this.makeGlow(150, 255, 170);
   private mushBuf = new Float32Array(BUDGET.mush * 4);
+  /** Центры «ведьминых колец» кадра (переиспользуется). */
+  private ringBuf: number[] = [];
 
   constructor(
     private canvas: HTMLCanvasElement,
@@ -276,7 +287,7 @@ export class SurfaceRenderer {
   }
 
   /** Путь одного отрезка русла: от середины с главным притоком — через узел — к середине с низовьем. */
-  private riverSegment(g: CanvasRenderingContext2D, i: number): void {
+  private riverSegment(g: CanvasRenderingContext2D, i: number, begin = true): void {
     const t = this.world.terrain;
     const X = this.rivX;
     const Y = this.rivY;
@@ -286,7 +297,7 @@ export class SurfaceRenderer {
     const py = Y[i];
     const ex = (px + X[d]) / 2;
     const ey = (py + Y[d]) / 2;
-    g.beginPath();
+    if (begin) g.beginPath();
     if (u >= 0) g.moveTo((X[u] + px) / 2, (Y[u] + py) / 2);
     else g.moveTo(px, py);
     g.quadraticCurveTo(px, py, ex, ey);
@@ -312,22 +323,33 @@ export class SurfaceRenderer {
         }
       }
     };
+    // полупрозрачные слои — одним путём на каждую ширину: иначе на стыках отрезков альфа ложится дважды («бусины»)
+    const buckets = new Map<number, number[]>();
+    const strokeBuckets = () => {
+      for (const [lw, list] of buckets) {
+        g.lineWidth = lw;
+        g.beginPath();
+        for (const i of list) this.riverSegment(g, i, false);
+        g.stroke();
+      }
+      buckets.clear();
+    };
+    const put = (lw: number, i: number) => {
+      const q = Math.round(lw * 4) / 4;
+      const list = buckets.get(q);
+      if (list) list.push(i);
+      else buckets.set(q, [i]);
+    };
     if (streams) {
       // ручьи: тонкие, от истока к устью шире
       g.strokeStyle = 'rgba(79,143,192,0.7)';
-      each(1, 1, (i) => {
-        g.lineWidth = 0.35 + 0.6 * clamp((t.flow[i] - 18) / 62, 0, 1);
-        this.riverSegment(g, i);
-        g.stroke();
-      });
+      each(1, 1, (i) => put(0.35 + 0.6 * clamp((t.flow[i] - 18) / 62, 0, 1), i));
+      strokeBuckets();
     }
     // берега: влажная тёмная кромка
     g.strokeStyle = 'rgba(38,58,34,0.32)';
-    each(2, 2, (i) => {
-      g.lineWidth = width(t.flow[i]) + 1.8 * wk;
-      this.riverSegment(g, i);
-      g.stroke();
-    });
+    each(2, 2, (i) => put(width(t.flow[i]) + 1.8 * wk, i));
+    strokeBuckets();
     g.strokeStyle = '#2f5f86';
     each(2, 2, (i) => {
       g.lineWidth = width(t.flow[i]);
@@ -591,10 +613,24 @@ export class SurfaceRenderer {
     const c1 = Math.min(t.cols - 1, Math.floor(((tx + 1) * size + 12) / cell));
     const r0 = Math.max(0, Math.floor((ty * size - 12) / cell));
     const r1 = Math.min(t.rows - 1, Math.floor(((ty + 1) * size + 12) / cell));
-    // реки чётко, до деревьев (кроны нависают над водой)
-    this.strokeRivers(g, Math.max(0, c0 - 1), Math.min(t.cols - 1, c1 + 1), Math.max(0, r0 - 1), Math.min(t.rows - 1, r1 + 1), true, 1.2);
+    // реки чётко — своим слоем: он рисуется до деревьев (кроны нависают над водой) и не тускнеет под линзой
+    const rc0 = Math.max(0, c0 - 1), rc1 = Math.min(t.cols - 1, c1 + 1), rr0 = Math.max(0, r0 - 1), rr1 = Math.min(t.rows - 1, r1 + 1);
+    let rivers: HTMLCanvasElement | null = null;
+    find: for (let cy = rr0; cy <= rr1; cy++) {
+      for (let cx = rc0; cx <= rc1; cx++) {
+        const i = cy * t.cols + cx;
+        if (t.river[i] >= 1 && t.drain[i] >= 0) {
+          rivers = document.createElement('canvas');
+          rivers.width = rivers.height = TILE_PX;
+          const rg = rivers.getContext('2d')!;
+          rg.setTransform(level, 0, 0, level, -tx * size * level, -ty * size * level);
+          this.strokeRivers(rg, rc0, rc1, rr0, rr1, true, 1.2);
+          break find;
+        }
+      }
+    }
     for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) for (const d of this.decoItems(cx, cy)) this.drawDeco(g, d, level);
-    const pair = { ground, deco: c };
+    const pair = { ground, rivers, deco: c };
     this.tiles.set(key, pair);
     if (this.tiles.size > 48) this.tiles.delete(this.tiles.keys().next().value!);
     return pair;
@@ -919,7 +955,11 @@ export class SurfaceRenderer {
     const M = this.mushBuf;
     const max = Math.floor(BUDGET.mush * this.bk);
     let n = 0;
-    const rings: number[] = [];
+    const rings = this.ringBuf;
+    rings.length = 0;
+    // детерминированный поток чисел клетки — без нового генератора на каждую
+    let hq = 0;
+    const r = () => hashI(hq++);
     const [c0, c1, r0, r1] = this.cellRange(x0 - 4, y0 - 4, x1 + 4, y1 + 4);
     for (let cy = r0; cy <= r1 && n < max; cy++) {
       for (let cx = c0; cx <= c1 && n < max; cx++) {
@@ -930,7 +970,7 @@ export class SurfaceRenderer {
         if (m <= 0.55 || w.litter[i] <= 0.25) continue;
         const T = t.baseTemp[i] + sh;
         if (T <= 0.2 || T >= 0.65) continue;
-        const r = mulberry32(w.seed ^ Math.imul(i, 2654435761));
+        hq = Math.imul(w.seed ^ Math.imul(i, 2654435761), 16);
         for (let k = Math.floor((m - 0.5) * 6); k > 0 && n < max; k--, n++) {
           M[n * 4] = (cx + r()) * cell;
           M[n * 4 + 1] = (cy + r()) * cell;
@@ -980,9 +1020,8 @@ export class SurfaceRenderer {
       ctx.rect(x - s * 0.15, y - s * 0.75, s * 0.3, s * 0.75);
     }
     ctx.fill();
-    const caps = ['#d8b88c', '#a8703f', '#7f5230', '#c08a50', '#cf3527'];
     for (let kind = 0; kind < 5; kind++) {
-      ctx.fillStyle = caps[kind];
+      ctx.fillStyle = MUSH_CAPS[kind];
       ctx.beginPath();
       for (let k = 0; k < n; k++) {
         if (M[k * 4 + 3] !== kind) continue;
@@ -999,7 +1038,8 @@ export class SurfaceRenderer {
     for (let k = 0; k < n; k++) {
       if (M[k * 4 + 3] !== 4) continue;
       const x = M[k * 4], y = M[k * 4 + 1] - M[k * 4 + 2] * 0.7, s = M[k * 4 + 2];
-      for (const [dx, dy] of [[-0.28, -0.12], [0.1, -0.28], [0.32, -0.08]]) {
+      for (let q = 0; q < 6; q += 2) {
+        const dx = AMANITA_SPOTS[q], dy = AMANITA_SPOTS[q + 1];
         ctx.moveTo(x + dx * s + s * 0.08, y + dy * s);
         ctx.arc(x + dx * s, y + dy * s, s * 0.08, 0, Math.PI * 2);
       }
@@ -1228,7 +1268,12 @@ export class SurfaceRenderer {
       ctx.globalAlpha = 0.55 * (1 - k) * night;
       ctx.drawImage(spr, p.x - r, p.y - r, r * 2, r * 2);
     }
-    if (Wk.length && Wk[0].life >= Wk[0].max) this.wakes = Wk.filter((p) => p.life < p.max);
+    if (Wk.length && Wk[0].life >= Wk[0].max) {
+      // сжать на месте — без нового массива
+      let j = 0;
+      for (let k = 0; k < Wk.length; k++) if (Wk[k].life < Wk[k].max) Wk[j++] = Wk[k];
+      Wk.length = j;
+    }
     ctx.globalAlpha = 1;
     ctx.globalCompositeOperation = 'source-over';
   }
@@ -1282,7 +1327,8 @@ export class SurfaceRenderer {
         ctx.strokeStyle = k.sick ? 'hsl(90,15%,25%)' : `hsl(${k.hue},12%,25%)`;
         ctx.lineWidth = Math.max(0.4, s * 0.14);
         ctx.beginPath();
-        for (const [u, d] of [[0.5, 0.1], [0.3, -0.05], [-0.4, 0.12], [-0.6, -0.08]]) {
+        for (let q = 0; q < 8; q += 2) {
+          const u = CORPSE_LEGS[q], d = CORPSE_LEGS[q + 1];
           const bx = k.x + cr * s * u - sr * s * 0.45;
           const by = k.y + sr * s * u + cr * s * 0.45;
           ctx.moveTo(bx, by);
@@ -1466,6 +1512,7 @@ export class SurfaceRenderer {
       ctx.clip('evenodd');
       ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
       ctx.restore();
+      for (const [t, x, y, size] of shown) if (t.rivers) ctx.drawImage(t.rivers, x, y, size, size);
     } else ctx.drawImage(this.riverLayer, 0, 0, world.width, world.height);
     const vx0 = cam.x - W / 2 / z;
     const vy0 = cam.y - H / 2 / z;
