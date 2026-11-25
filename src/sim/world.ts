@@ -284,6 +284,9 @@ export class World {
   private nextPath = 1;
   /** Уже рассказывали, что вспышка может заглохнуть сама. */
   private fizzleLogged = false;
+  /** Весеннее цветение: минимум планктона за прошлую зиму и год последней записи. */
+  private bloomMin = Infinity;
+  private bloomYear = 0;
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
 
@@ -390,6 +393,8 @@ export class World {
     this.boost.clear();
     this.nextPath = 1;
     this.fizzleLogged = false;
+    this.bloomMin = Infinity;
+    this.bloomYear = 0;
   }
 
   /**
@@ -1871,9 +1876,21 @@ export class World {
     const nl1 = Math.max(1, nl);
     // пищевая сеть: разложители едят падаль и опад, опад кормит траву
     const fl0 = this.flux;
-    if (fl0.corpseDecay > 0) this.bump(-4, -1, fl0.corpseDecay * 0.002);
-    if (fl0.decomp > 0) this.bump(-4, -5, fl0.decomp * 40);
-    if (fl0.litterIn > 0) this.bump(-5, 0, fl0.litterIn * 40);
+    // (множители подобраны так, чтобы стрелки были толщиной со среднюю стрелку «вид > трава»)
+    if (fl0.corpseDecay > 0) this.bump(-4, -1, fl0.corpseDecay * 0.015);
+    if (fl0.decomp > 0) this.bump(-4, -5, fl0.decomp * 0.3);
+    if (fl0.litterIn > 0) this.bump(-5, 0, fl0.litterIn * 1.6);
+    // весеннее цветение: планктон заметно выше зимнего минимума — запись раз в год
+    const bloom = nw ? pl / nw : 0;
+    if (nw && this.settings.seasons) {
+      const ph = this.season.phase;
+      if (ph >= 0.75) this.bloomMin = Math.min(this.bloomMin, bloom);
+      else if (ph >= 0.05 && ph <= 0.35 && this.year !== this.bloomYear && bloom > 1.15 * this.bloomMin) {
+        this.bloomYear = this.year;
+        this.bloomMin = Infinity;
+        this.log('🌊 У берегов зацвёл планктон — весеннее цветение', 'micro');
+      } else if (ph > 0.35 && ph < 0.75) this.bloomMin = Infinity;
+    }
     // потоки круговорота: сглаживаем окно в 20 тактов
     const fe = this.fluxEma;
     for (const k in this.flux) {

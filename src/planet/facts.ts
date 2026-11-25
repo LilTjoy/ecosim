@@ -10,6 +10,8 @@ export interface Fact {
   text: string;
   /** Как было на Земле. */
   earth?: string;
+  /** Кнопка «показать»: включить линзу 🔬 на поверхности. */
+  action?: { label: string; lens: string };
 }
 
 export const FIELD_ICON: Record<Field, string> = {
