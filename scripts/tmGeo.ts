@@ -257,7 +257,10 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
     const before = F.terrain;
     F.loadState(s);
     const [rt, rw] = F.lp ? [freshLp.terrain, freshLp] : [fresh, freshW];
-    const e = (F.terrain !== before ? 'identity ' : '') + (sameTerrain(F.terrain, rt) ?? '') + ' ' + (sameStatics(F, rw) ?? '');
+    // и отпечаток заново снятого состояния — тот же, что у снимка (флаг settings.livePlanet не тянется из прошлого мира)
+    const rd = F.captureState().digest;
+    const e = (F.terrain !== before ? 'identity ' : '') + (sameTerrain(F.terrain, rt) ?? '') + ' ' + (sameStatics(F, rw) ?? '') +
+      (rd !== s.digest ? ` digest ${hex(rd)}≠${hex(s.digest)}` : '') + ('livePlanet' in F.settings !== F.lp ? ' flag' : '');
     d2.push(`${name}:${e.trim() || 'same'}${F.lp ? '(lp)' : ''}`);
     if (!F.lp) {
       // вернуть миру живую планету для следующей проверки

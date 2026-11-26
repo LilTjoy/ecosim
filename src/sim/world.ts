@@ -484,7 +484,7 @@ export class World {
     this.lm = this.moistK = this.iceList = null;
     if (this.lp) {
       allocGeoCells(this, this.terrain.cols * this.terrain.rows);
-      this.geo = newGeo(seed, env.geo);
+      this.geo = newGeo(seed, env.geo, salt);
       carveSills(this);
       warmDerive(this); // один раз на процесс: первые пересчёты рельефа — до оптимизации кода движком
       deriveTerrain(this, false);
@@ -2382,6 +2382,7 @@ export class World {
     this.rng = mix32(this.rng ^ k);
     for (const c of this.creatures) c.rs = mix32(c.rs ^ k ^ c.id);
     if (this.player && !this.player.alive) this.player.rs = mix32(this.player.rs ^ k);
+    if (this.geo) this.geo.vk = mix32(this.geo.vk ^ k);
   }
 
   /**

@@ -408,6 +408,7 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
     G.vBias ??= 0;
     G.volc ??= 1;
     G.fur0 ??= -1;
+    G.vk ??= (w as unknown as World).seed;
   }
   w.species.load(c.species as SpeciesSave);
   w.species.rand = w.r;
@@ -498,6 +499,11 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
     w.lp = false;
     w.geo = null;
   }
+  // флаг в settings — по снимку: слияние шага 1 не стирает ключ, которого в снимке нет (мир без живой планеты), а он
+  // попал бы в отпечаток и в следующий reset (воркер, «Новый мир»)
+  const st = (w as unknown as World).settings as { livePlanet?: boolean };
+  const sst = (s.scal.settings ?? {}) as { livePlanet?: boolean };
+  if (!('livePlanet' in sst)) delete st.livePlanet;
   const n0 = w.terrain.cols * w.terrain.rows;
   if (w.lp) {
     const gc = s.geoCells!;

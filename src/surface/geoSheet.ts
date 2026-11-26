@@ -4,6 +4,7 @@
 import { beringiaLine, co2Warm, GEO, geoKyr, metres, panamaLine } from '../sim/geo';
 import type { ActionInput } from '../sim/timeline';
 import { CLIMATE_C, type World } from '../sim/world';
+import { plural } from '../lib/text';
 
 /** Инструменты «Земли»: кисть ⬆/⬇, ✂️ глубокий и мелкий пролив, 🌉 перешеек (рисуются на карте). */
 export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus' | 'ridge' | 'volcano' | 'impact' | 'tsunami' | 'fire';
@@ -32,6 +33,8 @@ const TOOL_HINT: Record<GeoTool, string> = {
 };
 
 const narrow = () => typeof matchMedia === 'function' && matchMedia('(max-width: 600px)').matches;
+const LAND_TOOLS: readonly GeoTool[] = ['terraUp', 'terraDown', 'strait', 'straitS', 'isthmus', 'ridge'];
+const SKY_TOOLS: readonly GeoTool[] = ['volcano', 'impact', 'tsunami', 'fire'];
 
 /** Силы «Неба»: выбранные в шторке (их читает карта при нажатии). */
 export const SKY = { vei: 8 as 6 | 7 | 8, size: 3 as 1 | 2 | 3 };
@@ -98,6 +101,33 @@ export class GeoSheet {
     if (!this.host.world.lp) return;
     this.el.hidden = false;
     this.render();
+    this.place();
+  }
+
+  /**
+   * На компьютере — под чипами HUD (не закрывать чип живой планеты и места): верх панели — по низу HUD.
+   * На телефоне — шторка снизу (по CSS).
+   */
+  private place(): void {
+    const st = this.el.style;
+    const hud = this.el.parentElement?.querySelector<HTMLElement>('.s-hud');
+    if (!hud) return;
+    if (narrow()) {
+      // шторка снизу: не выше низа HUD (чип живой планеты остаётся виден)
+      if (st.top) st.top = '';
+      const stage = this.el.parentElement!;
+      const bottom = parseFloat(getComputedStyle(this.el).bottom) || 0;
+      const room = Math.round(stage.clientHeight - (hud.offsetTop + hud.offsetHeight) - 6 - bottom);
+      const want = `min(55%, ${Math.max(120, room)}px)`;
+      if (st.maxHeight !== want) st.maxHeight = want;
+      return;
+    }
+    const top = Math.max(12, Math.round(hud.offsetTop + hud.offsetHeight + 6));
+    const want = `${top}px`;
+    if (st.top !== want) {
+      st.top = want;
+      st.maxHeight = `calc(100% - ${top + 88}px)`;
+    }
   }
 
   close(): void {
@@ -174,6 +204,7 @@ export class GeoSheet {
     if (!this.open) return;
     const w = this.host.world, g = w.geo;
     if (!g || !w.lp) return this.close();
+    this.place();
     if (this.tab === 'land' || this.tab === 'sky') {
       // кнопки инструментов — по выбору на карте (его меняют и кнопки 🔍 🌱 …)
       this.el.querySelectorAll<HTMLElement>('button[data-gtool]').forEach((x) => x.classList.toggle('active', x.dataset.gtool === this.host.tool()));
@@ -231,6 +262,10 @@ export class GeoSheet {
     const tabB = t.closest('button[data-gt]') as HTMLElement | null;
     if (tabB) {
       this.tab = tabB.dataset.gt === 'land' ? 'land' : tabB.dataset.gt === 'sky' ? 'sky' : 'climate';
+      // инструмент чужой вкладки не остаётся взведённым (иначе нажатие на карту во «Земле» уронит астероид)
+      const cur = this.host.tool() as GeoTool;
+      const mine = this.tab === 'land' ? LAND_TOOLS : this.tab === 'sky' ? SKY_TOOLS : [];
+      if ((LAND_TOOLS.includes(cur) || SKY_TOOLS.includes(cur)) && !mine.includes(cur)) this.host.setTool(null);
       return this.render();
     }
     const tl = t.closest('button[data-gtool]') as HTMLElement | null;
@@ -238,8 +273,8 @@ export class GeoSheet {
       const want = tl.dataset.gtool as GeoTool;
       this.host.setTool(this.host.tool() === want ? null : want);
       if (this.host.tool() === want) this.host.toast(TOOL_HINT[want]);
-      // на телефоне шторка закрывает карту: силы «Неба» ставятся одним нажатием — шторку убираем
-      if (this.tab === 'sky' && this.host.tool() === want && narrow()) return this.close();
+      // на телефоне шторка закрывает карту: выбрал инструмент (силу «Неба» или кисть «Земли») — шторку убираем
+      if (this.host.tool() === want && narrow()) return this.close();
       return this.update();
     }
     const b = t.closest('button[data-g]') as HTMLElement | null;
@@ -317,7 +352,7 @@ export function skyNow(w: World): string {
   const p: string[] = [];
   if (g.dark > 0.02) p.push(`🌑 темно: света ${Math.round(100 * (1 - g.dark))}%`);
   if (g.aer > 0.02) p.push(`🌫 дымка: ${signC(-0.12 * g.aer * CLIMATE_C, 1)} °C`);
-  if (g.fire.length) p.push(`🔥 горит ${g.fire.length / 2} клеток`);
+  if (g.fire.length) p.push(`🔥 горит ${g.fire.length / 2} ${plural(g.fire.length / 2, 'клетка', 'клетки', 'клеток')}`);
   if (w.tick < g.isolatedUntil) p.push(`⛵ остров отрезан ещё ${((g.isolatedUntil - w.tick) / 6000).toFixed(1).replace('.', ',')} г.`);
   const S = g.stats;
   return `${p.length ? p.join(' · ') : 'Небо чистое'} · извержений: ${S.eruptions} · ударов: ${S.impacts} · пожаров: ${S.fires} · массовых вымираний: ${S.massExt}`;

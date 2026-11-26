@@ -41,6 +41,8 @@ export interface Seen {
 /** Бюджеты мелочей микромира на кадр (на узком экране — вдвое меньше). */
 const BUDGET = { mush: 400, spark: 1500, fungi: 300, micro: 700, wake: 200 };
 
+/** 🧊 Толщина льда, под которой реки не рисуются (лёд уже почти непрозрачен: альфа 3H). */
+const ICE_RIVER = 0.12;
 const BAKE_SCALE = 0.5; // пикселей текстуры на единицу мира
 const TILE_PX = 512;
 /** 🌋 Блок перепекания рельефа — 8×8 клеток (64 px при клетке 16); не больше BLK_FRAME блоков за кадр. */
@@ -167,6 +169,9 @@ export class SurfaceRenderer {
   private riversStale = false;
   /** Блоков перепечено за последний кадр (для проверки бюджета). */
   rebakedLast = 0;
+  /** 🧊 Сколько клеток рек было подо льдом при последней отрисовке рек и когда считали. */
+  private iceRivN = 0;
+  private iceRivFrame = -1e9;
   /** Масштаб бюджетов: 0.5 на узком экране. */
   private bk = 1;
   private zoom = 1;
@@ -223,6 +228,8 @@ export class SurfaceRenderer {
     this.blkMark = new Uint8Array(bw * bh);
     this.blkQueue = [];
     this.riversStale = false;
+    this.iceRivN = 0; // реки ниже нарисованы с нынешним льдом: пересчёт через 2 с сравнит
+    this.iceRivFrame = -1e9;
     // 🌋 живая планета: шум — по пикселю (hash2), чтобы блоки перепекались без швов; без неё — прежний вид до пикселя
     if (this.world.lp) for (let b = 0; b < bw * bh; b++) this.bakeBlock(g, b, false);
     else this.bakeScan(g, W, H);
@@ -375,6 +382,18 @@ export class SurfaceRenderer {
     this.rebakedLast = 0;
     const t = this.world.terrain;
     if (t !== this.bakedTerrain) return; // новый мир — rebuild() вызовет страница
+    // 🧊 лёд наступил или сошёл — реки под ним прячутся/выходят (не чаще раза в 2 с)
+    const ice = this.world.ice;
+    if (ice && this.frame - this.iceRivFrame >= 120) {
+      this.iceRivFrame = this.frame;
+      let k = 0;
+      for (let i = 0; i < ice.length; i++) if (ice[i] > ICE_RIVER && t.river[i] >= 1) k++;
+      if (k !== this.iceRivN) {
+        this.iceRivN = k;
+        this.riversStale = true;
+        this.dropRiverTiles();
+      }
+    }
     if (t.rev !== this.bakedRev) {
       this.bakedRev = t.rev;
       const cols = t.cols, rows = t.rows, bw = Math.ceil(cols / BLK);
@@ -551,11 +570,13 @@ export class SurfaceRenderer {
     g.save();
     g.lineCap = 'round';
     g.lineJoin = 'round';
+    // 🌋 под толстым льдом рек не видно (русло подо льдом — талая вода течёт внизу)
+    const ice = this.world.ice;
     const each = (min: number, max: number, fn: (i: number) => void) => {
       for (let cy = r0; cy <= r1; cy++) {
         for (let cx = c0; cx <= c1; cx++) {
           const i = cy * t.cols + cx;
-          if (t.river[i] >= min && t.river[i] <= max && t.drain[i] >= 0) fn(i);
+          if (t.river[i] >= min && t.river[i] <= max && t.drain[i] >= 0 && !(ice && ice[i] > ICE_RIVER)) fn(i);
         }
       }
     };

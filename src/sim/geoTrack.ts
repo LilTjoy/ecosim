@@ -207,9 +207,10 @@ function isoSweep(w: TrackWorld): void {
     }
     r.ga = Math.max(0, Math.min(m0 - r.gen0[0], m1 - r.gen0[1]));
     r.d = distance(meanGenome(side[0]), meanGenome(side[1]), w.species.bodyW) / SPECIES_LIMIT;
-    if (!r.half && r.ga >= GEO.ISO_GEN / 2) {
+    // подвиды — не только время врозь, но и заметная разница (половина нужного для нового вида)
+    if (!r.half && r.ga >= GEO.ISO_GEN / 2 && r.d >= GEO.ISO_D / 2) {
       r.half = true;
-      if (!r.founder && !quiet(g, w)) w.log(`🧬 Половины «${sp.name}» живут врозь уже ${r.ga} ${plural(r.ga, 'поколение', 'поколения', 'поколений')} — это уже подвиды`, 'species', undefined, undefined, 'geo_subspecies');
+      if (!r.founder && !quiet(g, w)) w.log(`🧬 Половины «${sp.name}» живут врозь уже ${r.ga} ${plural(r.ga, 'поколение', 'поколения', 'поколений')}, и гены разошлись на ${Math.round(100 * r.d)}% — это уже подвиды`, 'species', undefined, undefined, 'geo_subspecies');
     }
     if (r.ga >= GEO.ISO_GEN && r.d >= GEO.ISO_D) {
       split(w, r, s, side);
@@ -379,10 +380,12 @@ function bridgeSweep(w: World): void {
       if (!c.alive || c.g.swim > 0.6) continue;
       const sd = sillSide(s, c.x, c.y), nat = r.nat.get(c.sp);
       if (sd < 0 || nat === undefined || sd === nat) continue;
-      foreign.set(c.sp, (foreign.get(c.sp) ?? 0) + 1);
+      // ♾️ летуны пролив перелетают и без моста: пришельцами через мост не считаются (только в счёт «и N летунов»)
+      const fl = flyer(w, c);
+      if (!fl) foreign.set(c.sp, (foreign.get(c.sp) ?? 0) + 1);
       if (!r.seen.has(c.id) && r.seen.size < 2000) {
         r.seen.add(c.id);
-        if (flyer(w, c)) r.fly++;
+        if (fl) r.fly++;
         else r.cross[nat]++;
       }
     }
@@ -422,7 +425,7 @@ function report(w: World, r: BridgeRec): void {
   const k0 = est.filter((v) => v.from === 0).length, k1 = est.length - k0;
   const [a, b] = sideWords(s, true);
   const L = r.lost.length;
-  w.log(`🌎 Великий обмен через перешеек ${s.name}: с ${a} прижились ${k0} ${plural(k0, 'вид', 'вида', 'видов')}, с ${b} — ${k1}; перешли ${r.cross[0]} и ${r.cross[1]} зверей${r.fly ? ` (и ${r.fly} летунов)` : ''}; ${L ? `вымерли ${L} ${plural(L, 'местный вид', 'местных вида', 'местных видов')}` : 'местные устояли'}`, 'milestone', undefined, undefined, 'geo_gabi');
+  w.log(`🌎 Великий обмен через перешеек ${s.name}: с ${a} ${plural(k0, 'прижился', 'прижились', 'прижились')} ${k0} ${plural(k0, 'вид', 'вида', 'видов')}, с ${b} — ${k1}; перешли ${r.cross[0]} и ${r.cross[1]} ${plural(r.cross[1], 'зверь', 'зверя', 'зверей')}${r.fly ? ` (и ${r.fly} ${plural(r.fly, 'летун', 'летуна', 'летунов')})` : ''}; ${L ? `${plural(L, 'вымер', 'вымерли', 'вымерли')} ${L} ${plural(L, 'местный вид', 'местных вида', 'местных видов')}` : 'местные устояли'}`, 'milestone', undefined, undefined, 'geo_gabi');
 }
 
 // ---------------- рефугиумы, ареалы, морены ----------------

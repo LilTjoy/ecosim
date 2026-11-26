@@ -20,7 +20,7 @@ export function isoGauge(w: World, sp: number): string | null {
   if (!r) return null;
   const s = g.sills[r.sill];
   const k = Math.min(1, r.ga / GEO.ISO_GEN);
-  return `<div class="gp-gauge" title="Половины по разные стороны пролива ${esc(s?.name ?? '')}: ${r.parts[0]} и ${r.parts[1]} особей"><div class="gp-bar"><i style="width:${Math.round(100 * k)}%"></i></div><span>🌊 поколений врозь ${r.ga}/${GEO.ISO_GEN} · гены разошлись ${Math.round(100 * r.d)}%${r.leak ? ` · 🔀 смешивались ${r.leak} ${plural(r.leak, 'раз', 'раза', 'раз')}` : ''}</span> <a data-fact="geo_subspecies">?</a></div>`;
+  return `<div class="gp-gauge" title="Половины по разные стороны пролива ${esc(s?.name ?? '')}: ${r.parts[0]} и ${r.parts[1]} ${plural(r.parts[1], 'особь', 'особи', 'особей')}"><div class="gp-bar"><i style="width:${Math.round(100 * k)}%"></i></div><span>🌊 поколений врозь ${r.ga}/${GEO.ISO_GEN} · гены разошлись ${Math.round(100 * r.d)}%${r.leak ? ` · 🔀 смешивались ${r.leak} ${plural(r.leak, 'раз', 'раза', 'раз')}` : ''}</span> <a data-fact="geo_subspecies">?</a></div>`;
 }
 
 /** Ход моря и льда по истории мира (SVG, без холста). */
@@ -69,12 +69,12 @@ export function geoPanelHtml(w: World): string {
   out.push(`<h4>Половины видов <a data-fact="geo_vicariance">?</a></h4>${iso.length ? `<ul class="gp-list">${iso.map((r) => {
     const s = g.sills[r.sill];
     const k = Math.min(1, r.ga / GEO.ISO_GEN);
-    return `<li><b>${sp(r.sp)}</b> <span class="muted small">— пролив ${esc(s?.name ?? '?')}: ${r.parts[0]} и ${r.parts[1]} особей</span><div class="gp-gauge"><div class="gp-bar"><i style="width:${Math.round(100 * k)}%"></i></div><span>поколений врозь ${r.ga}/${GEO.ISO_GEN} · гены разошлись ${Math.round(100 * r.d)}% (нужно ${Math.round(100 * GEO.ISO_D)}%)${r.leak ? ` · 🔀 смешивались ${r.leak}` : ''}</span></div></li>`;
+    return `<li><b>${sp(r.sp)}</b> <span class="muted small">— пролив ${esc(s?.name ?? '?')}: ${r.parts[0]} и ${r.parts[1]} ${plural(r.parts[1], 'особь', 'особи', 'особей')}</span><div class="gp-gauge"><div class="gp-bar"><i style="width:${Math.round(100 * k)}%"></i></div><span>поколений врозь ${r.ga}/${GEO.ISO_GEN} · гены разошлись ${Math.round(100 * r.d)}% (нужно ${Math.round(100 * GEO.ISO_D)}%)${r.leak ? ` · 🔀 смешивались ${r.leak} ${plural(r.leak, 'раз', 'раза', 'раз')}` : ''}</span></div></li>`;
   }).join('')}</ul>` : '<p class="muted small">Сейчас ни один вид не живёт по обе стороны закрытого пролива.</p>'}
     <p class="muted small">Видов от викарианса: ${g.stats.vicariance} · утечек генов через проливы: ${g.stats.leaks} <a data-fact="geo_hybrid">?</a></p>`);
   // рефугиумы
   if (g.refugia && g.refugia.length)
-    out.push(`<h4>Рефугиумы последнего пика <a data-fact="geo_refugia">?</a></h4><ul class="gp-list">${g.refugia.map((r) => `<li><b>${esc(t.regions[r.region]?.name ?? 'безымянный край')}</b> <span class="muted small">— ${r.n} зверей, ${r.species.length} ${plural(r.species.length, 'вид', 'вида', 'видов')}: ${r.species.slice(0, 4).map(sp).join(', ')}${r.species.length > 4 ? '…' : ''}</span></li>`).join('')}</ul><button data-glens="refugia">🔬 Линза «🏔 Рефугиумы»</button>`);
+    out.push(`<h4>Рефугиумы последнего пика <a data-fact="geo_refugia">?</a></h4><ul class="gp-list">${g.refugia.map((r) => `<li><b>${esc(t.regions[r.region]?.name ?? 'безымянный край')}</b> <span class="muted small">— ${r.n} ${plural(r.n, 'зверь', 'зверя', 'зверей')}, ${r.species.length} ${plural(r.species.length, 'вид', 'вида', 'видов')}: ${r.species.slice(0, 4).map(sp).join(', ')}${r.species.length > 4 ? '…' : ''}</span></li>`).join('')}</ul><button data-glens="refugia">🔬 Линза «🏔 Рефугиумы»</button>`);
   // великий обмен
   const rep = g.bridges.filter((b) => b.invaders.some((v) => v.t >= 0) || b.lost.length || b.reported).slice(-3).reverse();
   if (rep.length)
@@ -89,7 +89,7 @@ export function geoPanelHtml(w: World): string {
     const now: string[] = [];
     if (g.dark > 0.02) now.push(`🌑 темно — света ${Math.round(100 * (1 - g.dark))}% <a data-fact="geo_impactwinter">?</a>`);
     if (g.aer > 0.02) now.push(`🌫 дымка: ${(-0.12 * g.aer * 100 / 3).toFixed(1).replace('.', ',')} °C <a data-fact="geo_volcwinter">?</a>`);
-    if (g.fire.length) now.push(`🔥 горит ${g.fire.length / 2} клеток${g.fireEp ? `, выгорело ${g.fireEp.n}` : ''} <a data-fact="geo_fire">?</a>`);
+    if (g.fire.length) now.push(`🔥 горит ${g.fire.length / 2} ${plural(g.fire.length / 2, 'клетка', 'клетки', 'клеток')}${g.fireEp ? `, выгорело ${g.fireEp.n}` : ''} <a data-fact="geo_fire">?</a>`);
     if (w.tick < g.isolatedUntil) now.push(`⛵ остров отрезан ещё ${((g.isolatedUntil - w.tick) / 6000).toFixed(1).replace('.', ',')} г. <a data-fact="geo_islandiso">?</a>`);
     const S = g.stats, ls = g.lastSum;
     const sum = ls ? `<p class="small">Год после катастрофы: исчезло ${ls.k} из ${ls.N} ${plural(ls.N, 'вида', 'видов', 'видов')}${ls.m0 > 0 ? ` · медиана размера травоядных ${ls.m0.toFixed(1).replace('.', ',')} → ${ls.m1 > 0 ? ls.m1.toFixed(1).replace('.', ',') : 'нет травоядных'}` : ''} · зверей ${ls.n0} → ${ls.n1} <a data-fact="lilliput">?</a></p>` : '';
@@ -105,6 +105,6 @@ export function geoPanelHtml(w: World): string {
   }
   // следы льда
   const lakes = t.lakes;
-  out.push(`<h4>Следы ледников <a data-fact="geo_moraine">?</a> <a data-fact="geo_kettle">?</a></h4><p class="small">Морен: ${g.stats.moraines} клеток · котловин: ${g.stats.kettles} · озёр сейчас: ${lakes.length}${lakes.length ? ` (${lakes.slice(0, 4).map((l) => esc(l.name)).join(', ')}${lakes.length > 4 ? '…' : ''})` : ''}</p>`);
+  out.push(`<h4>Следы ледников <a data-fact="geo_moraine">?</a> <a data-fact="geo_kettle">?</a></h4><p class="small">Морен: ${g.stats.moraines} ${plural(g.stats.moraines, 'клетка', 'клетки', 'клеток')} · котловин: ${g.stats.kettles} · озёр сейчас: ${lakes.length}${lakes.length ? ` (${lakes.slice(0, 4).map((l) => esc(l.name)).join(', ')}${lakes.length > 4 ? '…' : ''})` : ''}</p>`);
   return out.join('');
 }

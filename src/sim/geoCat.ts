@@ -211,20 +211,20 @@ function volcano(w: World, x0: number, y0: number, vei: 6 | 7 | 8): void {
 }
 
 /**
- * 🌍 Вулканы сами (этап 4): раз в геопроход — кость по такту (hash01, не поток мира: мир без извержения идёт
+ * 🌍 Вулканы сами (этап 4): раз в геопроход — кость по такту и ключу g.vk (seed и salt мира; hash01, не поток мира: мир без извержения идёт
  * так же, как шёл бы без этой проверки). VEI 6 с вероятностью VOLC_P·volc за 20 тактов геологии, VEI 7 — в
  * VOLC_7 раз реже; место — случайная гора (или суша). volc — из условий планеты (нет — 1, как на Земле).
  */
 export function volcPass(w: World): void {
   const g = w.geo!;
   const p = GEO.VOLC_P * g.volc * ((g.speed * GEO.EVERY) / 20);
-  const u = hash01(w.tick, w.seed & 0xfffff);
+  const u = hash01(w.tick, g.vk & 0xfffff);
   if (!(u < p)) return;
   const vei: 6 | 7 = u < p * GEO.VOLC_7 ? 7 : 6;
   const t = w.terrain, n = t.cols * t.rows;
   let at = -1;
   for (let k = 0; k < 64 && at < 0; k++) {
-    const i = Math.min(n - 1, Math.floor(hash01(w.tick + k + 1, (w.seed ^ 0x7016) & 0xfffff) * n));
+    const i = Math.min(n - 1, Math.floor(hash01(w.tick + k + 1, (g.vk ^ 0x7016) & 0xfffff) * n));
     if (t.biome[i] === B.Mountain || (k >= 48 && isLand(w, i))) at = i;
   }
   if (at < 0) return;
@@ -600,6 +600,9 @@ export function catHabitat(w: World): void {
 
 // ---------------- 💀 массовое вымирание и «эффект лилипута» ----------------
 
+/** «Эффект лилипута» — только если медиана размера травоядных упала заметно (≥ 7%), а не на шум выживших. */
+export const LIL_K = 0.93;
+
 /** Через год после катастрофы: сколько видов исчезло (≥ EXT_SHARE и ≥ EXT_MIN — массовое вымирание), медиана размера. */
 function massSweep(w: World): void {
   const g = w.geo!;
@@ -611,15 +614,15 @@ function massSweep(w: World): void {
   if (g.lastMass < g.extT && k >= GEO.EXT_MIN && share >= GEO.EXT_SHARE) {
     g.lastMass = w.tick;
     g.stats.massExt++;
-    w.log(`💀 Массовое вымирание: после катастрофы исчезло ${k} из ${N} видов (${Math.round(100 * share)}%)`, 'disaster', undefined, undefined, 'geo_bigfive');
+    w.log(`💀 Массовое вымирание: после катастрофы исчезло ${k} из ${N} ${plural(N, 'вида', 'видов', 'видов')} (${Math.round(100 * share)}%)`, 'disaster', undefined, undefined, 'geo_bigfive');
     cutOff(w, 'после вымирания');
   }
   if (w.tick - g.extT >= YEAR) {
     const m1 = herbMedian(w), m0 = g.med0;
     const sz = (v: number) => v.toFixed(1).replace('.', ',');
-    const tail = m0 > 0 && m1 > 0 ? `; медиана размера травоядных ${sz(m0)} → ${sz(m1)}${m1 < m0 ? ' — мелкие пережили беду лучше' : ''}` : m1 === 0 && m0 > 0 ? '; травоядных суши не осталось' : '';
+    const tail = m0 > 0 && m1 > 0 ? `; медиана размера травоядных ${sz(m0)} → ${sz(m1)}${m1 < m0 * LIL_K ? ' — мелкие пережили беду лучше' : m1 <= m0 * 1.05 ? ' — почти не изменилась' : ''}` : m1 === 0 && m0 > 0 ? '; травоядных суши не осталось' : '';
     g.lastSum = { t: w.tick, k, N, m0, m1, n0: g.n0, n1: w.creatures.length };
-    w.log(`🐭 Год после катастрофы: исчезло ${k} из ${N} видов${tail}`, 'info', undefined, undefined, m1 > 0 && m1 < m0 ? 'lilliput' : 'geo_bigfive');
+    w.log(`🐭 Год после катастрофы: исчезло ${k} из ${N} ${plural(N, 'вида', 'видов', 'видов')}${tail}`, 'info', undefined, undefined, m1 > 0 && m1 < m0 * LIL_K ? 'lilliput' : 'geo_bigfive');
     g.extRing = [];
   }
 }

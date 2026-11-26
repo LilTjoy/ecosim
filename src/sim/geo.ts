@@ -4,7 +4,8 @@
 // через очередь geo.pend и применяются лишь в живом пересчёте (deriveTerrain(w, true) в начале шага). Восстановление
 // снимка пересчитывает рельеф из уже применённого состояния и очередь не трогает — поэтому перемотка ≡ живой прогон.
 // Все случайности — World.r() (поток мира, ctx null) или mulberry32(seed ^ c); Math.random здесь нет.
-import { clamp, mulberry32 } from '../lib/random';
+import { clamp, mix32, mulberry32 } from '../lib/random';
+import { plural } from '../lib/text';
 import { BASE_INPUT, BIOMES, B, deriveHash, properName, type DeriveInput } from './terrain';
 import type { Creature, GeoEnv, World } from './world';
 import type { Genome } from './genome';
@@ -88,6 +89,8 @@ export interface SillRec {
   /** Ось пролива (px, от x0,y0 к x1,y1) и его полуширина: стороны моста — по знаку векторного произведения. */
   p: [number, number, number, number];
   hw: number;
+  /** Только что прорезан игроком: первый пересчёт молча ставит open (моста не было — нечему «уходить под воду»). */
+  cut?: true;
 }
 
 /** Сухопутный мост через порог: кто прошёл, кто прижился за ним, кто из местных вымер. Стороны — 0 (север/запад), 1. */
@@ -172,6 +175,8 @@ export interface GeoState {
   iceAge: 0 | 1 | 2 | null; co2Base: number; vBias: number; volc: number;
   /** ♾️ Доля мохнатых среди сухопутных в начале ледниковья (−1 — не мерили). */
   fur0: number;
+  /** 🌋 Ключ костей вулканов-самоходов: из seed и salt мира, перемешивается при reseed (у реплик и веток — свои извержения). */
+  vk: number;
   stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number;
     leaks: number; invaders: number; moraines: number; kettles: number; lakes: number; refugia: number;
     /** Разделения по барьерам: мелкий порог, Уоллес, пролив игрока. */ sSill: number; sWall: number; sPlay: number };
@@ -182,7 +187,7 @@ export interface GeoState {
  * вытянутость орбиты задаёт силу 100-тысячелетнего ритма, без большой луны наклон оси качается втрое сильнее,
  * эпоха планеты (iceAge) включает или выключает циклы и сдвигает цель льда, CO₂ — естественный уровень острова.
  */
-export function newGeo(seed: number, ge?: GeoEnv): GeoState {
+export function newGeo(seed: number, ge?: GeoEnv, salt = 0): GeoState {
   const r = mulberry32(seed ^ 0x6e0c1);
   const phis: [number, number, number] = [r() * 2 * Math.PI, r() * 2 * Math.PI, r() * 2 * Math.PI];
   const amps: [number, number, number] = [GEO.AMPS0[0], GEO.AMPS0[1], GEO.AMPS0[2]];
@@ -216,8 +221,14 @@ export function newGeo(seed: number, ge?: GeoEnv): GeoState {
     vBias: !ge || ge.iceAge === 1 ? 0 : ge.iceAge === 0 ? GEO.BIAS_WARM : GEO.BIAS_COLD,
     volc: ge ? clamp(ge.volcanism, 0, 3) : 1,
     fur0: -1,
+    vk: volcKey(seed, salt),
     stats: { glacials: 0, bridges: 0, splits: 0, vicariance: 0, impacts: 0, eruptions: 0, fires: 0, massExt: 0, derives: 0, leaks: 0, invaders: 0, moraines: 0, kettles: 0, lakes: 0, refugia: 0, sSill: 0, sWall: 0, sPlay: 0 },
   };
+}
+
+/** 🌋 Ключ костей вулканов: salt 0 — сам seed (как до соли), иначе перемешан с солью. */
+export function volcKey(seed: number, salt: number): number {
+  return salt ? mix32(seed ^ mix32(salt)) : seed;
 }
 
 /** 🌍 Первая строка летописи острова, спустившегося с планеты. */
@@ -422,7 +433,7 @@ function evacuate(w: GeoWorld, pub: World): void {
   const g = w.geo;
   if (g && moved + stuck > 0 && w.tick - g.lastLogT >= GEO.LOG_GAP) {
     g.lastLogT = w.tick;
-    pub.log(`🌊 Море наступило: ${moved} зверей ушли от воды${stuck ? `, ${stuck} не нашли суши` : ''}`, 'info');
+    pub.log(`🌊 Море наступило: ${moved} ${plural(moved, 'зверь ушёл', 'зверя ушли', 'зверей ушли')} от воды${stuck ? `, ${stuck} не ${plural(stuck, 'нашёл', 'нашли', 'нашли')} суши` : ''}`, 'info');
   }
 }
 
@@ -844,6 +855,11 @@ function updateSills(w: World): void {
       if (s.b < 0) s.b = anchor(w, Math.max(s.y1, suture + 3), s.y1 + 25);
     }
     const open = s.a >= 0 && s.b >= 0 && lm[s.a] >= 0 && lm[s.a] === lm[s.b];
+    if (s.cut) {
+      delete s.cut;
+      s.open = open;
+      return;
+    }
     if (open === s.open) return;
     s.open = open;
     const t = w.terrain, i = s.cells[s.cells.length >> 1] ?? s.a;
@@ -1046,7 +1062,7 @@ function plateLog(w: World): void {
     }
   if (k < 20) return;
   p.mtn = true;
-  w.log(`⛰ Хребет ${p.name} поднялся: ${k} клеток гор там, где сходятся плиты`, 'milestone', w.width / 2, s * w.cell, 'geo_orogeny');
+  w.log(`⛰ Хребет ${p.name} поднялся: ${k} ${plural(k, 'клетка', 'клетки', 'клеток')} гор там, где сходятся плиты`, 'milestone', w.width / 2, s * w.cell, 'geo_orogeny');
 }
 
 /** 🏜 Летопись дождевой тени: стало заметно больше суши, где влажность ниже исходной на 15 % и больше. */
@@ -1069,7 +1085,7 @@ function shadowLog(w: World): void {
   let best = -1, bn = 0;
   for (const [r, c] of reg) if (c > bn || (c === bn && r < best)) { bn = c; best = r; }
   const R = best >= 0 ? t.regions[best] : null;
-  w.log(`🏜 За хребтом стало сухо${R ? `: «${R.name}»` : ''} — влажность ниже на ${Math.round((100 * sum) / k)}% (${k} клеток)`, 'info', R?.cx, R?.cy, 'geo_rainshadow');
+  w.log(`🏜 За хребтом стало сухо${R ? `: «${R.name}»` : ''} — влажность ниже на ${Math.round((100 * sum) / k)}% (${k} ${plural(k, 'клетка', 'клетки', 'клеток')})`, 'info', R?.cx, R?.cy, 'geo_rainshadow');
 }
 
 /** Шаг плиты сейчас (стенд и урок): то же, что в проходе, без ожидания DRIFT_T. */
@@ -1209,7 +1225,7 @@ function lineTool(w: World, pts: number[], mode: 'deep' | 'shallow' | 'raise'): 
   const L = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / L, ny = (x1 - x0) / L;
   const where = t.regionAt(mx, my)?.name;
   if (mode === 'raise') {
-    w.log(`🌉 Вы насыпали перешеек${where ? ` у «${where}»` : ''}: ${carved.length} клеток стали сушей`, 'player', mx, my, 'geo_gabi');
+    w.log(`🌉 Вы насыпали перешеек${where ? ` у «${where}»` : ''}: ${carved.length} ${plural(carved.length, 'клетка стала', 'клетки стали', 'клеток стали')} сушей`, 'player', mx, my, 'geo_gabi');
     return;
   }
   const off = (GEO.LINE_HW + 4) * w.cell;
@@ -1217,7 +1233,7 @@ function lineTool(w: World, pts: number[], mode: 'deep' | 'shallow' | 'raise'): 
   const name = properName(r);
   const ys = cells.map((i) => Math.floor(i / t.cols));
   const s: SillRec = {
-    kind: 'player', cells: carved, name, open: true,
+    kind: 'player', cells: carved, name, open: true, cut: true,
     a: landNear(w, mx + nx * off, my + ny * off),
     b: landNear(w, mx - nx * off, my - ny * off),
     y0: ys.length ? Math.min(...ys) : 0, y1: ys.length ? Math.max(...ys) + 1 : 0,
@@ -1262,7 +1278,7 @@ function ridgeTool(w: World, pts: number[]): void {
   g.shadowQ = true;
   const mx = (pts[0] + pts[pts.length - 2]) / 2, my = (pts[1] + pts[pts.length - 1]) / 2;
   const where = t.regionAt(mx, my)?.name;
-  w.log(`⛰ Вы подняли хребет${where ? ` у «${where}»` : ''}: ${k} клеток стали горами — ветер дует с запада, посмотрим, что станет за ним`, 'player', mx, my, 'geo_rainshadow');
+  w.log(`⛰ Вы подняли хребет${where ? ` у «${where}»` : ''}: ${k} ${plural(k, 'клетка стала', 'клетки стали', 'клеток стали')} горами — ветер дует с запада, посмотрим, что станет за ним`, 'player', mx, my, 'geo_rainshadow');
 }
 
 /** Расстояние от точки до ломаной (px). */
