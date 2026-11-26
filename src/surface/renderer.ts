@@ -43,6 +43,9 @@ const BUDGET = { mush: 400, spark: 1500, fungi: 300, micro: 700, wake: 200 };
 
 const BAKE_SCALE = 0.5; // пикселей текстуры на единицу мира
 const TILE_PX = 512;
+/** 🌋 Блок перепекания рельефа — 8×8 клеток (64 px при клетке 16); не больше BLK_FRAME блоков за кадр. */
+const BLK = 8;
+const BLK_FRAME = 12;
 /** Во сколько раз слой травы детальнее сетки клеток (сглаживание). */
 const OV = 3;
 
@@ -143,6 +146,18 @@ export class SurfaceRenderer {
   private springSet = new Set<number>();
   /** Свой генератор для косметики — не трогает Math.random симуляции. */
   private rnd = mulberry32(4242);
+  // ---- 🌋 перепекание рельефа после пересчёта (живая планета) ----
+  /** Биомы, с которыми запечён рельеф; отпечаток рельефа (Terrain.rev) и сам рельеф на момент запекания. */
+  private bakedBiome = new Uint8Array(0);
+  private bakedRev = 0;
+  private bakedTerrain: World['terrain'] | null = null;
+  /** Очередь грязных блоков (номера) и отметки «уже в очереди». */
+  private blkQueue: number[] = [];
+  private blkMark = new Uint8Array(0);
+  /** Реки и миникарта перерисуются, когда очередь опустеет. */
+  private riversStale = false;
+  /** Блоков перепечено за последний кадр (для проверки бюджета). */
+  rebakedLast = 0;
   /** Масштаб бюджетов: 0.5 на узком экране. */
   private bk = 1;
   private zoom = 1;
@@ -191,6 +206,25 @@ export class SurfaceRenderer {
     this.bake.width = W;
     this.bake.height = H;
     const g = this.bake.getContext('2d')!;
+    this.bakedTerrain = t;
+    this.bakedRev = t.rev;
+    this.bakedBiome = t.biome.slice();
+    const bw = Math.ceil(t.cols / BLK), bh = Math.ceil(t.rows / BLK);
+    this.blkMark = new Uint8Array(bw * bh);
+    this.blkQueue = [];
+    this.riversStale = false;
+    // 🌋 живая планета: шум — по пикселю (hash2), чтобы блоки перепекались без швов; без неё — прежний вид до пикселя
+    if (this.world.lp) for (let b = 0; b < bw * bh; b++) this.bakeBlock(g, b, false);
+    else this.bakeScan(g, W, H);
+    this.buildRivers();
+    this.decorate(g);
+    this.tiles.clear();
+    this.finishRebuild(W, H);
+  }
+
+  /** Рельеф общего плана целиком, шум — по порядку обхода (как было всегда). */
+  private bakeScan(g: CanvasRenderingContext2D, W: number, H: number): void {
+    const t = this.world.terrain;
     const img = g.createImageData(W, H);
     const d = img.data;
     const f = { e: 0, m: 0, t: 0 };
@@ -239,10 +273,164 @@ export class SurfaceRenderer {
       }
     }
     g.putImageData(img, 0, 0);
-    this.buildRivers();
-    this.decorate(g);
-    this.tiles.clear();
+  }
 
+  /**
+   * 🌋 Один блок рельефа (8×8 клеток) с шумом по пикселю; deco — заново нарисовать украшения клеток блока ±1
+   * (с обрезкой по блоку: у соседей они остаются как были).
+   */
+  private bakeBlock(g: CanvasRenderingContext2D, b: number, deco: boolean): void {
+    const t = this.world.terrain;
+    const bw = Math.ceil(t.cols / BLK);
+    const bx = b % bw, by = (b / bw) | 0;
+    const W = this.bake.width, H = this.bake.height;
+    const span = BLK * this.world.cell * BAKE_SCALE;
+    const x0 = Math.round(bx * span), y0 = Math.round(by * span);
+    const x1 = Math.min(W, Math.round((bx + 1) * span)), y1 = Math.min(H, Math.round((by + 1) * span));
+    const w = x1 - x0, h = y1 - y0;
+    if (w <= 0 || h <= 0) return;
+    // высоты с полем в 1 пиксель — для освещения склонов на краях блока
+    const ew = w + 2;
+    const elev = new Float32Array(ew * (h + 2));
+    const f = { e: 0, m: 0, t: 0 };
+    for (let y = -1; y <= h; y++) {
+      for (let x = -1; x <= w; x++) {
+        const px = clamp(x0 + x, 0, W - 1), py = clamp(y0 + y, 0, H - 1);
+        t.fieldsAt(px / BAKE_SCALE, py / BAKE_SCALE, f);
+        elev[(y + 1) * ew + x + 1] = f.e;
+      }
+    }
+    const img = g.createImageData(w, h);
+    const d = img.data;
+    const sea = t.seaLevel;
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const gx = x0 + x, gy = y0 + y;
+        t.fieldsAt(gx / BAKE_SCALE, gy / BAKE_SCALE, f);
+        const b2 = t.classify(f.e, f.m, f.t);
+        const info = BIOMES[b2];
+        let [r, gg, bb] = info.ground;
+        const n = (hash2(gx * 0.25, gy * 0.25) - 0.5) * 10;
+        if (info.water) {
+          const depth = clamp((sea - f.e) * 8, 0, 1);
+          r = 52 - depth * 32;
+          gg = 112 - depth * 62;
+          bb = 150 - depth * 52;
+          if (sea - f.e < 0.004) {
+            r += 50;
+            gg += 50;
+            bb += 40;
+          }
+        } else {
+          const i = (y + 1) * ew + x + 1;
+          // как в общем запекании: у края карты — односторонняя разность
+          const ex = elev[i + (gx < W - 1 ? 1 : 0)] - elev[i - (gx > 0 ? 1 : 0)];
+          const ey = elev[i + (gy < H - 1 ? ew : 0)] - elev[i - (gy > 0 ? ew : 0)];
+          const shade = clamp(1 - (ex + ey) * 60, 0.7, 1.35);
+          r *= shade;
+          gg *= shade;
+          bb *= shade;
+        }
+        const o = (y * w + x) * 4;
+        d[o] = clamp(r + n, 0, 255);
+        d[o + 1] = clamp(gg + n, 0, 255);
+        d[o + 2] = clamp(bb + n, 0, 255);
+        d[o + 3] = 255;
+      }
+    }
+    g.putImageData(img, x0, y0);
+    if (!deco) return;
+    g.save();
+    g.beginPath();
+    g.rect(x0, y0, w, h);
+    g.clip();
+    g.scale(BAKE_SCALE, BAKE_SCALE);
+    const c0 = Math.max(0, bx * BLK - 1), c1 = Math.min(t.cols - 1, (bx + 1) * BLK);
+    const r0 = Math.max(0, by * BLK - 1), r1 = Math.min(t.rows - 1, (by + 1) * BLK);
+    for (let cy = r0; cy <= r1; cy++) for (let cx = c0; cx <= c1; cx++) for (const dd of this.decoItems(cx, cy)) this.drawDeco(g, dd, 1);
+    g.restore();
+  }
+
+  /**
+   * 🌋 Рельеф пересчитан (живая планета или восстановление снимка с другим рельефом): блоки клеток, чей биом
+   * отличается от запечённого (с полем в клетку), — в очередь; тайлы над ними — прочь. Каждый кадр — не больше
+   * BLK_FRAME блоков; когда очередь опустеет — заново реки и миникарта.
+   */
+  private syncTerrain(): void {
+    this.rebakedLast = 0;
+    const t = this.world.terrain;
+    if (t !== this.bakedTerrain) return; // новый мир — rebuild() вызовет страница
+    if (t.rev !== this.bakedRev) {
+      this.bakedRev = t.rev;
+      const cols = t.cols, rows = t.rows, bw = Math.ceil(cols / BLK);
+      const B0 = this.bakedBiome, B1 = t.biome;
+      let c0 = cols, r0 = rows, c1 = -1, r1 = -1;
+      for (let i = 0; i < B1.length; i++) {
+        if (B0[i] === B1[i]) continue;
+        B0[i] = B1[i];
+        const x = i % cols, y = (i / cols) | 0;
+        if (x < c0) c0 = x;
+        if (x > c1) c1 = x;
+        if (y < r0) r0 = y;
+        if (y > r1) r1 = y;
+        for (let yy = Math.max(0, y - 1); yy <= Math.min(rows - 1, y + 1); yy++) {
+          for (let xx = Math.max(0, x - 1); xx <= Math.min(cols - 1, x + 1); xx++) {
+            const b = ((yy / BLK) | 0) * bw + ((xx / BLK) | 0);
+            if (!this.blkMark[b]) {
+              this.blkMark[b] = 1;
+              this.blkQueue.push(b);
+            }
+          }
+        }
+      }
+      this.riversStale = true;
+      this.springSet = new Set(t.springs);
+      this.buildRivers(); // узлы русел — до украшений (деревья у рек)
+      // реки могли сменить русла где угодно — детальные тайлы с реками и украшениями устарели в рамке изменений
+      if (c1 >= 0) this.dropTiles((c0 - 1) * this.world.cell, (r0 - 1) * this.world.cell, (c1 + 2) * this.world.cell, (r1 + 2) * this.world.cell);
+      this.dropRiverTiles();
+      this.updateOverlay();
+    }
+    if (this.blkQueue.length) {
+      const g = this.bake.getContext('2d')!;
+      const n = Math.min(BLK_FRAME, this.blkQueue.length);
+      for (let k = 0; k < n; k++) {
+        const b = this.blkQueue.shift()!;
+        this.blkMark[b] = 0;
+        this.bakeBlock(g, b, true);
+      }
+      this.rebakedLast = n;
+      if (this.blkQueue.length) return;
+    }
+    if (this.riversStale) {
+      this.riversStale = false;
+      const W = this.bake.width, H = this.bake.height;
+      const rg = this.riverLayer.getContext('2d')!;
+      rg.setTransform(1, 0, 0, 1, 0, 0);
+      rg.clearRect(0, 0, W, H);
+      rg.scale(BAKE_SCALE, BAKE_SCALE);
+      this.strokeRivers(rg, 0, t.cols - 1, 0, t.rows - 1, false, 1.8);
+      this.drawMini();
+    }
+  }
+
+  /** Детальные тайлы, пересекающие прямоугольник (единицы мира), — прочь. */
+  private dropTiles(x0: number, y0: number, x1: number, y1: number): void {
+    for (const key of [...this.tiles.keys()]) {
+      const [lv, tx, ty] = key.split(':').map(Number);
+      const size = TILE_PX / lv;
+      const ax = tx * size, ay = ty * size;
+      if (ax < x1 + 12 && ax + size > x0 - 12 && ay < y1 + 12 && ay + size > y0 - 12) this.tiles.delete(key);
+    }
+  }
+
+  /** Тайлы со своим слоем рек — прочь (русла пересчитаны). */
+  private dropRiverTiles(): void {
+    for (const [key, p] of [...this.tiles]) if (p.rivers) this.tiles.delete(key);
+  }
+
+  private finishRebuild(W: number, H: number): void {
+    const t = this.world.terrain;
     // реки — отдельным слоем поверх травы
     this.riverLayer = document.createElement('canvas');
     this.riverLayer.width = W;
@@ -260,8 +448,14 @@ export class SurfaceRenderer {
     this.cellCol = new Float32Array(t.cols * t.rows * 4);
     this.updateOverlay();
 
+    this.drawMini();
+  }
+
+  /** Основа миникарты: запечённый рельеф и реки не тоньше 1 px. */
+  private drawMini(): void {
+    const t = this.world.terrain;
     // основа миникарты
-    this.miniBase = document.createElement('canvas');
+    this.miniBase ??= document.createElement('canvas');
     this.miniBase.width = 240;
     this.miniBase.height = Math.round((240 * this.world.height) / this.world.width);
     const mg = this.miniBase.getContext('2d')!;
@@ -424,7 +618,7 @@ export class SurfaceRenderer {
       add('bush', 0.15, [2, 3]);
     } else if (b === B.Beach) add('pebble', 0.3, [0.8, 1.6]);
     // новое — после старого, чтобы деревья и камни остались на своих местах
-    if (this.springSet.has(i)) out.push({ kind: 'spring', x: (cx + 0.5) * cell, y: (cy + 0.5) * cell, s: 6 + r() * 4, v: r() });
+    if (this.springSet.has(i) && !BIOMES[b].water) out.push({ kind: 'spring', x: (cx + 0.5) * cell, y: (cy + 0.5) * cell, s: 6 + r() * 4, v: r() });
     const life = this.world.env.landLife;
     if (!life) {
       // суша без растений: строматолиты на мелководье, микробные маты на равнинах
@@ -1513,6 +1707,7 @@ export class SurfaceRenderer {
     this.frame++;
     this.bk = window.innerWidth < 700 ? 0.5 : 1;
     this.zoom = cam.zoom;
+    this.syncTerrain();
     if (this.frame % 12 === 0) this.updateOverlay();
     this.consumeFx();
 

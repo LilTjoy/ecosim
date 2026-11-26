@@ -92,6 +92,80 @@ export interface Region {
   cy: number;
 }
 
+/** 🌋 Входы производного рельефа (живая планета): всё, от чего зависит рельеф сверх seed и env. */
+export interface PlateView {
+  ox: number;
+  oy: number;
+}
+export interface DeriveInput {
+  /** Сдвиг уровня моря от исходного (единицы высоты). */
+  seaQ: number;
+  /** Правки высоты по клеткам, 1e-4 единицы (null — нет). */
+  elevD: Int16Array | null;
+  plate: PlateView | null;
+  lakes: boolean;
+  shadow: boolean;
+}
+export interface DeriveOut {
+  /** Клетки, у которых сменился биом, класс реки или влажность (буфер переиспользуется — читать сразу). */
+  changed: Int32Array;
+  /** Биомы до этого пересчёта (буфер переиспользуется). */
+  prev: Uint8Array;
+  landChanged: boolean;
+  /** [c0, r0, c1, r1] изменённых клеток (пустой — c0 > c1). */
+  bbox: [number, number, number, number];
+}
+export const BASE_INPUT: DeriveInput = { seaQ: 0, elevD: null, plate: null, lakes: false, shadow: false };
+
+/** Входы на исходном уровне: рельеф — ровно тот, что дал generate(). */
+export function isBaseInput(inp: DeriveInput): boolean {
+  if (inp.seaQ !== 0 || inp.plate || inp.lakes || inp.shadow) return false;
+  const d = inp.elevD;
+  if (d) for (let i = 0; i < d.length; i++) if (d[i] !== 0) return false;
+  return true;
+}
+
+/** FNV-1a входов пересчёта (0 — исходный рельеф): одинаковые входы — одинаковый рельеф, поэтому снимку хватает сверить число. */
+export function deriveHash(inp: DeriveInput): number {
+  if (isBaseInput(inp)) return 0;
+  let h = 0x811c9dc5 | 0;
+  const f = new Float64Array([inp.seaQ, inp.plate ? inp.plate.ox : NaN, inp.plate ? inp.plate.oy : NaN, inp.lakes ? 1 : 0, inp.shadow ? 1 : 0]);
+  const u = new Uint32Array(f.buffer);
+  for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 16777619);
+  const d = inp.elevD;
+  if (d) {
+    for (let i = 0; i < d.length; i++) h = Math.imul(h ^ (d[i] & 0xffff), 16777619);
+  }
+  h >>>= 0;
+  return h === 0 ? 1 : h;
+}
+
+interface TerrainBase {
+  elev: Float32Array;
+  moist: Float32Array;
+  temp: Float32Array;
+  /** Температура до поправки на высоту и без обрезки 0..1 (для клеток с правкой высоты). */
+  tpre: Float32Array;
+  biome: Uint8Array;
+  region: Int16Array;
+  drain: Int32Array;
+  order: Int32Array;
+  flow: Float32Array;
+  river: Uint8Array;
+  rivId: Int16Array;
+  rivers: Terrain['rivers'];
+  sea: number;
+  springs: number[];
+}
+
+/** Рабочие буферы гидрологии и пересчёта (переиспользуются: без мусора на каждом шаге моря). */
+interface HydroBuf {
+  hk: Float32Array;
+  hi: Int32Array;
+  filled: Float32Array;
+  visited: Uint8Array;
+}
+
 export class Terrain {
   readonly cols: number;
   readonly rows: number;
@@ -114,6 +188,14 @@ export class Terrain {
   springs: number[] = [];
   seaLevel = 0;
   mountainLevel = 0;
+  /** 🌋 Отпечаток входов пересчёта (deriveHash); 0 — исходный рельеф. */
+  rev = 0;
+  /** 🌋 Озёра (этап ледников; пока всегда null). */
+  lake: Uint8Array | null = null;
+  /** 🌋 Исходный рельеф — копируется лениво, при первом пересчёте (миры без живой планеты ничего не выделяют). */
+  private base: TerrainBase | null = null;
+  private hbuf: HydroBuf | null = null;
+  private dbuf: { biome: Uint8Array; river: Uint8Array; moist: Float32Array; changed: Int32Array; label: Int16Array; queue: Int32Array; stem: Int32Array } | null = null;
 
   constructor(
     readonly width: number,
@@ -226,16 +308,21 @@ export class Terrain {
     this.buildRegions(rand);
   }
 
-  /** Реки: priority-flood (Barnes 2014) → сток → русла, имена, притоки; горячие источники. */
-  private hydrology(): void {
+  /**
+   * Реки: priority-flood (Barnes 2014) → сток → русла, имена, притоки; горячие источники.
+   * derive — пересчёт живой планеты: буферы переиспользуются, имена — по совпадению с исходными руслами, источники не ищутся.
+   */
+  private hydrology(derive = false): void {
     const { cols, rows, elev, biome, drain, order, flow, river, rivId } = this;
     const n = cols * rows;
     // свой поток случайностей — имена регионов и карта не меняются
     const rand2 = mulberry32(this.seed ^ 0x9e3779b9);
     const wet = (i: number) => biome[i] <= B.Shallow;
+    const buf: HydroBuf = derive
+      ? (this.hbuf ??= { hk: new Float32Array(n), hi: new Int32Array(n), filled: new Float32Array(n), visited: new Uint8Array(n) })
+      : { hk: new Float32Array(n), hi: new Int32Array(n), filled: new Float32Array(n), visited: new Uint8Array(n) };
     // двоичная куча на типизированных массивах
-    const hk = new Float32Array(n);
-    const hi = new Int32Array(n);
+    const { hk, hi, filled, visited } = buf;
     let hn = 0;
     const push = (i: number, k: number) => {
       let c = hn++;
@@ -267,8 +354,13 @@ export class Terrain {
       hi[c] = i;
       return top;
     };
-    const filled = Float32Array.from(elev);
-    const visited = new Uint8Array(n);
+    filled.set(elev);
+    if (derive) {
+      visited.fill(0);
+      drain.fill(-1);
+      rivId.fill(-1);
+      this.rivers = [];
+    }
     for (let i = 0; i < n; i++) {
       const x = i % cols;
       const y = (i / cols) | 0;
@@ -311,16 +403,16 @@ export class Terrain {
     for (let i = 0; i < n; i++) if (river[i] >= 2 && drain[i] >= 0 && wet(drain[i]) && flow[i] >= 150) mouths.push(i);
     mouths.sort((a, b) => flow[b] - flow[a]);
     const used = new Set<string>();
+    const base = derive ? this.base! : null;
+    const stem = derive ? this.dbuf!.stem : null;
+    const votes = derive ? new Int32Array(base!.rivers.length) : null;
     for (const m of mouths.slice(0, 12)) {
-      let name = '';
-      do name = 'р. ' + properName(rand2);
-      while (used.has(name));
-      used.add(name);
       const id = this.rivers.length;
-      this.rivers.push({ name, mouth: m, flow: flow[m] });
       // главное русло: вверх по самому полноводному притоку
       let i = m;
       rivId[i] = id;
+      let len = 0;
+      if (stem) stem[len++] = i;
       for (;;) {
         let best = -1;
         const x = i % cols;
@@ -337,7 +429,33 @@ export class Terrain {
         if (best < 0 || rivId[best] !== -1) break;
         rivId[best] = id;
         i = best;
+        if (stem) stem[len++] = i;
       }
+      let name = '';
+      if (!base) {
+        do name = 'р. ' + properName(rand2);
+        while (used.has(name));
+      } else {
+        // то же имя, что у исходной реки, с чьим главным руслом совпадает больше всего клеток; иначе — новое по клетке
+        votes!.fill(0);
+        let minCell = m;
+        for (let q = 0; q < len; q++) {
+          const c = stem![q];
+          if (c < minCell) minCell = c;
+          const v = base.rivId[c];
+          if (v >= 0) votes![v]++;
+        }
+        let bestV = -1;
+        for (let v = 0; v < votes!.length; v++) if (votes![v] > 0 && !used.has(base.rivers[v].name) && (bestV < 0 || votes![v] > votes![bestV])) bestV = v;
+        if (bestV >= 0) name = base.rivers[bestV].name;
+        else {
+          const r = mulberry32(this.seed ^ minCell);
+          do name = 'р. ' + properName(r);
+          while (used.has(name));
+        }
+      }
+      used.add(name);
+      this.rivers.push({ name, mouth: m, flow: flow[m] });
     }
     // притоки: снизу вверх по течению наследуют имя
     for (let q = 0; q < n; q++) {
@@ -345,6 +463,11 @@ export class Terrain {
       if (rivId[i] !== -1 || river[i] < 1 || drain[i] < 0) continue;
       const v = rivId[drain[i]];
       if (v !== -1) rivId[i] = v >= 0 ? -(v + 2) : v;
+    }
+    if (derive) {
+      // источники — исходные, только на суше
+      this.springs = base!.springs.filter((c) => !wet(c));
+      return;
     }
 
     // горячие источники: 2–6 клеток от гор (заснеженные вершины тоже горы)
@@ -459,6 +582,129 @@ export class Terrain {
   regionAt(x: number, y: number): Region | null {
     const r = this.region[this.index(x, y)];
     return r >= 0 && this.regions[r].cells >= 30 ? this.regions[r] : null;
+  }
+
+  // ---------------- 🌋 живая планета: рельеф как чистая функция входов ----------------
+
+  /** Копия исходного рельефа (один раз, до первой правки). */
+  private ensureBase(): TerrainBase {
+    if (this.base) return this.base;
+    const { cols, rows, cell, height } = this;
+    const n = cols * rows;
+    // температура до поправки на высоту — тем же шумом, что в generate()
+    const nT = new Noise(this.seed + 202);
+    const tpre = new Float32Array(n);
+    for (let cy = 0; cy < rows; cy++) {
+      for (let cx = 0; cx < cols; cx++) {
+        const x = (cx + 0.5) * cell;
+        const y = (cy + 0.5) * cell;
+        tpre[cy * cols + cx] = 0.02 + (y / height) * 0.95 + (nT.fbm(x / 700, y / 700, 3) - 0.5) * 0.35 + this.tempOffset;
+      }
+    }
+    this.base = {
+      elev: this.elev.slice(), moist: this.moist.slice(), temp: this.baseTemp.slice(), tpre,
+      biome: this.biome.slice(), region: this.region.slice(), drain: this.drain.slice(), order: this.order.slice(), flow: this.flow.slice(),
+      river: this.river.slice(), rivId: this.rivId.slice(), rivers: this.rivers.map((r) => ({ ...r })), sea: this.seaLevel, springs: this.springs.slice(),
+    };
+    this.dbuf = {
+      biome: new Uint8Array(n), river: new Uint8Array(n), moist: new Float32Array(n), changed: new Int32Array(n),
+      label: new Int16Array(n), queue: new Int32Array(n), stem: new Int32Array(n),
+    };
+    return this.base;
+  }
+
+  /**
+   * Единственный изменяющий рельеф метод: рельеф — чистая функция входов (без случайностей), на месте —
+   * объект Terrain тот же (уроки и опыты сверяют его по ссылке). Регионы — исходные: новая суша берёт метку
+   * ближайшей исходной суши, затонувшая — −1; список regions не меняется.
+   */
+  derive(inp: DeriveInput): DeriveOut {
+    if (inp.plate) throw new Error('Terrain.derive: дрейф плит — этап 3');
+    if (inp.lakes || inp.shadow) throw new Error('Terrain.derive: озёра и дождевая тень — следующие этапы');
+    const base = this.ensureBase();
+    const D = this.dbuf!;
+    const n = this.cols * this.rows;
+    const { elev, moist, baseTemp, biome, river } = this;
+    D.biome.set(biome);
+    D.river.set(river);
+    D.moist.set(moist);
+    if (isBaseInput(inp)) {
+      elev.set(base.elev);
+      moist.set(base.moist);
+      baseTemp.set(base.temp);
+      biome.set(base.biome);
+      this.region.set(base.region);
+      this.drain.set(base.drain);
+      this.order.set(base.order);
+      this.flow.set(base.flow);
+      river.set(base.river);
+      this.rivId.set(base.rivId);
+      this.rivers = base.rivers.map((r) => ({ ...r }));
+      this.springs = base.springs.slice();
+      this.seaLevel = base.sea;
+      this.lake = null;
+      this.rev = 0;
+    } else {
+      this.seaLevel = base.sea + inp.seaQ;
+      const d = inp.elevD;
+      const span = this.mountainLevel - base.sea;
+      for (let i = 0; i < n; i++) {
+        const dz = d ? d[i] : 0;
+        if (dz === 0) {
+          elev[i] = base.elev[i];
+          baseTemp[i] = base.temp[i];
+        } else {
+          const e = (elev[i] = base.elev[i] + dz * 1e-4);
+          // высота охлаждает (как в generate, от исходного моря): и подъём, и опускание
+          const h = Math.max(0, (e - base.sea) / span);
+          baseTemp[i] = clamp(base.tpre[i] - h * h * 0.3, 0, 1);
+        }
+      }
+      moist.set(base.moist);
+      for (let i = 0; i < n; i++) biome[i] = this.classify(elev[i], moist[i], baseTemp[i]);
+      this.hydrology(true);
+      this.rev = deriveHash(inp);
+    }
+    // что изменилось: биом, класс реки или влажность (от них зависят статичные поля почвы)
+    let m = 0, landChanged = false;
+    let c0 = this.cols, r0 = this.rows, c1 = -1, r1 = -1;
+    for (let i = 0; i < n; i++) {
+      if (biome[i] === D.biome[i] && river[i] === D.river[i] && moist[i] === D.moist[i]) continue;
+      D.changed[m++] = i;
+      if ((biome[i] <= B.Shallow) !== (D.biome[i] <= B.Shallow)) landChanged = true;
+      const x = i % this.cols, y = (i / this.cols) | 0;
+      if (x < c0) c0 = x;
+      if (x > c1) c1 = x;
+      if (y < r0) r0 = y;
+      if (y > r1) r1 = y;
+    }
+    if (landChanged && this.rev !== 0) this.relabel();
+    return { changed: D.changed.subarray(0, m), prev: D.biome, landChanged, bbox: [c0, r0, c1, r1] };
+  }
+
+  /** Регионы после смены суши: исходная суша — своя метка, новая — ближайшей исходной суши (BFS без предела), вода — −1. */
+  private relabel(): void {
+    const base = this.base!;
+    const D = this.dbuf!;
+    const { cols, rows } = this;
+    const n = cols * rows;
+    const lab = D.label, q = D.queue;
+    let qt = 0;
+    for (let i = 0; i < n; i++) {
+      lab[i] = base.region[i];
+      if (lab[i] >= 0) q[qt++] = i;
+    }
+    for (let qh = 0; qh < qt; qh++) {
+      const i = q[qh];
+      const x = i % cols;
+      const v = lab[i];
+      if (x > 0 && lab[i - 1] < 0) { lab[i - 1] = v; q[qt++] = i - 1; }
+      if (x < cols - 1 && lab[i + 1] < 0) { lab[i + 1] = v; q[qt++] = i + 1; }
+      if (i >= cols && lab[i - cols] < 0) { lab[i - cols] = v; q[qt++] = i - cols; }
+      if (i + cols < n && lab[i + cols] < 0) { lab[i + cols] = v; q[qt++] = i + cols; }
+    }
+    for (let i = 0; i < n; i++) this.region[i] = REGION_CLASS[this.biome[i] as B] < 0 ? -1 : lab[i];
+    void rows;
   }
 }
 

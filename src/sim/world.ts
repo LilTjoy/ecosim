@@ -9,6 +9,7 @@ import { BEST, newBestiary, trackBottleneck, updateBestiary, type BestiaryState 
 import { chronicle, founderPlan, heritageOf, worldPalette, type Founder, type Heritage } from './heritage';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 import type { Action } from './timeline';
+import { allocGeoCells, deriveTerrain, GEO, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -235,6 +236,11 @@ export interface Settings {
   healthyHerd: boolean;
   /** ♾️ Открытая эволюция: модули тела мутируют, удваиваются и изобретаются (применяется при reset). */
   openEvo: boolean;
+  /**
+   * 🌋 Живая планета: рельеф и море меняются (применяется при reset). Необязательное: в мирах без неё ключа нет вовсе,
+   * поэтому их снимки и отпечатки — до бита прежние.
+   */
+  livePlanet?: boolean;
 }
 
 export const DAY = 150;
@@ -411,6 +417,20 @@ export class World {
   private ssm = 0;
   private nin = new Float32Array(IN);
   private nout = new Float32Array(OUT);
+  // ---- 🌋 живая планета ----
+  /** Копия settings.livePlanet, снятая в reset() (мир не меняет правила на ходу). */
+  lp = false;
+  /** Состояние живой планеты (null без неё); при восстановлении снимка заменяется целиком. */
+  geo: GeoState | null = null;
+  /** Клеточные поля живой планеты (только при lp): толщина льда H, её максимум за цикл (×255), правки высоты (1e-4), пепел|гарь|соль|морена. */
+  ice: Float32Array | null = null;
+  iceMax: Uint8Array | null = null;
+  elevD: Int16Array | null = null;
+  fx8: Uint8Array | null = null;
+  /** Производное (не в снимке): номер материка клетки, множитель влажности тени, клетки со льдом. */
+  lm: Int16Array | null = null;
+  moistK: Float32Array | null = null;
+  iceList: Int32Array | null = null;
 
   constructor(
     readonly width: number,
@@ -430,6 +450,19 @@ export class World {
     this.species.rand = this.r;
     this.env = env;
     this.terrain = new Terrain(this.width, this.height, this.cell, seed, env.sea, env.tempOffset, env.volcanism ?? 1);
+    // 🌋 до цикла травы: пороги и проливы (этап 1) должны быть в рельефе раньше травы и основателей; цикл травы берёт
+    // ровно 3 кости на клетку при любом биоме — поток мира тот же
+    this.lp = !!this.settings.livePlanet;
+    this.geo = null;
+    this.ice = this.iceMax = this.elevD = this.fx8 = null;
+    this.lm = this.moistK = this.iceList = null;
+    if (this.lp) {
+      allocGeoCells(this, this.terrain.cols * this.terrain.rows);
+      this.geo = newGeo(seed);
+      deriveTerrain(this, false);
+      this.geo.lands = labelLands(this);
+      this.iceList = new Int32Array(0);
+    }
     this.grass = new Float32Array(this.terrain.cols * this.terrain.rows);
     this.claim = new Float32Array(this.grass.length);
     this.claimTick = new Int32Array(this.grass.length).fill(-10);
@@ -543,10 +576,7 @@ export class World {
       const info = BIOMES[b];
       const w = info.water;
       const mycCap = b === B.Forest || b === B.Swamp;
-      this.isWater[i] = w ? 1 : mycCap ? 2 : 0;
-      this.microBase[i] = w ? 1 : Math.min(1.2, Math.max(0.15, t.moist[i] * 2)) * (b === B.Swamp ? 0.35 : 1);
-      this.leachK[i] = w ? 0 : SOIL.KL * 16 * t.moist[i] * (t.river[i] >= 1 ? 3 : 1);
-      this.s0[i] = b === B.Shallow ? 1.1 : b === B.Deep ? 0.9 : land ? 1 : 0.4;
+      this.staticsAt(i);
       this.soil[i] = b === B.Shallow ? 1.1 : b === B.Deep ? 0.9 : land ? 1 : 0.3;
       const T = t.baseTemp[i];
       const a0 = Q10T[T <= 0 ? 0 : T >= 1 ? 127 : (T * 127) | 0] * this.microBase[i] * o2k;
@@ -579,6 +609,24 @@ export class World {
     this.fizzleLogged = false;
     this.bloomMin = Infinity;
     this.bloomYear = 0;
+  }
+
+  /** Статичные поля почвы клетки — чистая функция рельефа (биом, влажность, реки). */
+  private staticsAt(i: number): void {
+    const t = this.terrain;
+    const b = t.biome[i];
+    const w = BIOMES[b].water;
+    const mycCap = b === B.Forest || b === B.Swamp;
+    this.isWater[i] = w ? 1 : mycCap ? 2 : 0;
+    this.microBase[i] = w ? 1 : Math.min(1.2, Math.max(0.15, t.moist[i] * 2)) * (b === B.Swamp ? 0.35 : 1);
+    this.leachK[i] = w ? 0 : SOIL.KL * 16 * t.moist[i] * (t.river[i] >= 1 ? 3 : 1);
+    this.s0[i] = b === B.Shallow ? 1.1 : b === B.Deep ? 0.9 : this.env.landLife ? 1 : 0.4;
+  }
+
+  /** 🌋 Статичные поля почвы клеток после пересчёта рельефа (до initSoil массивов ещё нет — тогда их посчитает он). */
+  deriveStatics(cells: ArrayLike<number>): void {
+    if (!this.isWater || this.isWater.length !== this.terrain.biome.length) return;
+    for (let k = 0; k < cells.length; k++) this.staticsAt(cells[k]);
   }
 
   /**
@@ -1232,9 +1280,13 @@ export class World {
 
   step(): void {
     this.tick++;
+    // 🌋 правки рельефа (кисть, геология) — до всего, что читает рельеф; в живом прогоне и в пересчёте одинаково
+    if (this.lp && this.geo!.pend.length) deriveTerrain(this, true);
+    if (this.lp && this.tick % GEO.EVERY === 0) geoPass(this);
     const cl = this.climate;
     if (cl.shift !== cl.target) cl.shift += clamp(cl.target - cl.shift, -cl.rate, cl.rate);
     this.shiftNow = cl.shift === 0 ? this.season.shift : this.season.shift + cl.shift;
+    if (this.lp) this.shiftNow += this.geo!.geoShift;
     this.dl = this.daylight;
     this.air0 = Math.pow(0.21 / Math.max(0.02, this.env.o2), 0.3);
     if (this.drought > 0 && --this.drought === 0) {
@@ -1242,6 +1294,7 @@ export class World {
       this.birch = 1500; // эффект Бёрча: после дождя почва «вздыхает»
     } else if (this.birch > 0) this.birch--;
     this.growGrass();
+    if (this.lp) geoHabitat(this);
     this.buildHash();
     this.updateCorpses();
 
@@ -2146,9 +2199,18 @@ export class World {
     }
     this.creatures = this.creatures.filter((c) => c.alive);
     const t = this.terrain;
-    for (let cy = Math.max(0, Math.floor((y - R * 1.3) / this.cell)); cy <= Math.min(t.rows - 1, (y + R * 1.3) / this.cell); cy++) {
-      for (let cx = Math.max(0, Math.floor((x - R * 1.3) / this.cell)); cx <= Math.min(t.cols - 1, (x + R * 1.3) / this.cell); cx++) {
-        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < R * 1.3) {
+    this.scorch(x, y, R * 1.3);
+    this.micro.lastMeteor = { x, y, tick: this.tick };
+    this.fx.push({ kind: 'meteor', x, y, hue: 30 });
+    this.log(`☄️ Метеорит упал на «${t.regionAt(x, y)?.name ?? 'море'}». Погибло: ${killed}`, 'disaster', x, y);
+  }
+
+  /** Выжженный круг: трава сгорела, пепел — в опад, микробы и микориза погибли (метеорит; 🌋 удары и извержения). */
+  scorch(x: number, y: number, r: number): void {
+    const t = this.terrain;
+    for (let cy = Math.max(0, Math.floor((y - r) / this.cell)); cy <= Math.min(t.rows - 1, (y + r) / this.cell); cy++) {
+      for (let cx = Math.max(0, Math.floor((x - r) / this.cell)); cx <= Math.min(t.cols - 1, (x + r) / this.cell); cx++) {
+        if (Math.hypot((cx + 0.5) * this.cell - x, (cy + 0.5) * this.cell - y) < r) {
           const i = cy * t.cols + cx;
           this.grass[i] = 0;
           // пепел и сгоревшая биомасса; микробы и микориза погибли — первыми вернутся азотфиксаторы
@@ -2160,9 +2222,6 @@ export class World {
         }
       }
     }
-    this.micro.lastMeteor = { x, y, tick: this.tick };
-    this.fx.push({ kind: 'meteor', x, y, hue: 30 });
-    this.log(`☄️ Метеорит упал на «${t.regionAt(x, y)?.name ?? 'море'}». Погибло: ${killed}`, 'disaster', x, y);
   }
 
   startDrought(): void {
@@ -2262,6 +2321,10 @@ export class World {
         break;
       case 'grass':
         for (let i = 0; i + 1 < a.pts.length; i += 2) this.paintGrass(a.pts[i], a.pts[i + 1], a.r);
+        break;
+      case 'terra':
+        // 🌋 только в очередь: рельеф пересчитается в начале следующего шага (без живой планеты — ничего)
+        if (this.lp) for (let i = 0; i + 1 < a.pts.length; i += 2) terraBrush(this, a.pts[i], a.pts[i + 1], a.r, a.dz);
         break;
       case 'spawn': {
         const g: Partial<Genome> = { ...a.g, hue: this.r() * 360 };

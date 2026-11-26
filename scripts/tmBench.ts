@@ -7,6 +7,7 @@ import { mulberry32 } from '../src/lib/random';
 import { cpus, loadavg } from 'node:os';
 import { cmp, load, thin } from './tmTimeline';
 import { bgGate, blountGate } from './tmWorker';
+import { geo } from './tmGeo';
 
 interface Ctx { seed: number; T: number; mode: BrainMode; salt: number; mk: () => World; flags: Record<string, string> }
 
@@ -69,7 +70,8 @@ export function runTm(kind: string, ctx: Ctx): void {
   if (kind === 'cmp') return cmp(ctx);
   if (kind === 'bg') return bgGate(ctx);
   if (kind === 'blount') return blountGate(ctx);
-  throw new Error(`--tm=${kind}: есть det, fly, load, thin, cmp, bg и blount`);
+  if (kind === 'geo') return geo(ctx);
+  throw new Error(`--tm=${kind}: есть det, fly, load, thin, cmp, bg, blount и geo`);
 }
 
 // ---------------- det ----------------
@@ -191,7 +193,9 @@ function det({ seed, T, mode, mk }: Ctx): void {
   const n = S.cre.n;
   const snapKB = S.bytes / 1024;
   const slack = loadavg()[0] > cpus().length ? 2 : 1;
-  const kbLim = 1150 + (mode === 'neural' ? 1.3 : 0.45) * n;
+  // 🌋 живая планета: + её клеточные поля (лёд, максимум льда, правки высоты, пепел/гарь/соль/морена — ≈ 275 КБ, P3)
+  const geoKB = S.geoCells ? (S.geoCells.ice.byteLength + S.geoCells.iceMax.byteLength + S.geoCells.elevD.byteLength + S.geoCells.fx8.byteLength) / 1024 : 0;
+  const kbLim = 1150 + (mode === 'neural' ? 1.3 : 0.45) * n + geoKB;
   const capP50 = med(caps), resMs = Math.max(resFresh, resSame), stepRatio = msB / msA;
   const warn: string[] = [];
   if (snapKB > kbLim) warn.push(`snapKB ${snapKB.toFixed(0)} > ${kbLim.toFixed(0)}`);

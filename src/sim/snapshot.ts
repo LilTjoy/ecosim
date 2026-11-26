@@ -9,6 +9,7 @@ import { WEIGHTS } from './brain';
 import { mix32 } from '../lib/random';
 import type { SpeciesSave } from './species';
 import type { Terrain } from './terrain';
+import { allocGeoCells, deriveTerrain, geoInputsHash, labelLands, rebuildIceList } from './geo';
 
 export const SNAP_VERSION = 1;
 
@@ -24,6 +25,8 @@ export interface WorldSnap {
   scal: Record<string, unknown>;
   /** Копии клеточных полей SNAP_CELLS. */
   cells: Record<string, Float32Array>;
+  /** 🌋 Клеточные поля живой планеты (только у миров с ней; без неё ключа нет — снимок прежний). */
+  geoCells?: { ice: Float32Array; iceMax: Uint8Array; elevD: Int16Array; fx8: Uint8Array };
   /** Только записи с claimTick ≥ tick − 1 (остальные симуляция не читает — кодирование точное). */
   claim: { idx: Int32Array; val: Float32Array; t: Int32Array };
   cre: { n: number; f64cols: string[]; i32cols: string[]; f64: Float64Array; i32: Int32Array; cause: (string | null)[]; ghost: 0 | 1 };
@@ -77,12 +80,13 @@ export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic',
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
-  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0', 'chan', 'airSnd', 'avoided', 'bestiary', 'founderPlan', 'palette'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
-export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain'] as const;
+  'experiment', 'blocked', 'climate', 'oe', 'expr', 'nextOrigin', 'evoStats', 'dl', 'metRef', 'upRef', 'air0', 'chan', 'airSnd', 'avoided', 'bestiary', 'founderPlan', 'palette', 'lp', 'geo'] as const; // уроки: experiment (без разложителей), blocked (опыт Гаузе); climate — «Что если» климата
+export const SNAP_SPECIAL = ['creatures', 'corpses', 'ancestors', 'species', 'claim', 'claimTick', 'player', 'history', 'blockedTerrain',
+  'ice', 'iceMax', 'elevD', 'fx8'] as const; // 🌋 ice…fx8 — geoCells (только при lp)
 /** Статичное (из seed, env и размеров), временное или служебное для уроков. */
 export const SNAP_SKIP = ['terrain', 'width', 'height', 'cell', 'env', 'grid', 'corpseGrid', 'gw', 'gh', 'nin', 'nout',
   'microBase', 'leachK', 's0', 'isWater', 'fx', 'ctx', 'lessonTerrain', 'lessonGen',
-  'sv2', 'sh2', 'sa2', 'st2', 'ssm', 'chanBuf'] as const; // ♾️ sv2…chanBuf — радиусы текущей особи внутри такта
+  'sv2', 'sh2', 'sa2', 'st2', 'ssm', 'chanBuf', 'lm', 'moistK', 'iceList'] as const; // ♾️ sv2…chanBuf — радиусы текущей особи внутри такта; 🌋 lm, moistK, iceList — производные
 
 /** Поля World, о которых снимок не знает (методы и подмены функций стенда пропускаются). */
 export function uncoveredKeys(w: World): string[] {
@@ -124,6 +128,10 @@ const pool: Float32Array[] = [];
 export function recycleSnap(s: WorldSnap): void {
   for (const k in s.cells) if (pool.length < 24) pool.push(s.cells[k]);
   s.cells = {};
+  if (s.geoCells) {
+    if (pool.length < 24) pool.push(s.geoCells.ice);
+    s.geoCells = undefined;
+  }
 }
 function copyCells(src: Float32Array): Float32Array {
   for (let i = pool.length - 1; i >= 0; i--) {
@@ -145,6 +153,7 @@ export function snapBuffers(s: WorldSnap): ArrayBuffer[] {
   for (const k in s.cells) add(s.cells[k]);
   for (const a of [s.claim.idx, s.claim.val, s.claim.t, s.cre.f64, s.cre.i32, s.gen.f64, s.gen.brain, s.gen.brains, s.anc, s.corpses]) add(a);
   for (const a of [s.gen.body, s.gen.bkm, s.gen.blvl, s.gen.bshape]) if (a) add(a);
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) add(a);
   return [...out];
 }
 
@@ -182,6 +191,7 @@ export function snapDigest(s: WorldSnap): number {
   h = fnv(h, s.anc);
   h = fnv(h, s.corpses);
   for (const k of SNAP_CELLS) if (s.cells[k]) h = fnv(h, s.cells[k]);
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) h = fnv(h, a);
   h = fnv(h, s.claim.idx);
   h = fnv(h, s.claim.val);
   h = fnv(h, s.claim.t);
@@ -324,7 +334,8 @@ export function captureWorld(w: WorldInternals): WorldSnap {
   for (const k of SNAP_CELLS) cells[k] = copyCells(W[k] as Float32Array);
   // всё прочее — одним клоном (общие ссылки между полями сохраняются)
   const src: Record<string, unknown> = {};
-  for (const k of SNAP_CLONE) if (k in w) src[k] = W[k];
+  // 🌋 без живой планеты её ключей в снимке нет: снимки и отпечатки таких миров — прежние до бита
+  for (const k of SNAP_CLONE) if (k in w && (w.lp || (k !== 'lp' && k !== 'geo'))) src[k] = W[k];
   src.species = w.species.save();
   const scal = structuredClone(src);
   const ext: Record<string, number> = { blockedHere: 'blockedTerrain' in w ? +(w.blockedTerrain === w.terrain) : 0 };
@@ -335,11 +346,14 @@ export function captureWorld(w: WorldInternals): WorldSnap {
     gen: { cols: [...GEN_F], f64: gf, brain: gb, brains, blen, body: gbody, bkm, blvl, bshape },
     anc, corpses, ext, actN: 0, inN: 0, digest: 0, bytes: 0,
   };
+  if (w.lp && w.ice && w.iceMax && w.elevD && w.fx8)
+    s.geoCells = { ice: copyCells(w.ice), iceMax: w.iceMax.slice(), elevD: w.elevD.slice(), fx8: w.fx8.slice() };
   s.digest = snapDigest(s);
   let bytes = 30_000 + 600 * w.species.all.size;
   for (const sp of w.species.all.values()) bytes += (sp.formHist?.byteLength ?? 0) + (sp.formT?.byteLength ?? 0) + (sp.mph?.byteLength ?? 0); // ♾️ история облика
   for (const a of [f64, i32, gf, gb, brains, anc, corpses, claim.idx, claim.val, claim.t, gbody, bkm, blvl, bshape]) bytes += a.byteLength;
   for (const k in cells) bytes += cells[k].byteLength;
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) bytes += a.byteLength;
   s.bytes = bytes;
   return s;
 }
@@ -359,13 +373,15 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
   // снимок, чьи буферы уже отданы в пул (recycleSnap), молча оставил бы клетки текущего мира
   const lost = SNAP_CELLS.filter((k) => !s.cells[k]);
   if (lost.length) throw new Error(`Снимок такта ${s.tick} без клеток (${lost.join(', ')}): он был выброшен`);
+  if (s.scal.lp && !s.geoCells) throw new Error(`Снимок такта ${s.tick} без клеток живой планеты: он был выброшен`);
   const W = w as unknown as Record<string, unknown>;
   // 1. скаляры: простые объекты — на месте (ссылки settings/input у страницы и уроков остаются верными)
   const c = structuredClone(s.scal);
   for (const k of Object.keys(c)) {
     if (k === 'species' || !(k in w)) continue;
     const live = W[k], v = c[k];
-    if (isPlain(live) && isPlain(v)) Object.assign(live, v);
+    // 🌋 geo — целиком (не слиянием): все его ключи есть всегда, а страница его не держит
+    if (k !== 'geo' && isPlain(live) && isPlain(v)) Object.assign(live, v);
     else W[k] = v;
   }
   w.species.load(c.species as SpeciesSave);
@@ -452,6 +468,26 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
   w.ancestors = ancestors;
   // 8. ссылки на рельеф — из флагов
   if ('blockedTerrain' in w) w.blockedTerrain = s.ext.blockedHere ? w.terrain : null;
+  // 8b. 🌋 живая планета: снимок без неё (или старый) — без неё; рельеф — из применённого состояния, если отпечаток другой
+  if (!('lp' in s.scal)) {
+    w.lp = false;
+    w.geo = null;
+  }
+  const n0 = w.terrain.cols * w.terrain.rows;
+  if (w.lp) {
+    const gc = s.geoCells!;
+    if (!w.ice || w.ice.length !== n0) allocGeoCells(w as unknown as World, n0);
+    w.ice!.set(gc.ice);
+    w.iceMax!.set(gc.iceMax);
+    w.elevD!.set(gc.elevD);
+    w.fx8!.set(gc.fx8);
+  } else w.ice = w.iceMax = w.elevD = w.fx8 = null;
+  const want = w.lp ? geoInputsHash(w as unknown as World) : 0;
+  if (want !== w.terrain.rev) deriveTerrain(w as unknown as World, false);
+  if (w.lp) {
+    labelLands(w as unknown as World);
+    rebuildIceList(w as unknown as World);
+  } else w.lm = w.iceList = w.moistK = null;
   // 9. временное
   w.history = history.slice();
   w.fx = [];

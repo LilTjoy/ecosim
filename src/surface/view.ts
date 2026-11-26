@@ -269,6 +269,8 @@ export class SurfaceView {
   private collection = new Set<string>();
   /** ♾️ Открытая эволюция для новых миров: выбор игрока (меню ▾ у «↻ Новый мир», localStorage) или ?oe=1 / ?oe=0. */
   private oePref = false;
+  /** 🌋 Живая планета для новых миров (пока только адресом ?geo=1; уроки — всегда без неё). */
+  private geoPref = false;
   /** Мир урока или справочника (newWorld): всегда классический, переключатель ♾️ в нём не действует. */
   private classicWorld = false;
   /** ♾️ Тосты «🌟 Открытие»: очередь до 3, не чаще раза в 10 с. */
@@ -295,9 +297,12 @@ export class SurfaceView {
       /* без localStorage — по умолчанию */
     }
     this.oePref = oeq !== null ? oeq !== '0' : oeSaved === '1';
-    if (this.oePref !== this.world.settings.openEvo) {
+    this.geoPref = new URLSearchParams(location.search).get('geo') === '1';
+    if (this.oePref !== this.world.settings.openEvo || this.geoPref !== this.world.lp) {
       this.world.settings.openEvo = this.oePref;
+      setLivePlanet(this.world, this.geoPref);
       this.world.reset();
+      this.renderer.rebuild(); // рельеф нового мира (раньше с ?oe=1 оставалась карта отброшенного)
     }
     try {
       const saved = JSON.parse(localStorage.getItem('ecosim.discoveries') ?? '[]') as unknown;
@@ -391,10 +396,11 @@ export class SurfaceView {
    * Перенести сюда условия планеты. asked — игрока уже спросили (confirmNewWorld); иначе (уроки) о пропавших
    * ветках скажет тост.
    */
-  setEnv(env: SurfaceEnv, seed?: number, asked = false, oe = this.oePref): void {
+  setEnv(env: SurfaceEnv, seed?: number, asked = false, oe = this.oePref, geo = this.geoPref): void {
     const lost = this.tl.branches.length > 1;
     this.classicWorld = false;
     this.world.settings.openEvo = oe;
+    setLivePlanet(this.world, geo);
     this.world.reset(this.world.brainMode, seed, env);
     this.afterReset();
     if (lost && !asked) this.toast('⏳ Ветки прошлого мира закрыты — начат новый мир (закладки 📌 остались)');
@@ -2845,7 +2851,7 @@ export class SurfaceView {
   newWorld(env: SurfaceEnv, seed: number): void {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
-    this.setEnv(env, seed, false, false);
+    this.setEnv(env, seed, false, false, false);
     this.classicWorld = true;
     // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта;
     // вместо неё — путь назад к обычной Земле («↻ Новый мир» повторяет условия опыта)
@@ -2857,4 +2863,10 @@ export class SurfaceView {
   endLesson(): void {
     if (this.speed > 1) this.setSpeed(1);
   }
+}
+
+/** 🌋 Ключ settings.livePlanet есть только у миров с живой планетой (без неё снимки и отпечатки — прежние). */
+function setLivePlanet(w: World, on: boolean): void {
+  if (on) w.settings.livePlanet = true;
+  else delete w.settings.livePlanet;
 }

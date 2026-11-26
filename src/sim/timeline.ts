@@ -17,6 +17,8 @@ export type Action = { t: number } & (
   | { k: 'epidemic' }
   /** Точки (x, y подряд) одного такта сливаются в одно действие. */
   | { k: 'grass'; pts: number[]; r: number }
+  /** 🌋 Кисть рельефа: dz — подъём (+) или опускание (−) в центре, 1e-4 единицы высоты; точки одного такта сливаются. */
+  | { k: 'terra'; pts: number[]; r: number; dz: number }
   /** body — тело «завезённых» (♾️ краб, летун, мутант; строится в мире из его костей). */
   | { k: 'spawn'; g: Partial<Genome>; n: number; x: number; y: number; icon: string; label: string; body?: PresetBody }
   /** ♾️ Всплеск мутаций: у зверей рядом год органы потомков меняются чаще. */
@@ -44,7 +46,7 @@ type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type ActionInput = DistOmit<Action, 't'>;
 
 /** Действия, которые можно отменить тостом «↶ Отменить». */
-export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue', 'mutagen']);
+export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue', 'mutagen', 'terra']);
 /** Разница, записанная машиной времени, а не поступок игрока. */
 export const isDiff = (a: Action): boolean => a.k === 'settings' || (a.k === 'experiment' && !!a.quiet);
 
@@ -291,6 +293,7 @@ export function actionText(a: Action): string {
     case 'drought': return '🔥 засуха';
     case 'epidemic': return '🦠 эпидемия';
     case 'grass': return '🌱 трава';
+    case 'terra': return a.dz > 0 ? '🏔 суша поднята' : '🌊 суша опущена';
     case 'spawn': return `${a.icon} «${a.label}»`;
     case 'mutagen': return '☢️ всплеск мутаций';
     case 'possess': return a.id === null ? '👑 вы покинули особь' : `👑 вселение в #${a.id}`;
@@ -583,7 +586,7 @@ export class Timeline {
     const b = this.active;
     const last = b.actions.at(-1);
     // мазок травы того же такта дописывается в прошлое действие, только пока его конец не вошёл в снимок или развилку
-    if (a.k === 'grass' && last && last.k === 'grass' && last.t === a.t && last.r === a.r && this.grassOpen === last) {
+    if (((a.k === 'grass' && last?.k === 'grass') || (a.k === 'terra' && last?.k === 'terra' && last.dz === a.dz)) && last.t === a.t && last.r === a.r && this.grassOpen === last) {
       if (apply) this.trapped(() => w.apply(a));
       last.pts.push(...a.pts);
       return;
@@ -594,7 +597,7 @@ export class Timeline {
     if (apply) this.trapped(() => w.apply(a));
     for (const m of actMarks(w, a, idx, k0)) this.addMark(b, m);
     b.actions.push(a);
-    this.grassOpen = a.k === 'grass' ? a : null;
+    this.grassOpen = a.k === 'grass' || a.k === 'terra' ? a : null;
     if (a.k === 'settings') this.base.set = JSON.stringify(w.settings);
     if (a.k === 'experiment') this.base.exp = JSON.stringify(w.experiment);
     if (this.actLen(b) > TM.ACTIONS_CAP) b.exact = false;

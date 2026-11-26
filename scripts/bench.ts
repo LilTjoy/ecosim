@@ -8,6 +8,9 @@
 //   логические — «!== '0'»), --benthic=0|1, --her=cold|dark|lowO2|bottle|young|murky (условия планеты).
 //   Строки OE:/modfreq/… печатаются только при включённой открытой эволюции; без неё вывод прежний (ворота O0,
 //   см. scripts/oe-o0.sh). --convdiag=1 — все пары с похожим обликом (CONVROWS), --crabdiag=1 — части рецепта краба.
+// 🌋 живая планета: --geo=0|1 (settings.livePlanet; с --geo=0 ключа нет — мир до бита прежний, ворота G0, scripts/geo-g0.sh);
+//   --seaStep=N — каждые N тактов море шагает на GEO.SEA_STEP (лесенка 0…−0.04 и обратно) с пересчётом рельефа (P1);
+//   строка «GEO perf:» (пересчёты, мс p50/p99/max) — только при --geo=1.
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';
@@ -15,6 +18,7 @@ import { B as TB, BIOMES } from '../src/sim/terrain';
 import * as MM from '../src/sim/modules';
 import * as BM from '../src/sim/bestiary';
 import * as HM from '../src/sim/heritage';
+import * as GM from '../src/sim/geo';
 const pos = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 const flags: Record<string, string> = {};
 for (const a of process.argv.slice(2)) if (a.startsWith('--')) { const [k, v] = a.slice(2).split('='); flags[k] = v ?? '1'; }
@@ -36,6 +40,10 @@ const applyFlags = (w: InstanceType<typeof World>) => {
   const W = w as any;
   for (const k in flags) if (k in w.settings) W.settings[k] = typeof W.settings[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
   if (flags.oe !== undefined && 'openEvo' in w.settings) W.settings.openEvo = flags.oe !== '0';
+  if (flags.geo !== undefined) {
+    if (flags.geo !== '0') W.settings.livePlanet = true;
+    else delete W.settings.livePlanet;
+  }
 };
 // ручки открытой эволюции (и будущих таблиц: открытия, наследство) — по имени, в том же духе, что SOIL/DIS
 const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV, HM.PAL, HM.HER] as unknown as Record<string, unknown>[];
@@ -149,7 +157,17 @@ let budget = 0;
 // O10: трава мелководья — печатается при --oe=1 или --shg=1 (без них вывод прежний)
 const shg = { on: OE || !!flags.shg, sum: 0, k: 0, ben: 0, benSh: 0 };
 const crab = OE && flags.crabdiag ? { peak: new Array(11).fill(0), last: [] as number[], full: 0, k: 0 } : null;
+// 🌋 P1: лесенка моря с пересчётом рельефа (как будет делать геопроход), время каждого пересчёта
+const seaStep = Number(flags.seaStep ?? 0);
+const geoMs: number[] = [];
 for (let t = 1; t <= T; t++) {
+  if (seaStep > 0 && W.lp && t % seaStep === 0) {
+    const k = (t / seaStep) % 20, q = k <= 10 ? k : 20 - k;
+    W.geo.seaQ = -GM.GEO.SEA_STEP * q;
+    const t0g = performance.now();
+    GM.deriveTerrain(w, true);
+    geoMs.push(performance.now() - t0g);
+  }
   w.step();
   if (OE) {
     oe.creSum += w.creatures.length;
@@ -328,4 +346,10 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
   (tool ? `\n toolSpecies at end: n=${tool.sp.count} extinct=${tool.sp.extinct}` : '') +
   `\n extinct(guild first hit 0): ${JSON.stringify(extinct)} zeroSamples(of ${T / 500}): ${JSON.stringify(zero)} lastZero: ${JSON.stringify(lastZero)}${rivers}\n top: ` +
   w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | ') + oeRep +
-  (!OE && shg.on ? `\n shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)}` : ''));
+  (!OE && shg.on ? `\n shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)}` : '') +
+  (W.lp ? (() => {
+    const a = [...geoMs].sort((x, y) => x - y), q = (p: number) => (a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))].toFixed(2) : '-');
+    let land = 0; for (let i = 0; i < t1.biome.length; i++) if (!BIOMES[t1.biome[i]].water) land++;
+    if (flags.geoMs) console.log(geoMs.map((x) => x.toFixed(1)).join(" "));
+    return `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
+  })() : ''));
