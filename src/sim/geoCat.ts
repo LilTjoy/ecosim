@@ -3,7 +3,7 @@
 // Без DOM. Все случайности — World.r() с ctx null (поток мира); правки рельефа (конус, кальдера, кратер) — в geo.pend,
 // рельеф пересчитается в начале следующего шага. Следы на клетках — в fx8: пепел [0, n), гарь [n, 2n), соль [2n, 3n).
 import { B, BIOMES } from './terrain';
-import { GEO, type GeoState } from './geo';
+import { GEO, hash01, type GeoState } from './geo';
 import type { Creature, World } from './world';
 import type { Genome } from './genome';
 import { P } from './modules';
@@ -208,6 +208,36 @@ function volcano(w: World, x0: number, y0: number, vei: 6 | 7 | 8): void {
   w.log(text, 'disaster', x, y, vei === 8 ? 'geo_supervolcano' : 'geo_volcwinter');
   const dC = GEO.AER_K * g.aer * CLIMATE_C;
   w.log(`🌫 Вулканическая зима: дымка в небе — остров остынет на ${dC.toFixed(1).replace('.', ',')} °C, солнца траве меньше на ${Math.round(100 * CAT.AER_GROW * Math.min(1, g.aer))}% (дымка оседает за год-два)`, 'info', x, y, 'geo_volcwinter');
+}
+
+/**
+ * 🌍 Вулканы сами (этап 4): раз в геопроход — кость по такту (hash01, не поток мира: мир без извержения идёт
+ * так же, как шёл бы без этой проверки). VEI 6 с вероятностью VOLC_P·volc за 20 тактов геологии, VEI 7 — в
+ * VOLC_7 раз реже; место — случайная гора (или суша). volc — из условий планеты (нет — 1, как на Земле).
+ */
+export function volcPass(w: World): void {
+  const g = w.geo!;
+  const p = GEO.VOLC_P * g.volc * ((g.speed * GEO.EVERY) / 20);
+  const u = hash01(w.tick, w.seed & 0xfffff);
+  if (!(u < p)) return;
+  const vei: 6 | 7 = u < p * GEO.VOLC_7 ? 7 : 6;
+  const t = w.terrain, n = t.cols * t.rows;
+  let at = -1;
+  for (let k = 0; k < 64 && at < 0; k++) {
+    const i = Math.min(n - 1, Math.floor(hash01(w.tick + k + 1, (w.seed ^ 0x7016) & 0xfffff) * n));
+    if (t.biome[i] === B.Mountain || (k >= 48 && isLand(w, i))) at = i;
+  }
+  if (at < 0) return;
+  const [x, y] = cellXY(w, at);
+  w.log(`🌋 Вулкан проснулся сам: ${g.iceAge === null ? 'недра острова живут' : `вулканизм этой планеты — ${g.volc >= 0.9 ? 'как на Земле' : 'слабее земного'}`}`, 'info', x, y, 'geo_volcwinter');
+  const W = X(w);
+  const saved = W.ctx;
+  W.ctx = null;
+  try {
+    volcano(w, x, y, vei);
+  } finally {
+    W.ctx = saved;
+  }
 }
 
 // ---------------- ☄️ удар ----------------

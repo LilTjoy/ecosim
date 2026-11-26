@@ -6,9 +6,10 @@
 // Все случайности — World.r() (поток мира, ctx null) или mulberry32(seed ^ c); Math.random здесь нет.
 import { clamp, mulberry32 } from '../lib/random';
 import { BASE_INPUT, BIOMES, B, deriveHash, properName, type DeriveInput } from './terrain';
-import type { Creature, World } from './world';
+import type { Creature, GeoEnv, World } from './world';
 import type { Genome } from './genome';
-import { aerShift, catHabitat, catPass } from './geoCat';
+import { P } from './modules';
+import { aerShift, catHabitat, catPass, volcPass } from './geoCat';
 import { bridgeClosed, bridgeOpened, meltOnMax, rangeOnGlacial, rangeOnInterglacial, refugiaAtMax, updateHomes } from './geoTrack';
 
 /** Такты года (= world.YEAR; свой — чтобы не было цикла импорта при вычислении таблицы). */
@@ -61,6 +62,14 @@ export const GEO = {
   ISTHMUS_H: 0.035,
   /** Полуширина пролива или перешейка игрока, клеток. */
   LINE_HW: 1.6,
+  /**
+   * 🌍 Связь с планетой (этап 4, env.geo): сдвиг цели Vg у тёплой (iceAge 0: циклы выключены, море ≈ +42 м) и у
+   * ледяной эпохи (iceAge 2: лёд не уходит); вулканы сами — VEI 6 с вероятностью VOLC_P·volc за 20 тактов геологии,
+   * VEI 7 — в VOLC_7 раз реже (VEI 8 сам не бывает).
+   */
+  BIAS_WARM: -0.35, BIAS_COLD: 0.5, VOLC_P: 2e-5, VOLC_7: 0.1,
+  /** ♾️ «Холод — это отбор»: строка летописи, если доля мохнатых на суше выросла хотя бы на FUR_DP (и в FUR_K раза). */
+  FUR_DP: 0.08, FUR_K: 1.3,
 } as const;
 
 /** Пролив, который режет остров: мелкий порог (сохнет в ледниковье), пролив Уоллеса (глубокий всегда) или игрока. */
@@ -156,15 +165,32 @@ export interface GeoState {
   fxOn: boolean;
   /** Плита B (юг, от середины пролива Уоллеса): сдвиг (клеток), скорость (клеток за шаг), такт следующего шага. */
   plate: PlateRec | null;
+  /**
+   * 🌍 Связь с планетой (из env.geo при reset; снимок несёт их сам — sameWorld env.geo не сравнивает): эпоха планеты
+   * (null — остров сам по себе, как Земля), естественный CO₂ межледниковья, сдвиг цели Vg, сила вулканизма.
+   */
+  iceAge: 0 | 1 | 2 | null; co2Base: number; vBias: number; volc: number;
+  /** ♾️ Доля мохнатых среди сухопутных в начале ледниковья (−1 — не мерили). */
+  fur0: number;
   stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number;
     leaks: number; invaders: number; moraines: number; kettles: number; lakes: number; refugia: number;
     /** Разделения по барьерам: мелкий порог, Уоллес, пролив игрока. */ sSill: number; sWall: number; sPlay: number };
 }
 
-export function newGeo(seed: number): GeoState {
+/**
+ * Новое состояние живой планеты. ge — условия с уровня «Планета» (нет — как на Земле, всё по умолчанию):
+ * вытянутость орбиты задаёт силу 100-тысячелетнего ритма, без большой луны наклон оси качается втрое сильнее,
+ * эпоха планеты (iceAge) включает или выключает циклы и сдвигает цель льда, CO₂ — естественный уровень острова.
+ */
+export function newGeo(seed: number, ge?: GeoEnv): GeoState {
   const r = mulberry32(seed ^ 0x6e0c1);
   const phis: [number, number, number] = [r() * 2 * Math.PI, r() * 2 * Math.PI, r() * 2 * Math.PI];
   const amps: [number, number, number] = [GEO.AMPS0[0], GEO.AMPS0[1], GEO.AMPS0[2]];
+  if (ge) {
+    // Земля (ecc 0,017, большая Луна) → ровно AMPS0
+    amps[0] = (GEO.AMPS0[0] * (0.6 + 8 * clamp(ge.ecc, 0, 0.6))) / (0.6 + 8 * 0.017);
+    amps[1] = ge.moon ? GEO.AMPS0[1] : 1.6;
+  }
   // мир начинается в самом тёплом месте цикла (межледниковье, как сейчас на Земле): лёд и море — с нуля, без разгона
   let orb0 = 0, best = -Infinity;
   for (let t = 0; t < GEO.P; t += GEO.EVERY) {
@@ -175,18 +201,32 @@ export function newGeo(seed: number): GeoState {
     }
   }
   return {
-    speed: 1, orbit: true, orbT: orb0, orb0, phis, amps,
+    speed: 1, orbit: !ge || ge.iceAge !== 0, orbT: orb0, orb0, phis, amps,
     Vg: 0, G: 0, iceLand: 0, iceMaxLand: 0,
     dGsign: 0, cycleN: 0, lastMaxTick: -1,
     phase: 0, vPeak: 0, peakSea: 0, peakIce: 0, fPin: null,
-    co2: 280, co2Pin: null, seaPin: 0, seaOff: 0, seaQ: 0, lastDerive: -1e9,
+    co2: ge ? clamp(Math.round(ge.co2ppm), 150, 5000) : 280, co2Pin: null, seaPin: 0, seaOff: 0, seaQ: 0, lastDerive: -1e9,
     pend: [], kettleQ: [], shadow: false, lakes: false, shadowQ: false, shadowN: 0,
     aer: 0, dark: 0, geoShift: 0, isolatedUntil: 0, lastLogT: -1e9,
     fire: [], sills: [], lands: { n: 0, anchors: [], sizes: [] },
     bridges: [], isolates: [], refugia: null, refT: -1e9, rangeRef: [], wide: [], wsplit: [], wLogT: -1e9, lakeSeeds: [],
     extRing: [], extT: -1e9, med0: 0, n0: 0, lastMass: -1e9, lastCause: -1e9, lastSum: null, cats: [], fireEp: null, fxOn: false, plate: null,
+    iceAge: ge ? ge.iceAge : null,
+    co2Base: ge ? clamp(Math.round(ge.co2ppm), 150, 5000) : 280,
+    vBias: !ge || ge.iceAge === 1 ? 0 : ge.iceAge === 0 ? GEO.BIAS_WARM : GEO.BIAS_COLD,
+    volc: ge ? clamp(ge.volcanism, 0, 3) : 1,
+    fur0: -1,
     stats: { glacials: 0, bridges: 0, splits: 0, vicariance: 0, impacts: 0, eruptions: 0, fires: 0, massExt: 0, derives: 0, leaks: 0, invaders: 0, moraines: 0, kettles: 0, lakes: 0, refugia: 0, sSill: 0, sWall: 0, sPlay: 0 },
   };
+}
+
+/** 🌍 Первая строка летописи острова, спустившегося с планеты. */
+export function geoDescent(ge: GeoEnv): string {
+  const ppm = clamp(Math.round(ge.co2ppm), 150, 5000);
+  const epoch = ge.iceAge === 0 ? 'тёплая эпоха' : ge.iceAge === 1 ? 'ледниковая эпоха' : 'эпоха вечного льда';
+  const isl = ge.iceAge === 0 ? 'на острове не будут оледенения (море выше нынешнего)' : ge.iceAge === 1 ? 'на острове будут оледенения' : 'лёд на острове не уйдёт и в тёплые века';
+  const moon = ge.moon ? '' : ' Большой луны нет — наклон оси качается сильнее, ледниковья резче.';
+  return `🌍 Планета сейчас: ${epoch}, CO₂ ${ppm} ppm — ${isl}.${moon}`;
 }
 
 /** Внутренности World, которые нужны живой планете (в классе они private). */
@@ -269,6 +309,21 @@ export function deriveTerrain(w: World, live: boolean): void {
 
 /** Стенд: время каждого пересчёта рельефа (мс), только при on (на мир не влияет). */
 export const GEO_PERF = { on: false, ms: [] as number[], drift: [] as number[], riders: 0 };
+
+let warmed = false;
+/**
+ * Прогрев пересчёта рельефа (один раз на процесс, при первом reset живой планеты): первые 3–4 пересчёта идут до
+ * оптимизации кода движком и стоят 15–50 мс. Пересчёт — чистая функция входов на месте, поэтому лишние прогоны с
+ * другими входами (море ниже, сдвиг плиты, дождевая тень) ничего не меняют: следом идёт настоящий пересчёт.
+ */
+export function warmDerive(w: World): void {
+  if (warmed || !w.lp || !w.geo) return;
+  warmed = true;
+  const t = w.terrain, inp = deriveInput(w);
+  const plate = { ox: 1, oy: -1, rift: plateRift(w) };
+  for (const v of [{ seaQ: inp.seaQ - 0.008 }, { seaQ: inp.seaQ - 0.004, plate }, { seaQ: inp.seaQ - 0.012, shadow: true }, { seaQ: inp.seaQ - 0.016, plate, shadow: true }])
+    t.derive({ ...inp, ...v });
+}
 
 function deriveTerrain0(w: World, live: boolean): void {
   const W = w as unknown as GeoWorld;
@@ -438,6 +493,11 @@ export function orbitF(g: GeoState, orbT = g.orbT): number {
 
 /** Парниковый сдвиг CO₂ (единицы температуры): 4,33·ln(C/280) °C — около +3 °C на удвоение, как во вкладке «Планета». */
 export const co2Shift = (ppm: number): number => (4.33 * Math.log(Math.max(1, ppm) / 280)) / CLIMATE_C;
+/**
+ * Сдвиг от CO₂ для острова: относительно естественного уровня планеты (co2Base). Тепло самой планеты уже в её
+ * температуре (env.tempOffset) — второй раз его не считаем. На Земле (280 ppm) — ровно co2Shift.
+ */
+export const co2Warm = (g: GeoState, ppm: number): number => co2Shift(ppm) - (g.co2Base === 280 ? 0 : co2Shift(g.co2Base));
 
 /** Геологическое время (тыс. лет) по орбитальным часам: цикл GEO.P ≈ 100 тыс. лет. */
 export const geoKyr = (g: GeoState): number => ((g.orbT - g.orb0) / GEO.P) * 100;
@@ -459,16 +519,19 @@ export function geoPass(w: World): void {
   g.orbT += k;
   const F = g.orbit ? orbitF(g) : 0;
   // CO₂: «как у природы» — следует за льдом (ледниковье 190, межледниковье 280 ppm), меняется за год
-  const cT = g.co2Pin ?? 280 - GEO.CO2_FOLLOW * clamp(g.Vg, 0, 1);
+  // (у планеты с другим естественным CO₂ — та же доля: 190/280 в ледниковье)
+  const cT = g.co2Pin ?? (g.co2Base === 280 ? 280 - GEO.CO2_FOLLOW * clamp(g.Vg, 0, 1) : g.co2Base * (1 - (GEO.CO2_FOLLOW / 280) * clamp(g.Vg, 0, 1)));
   g.co2 += (cT - g.co2) * Math.min(1, k / YEAR);
   // ☄️🌋 дымка и темнота оседают, следы катастроф убывают, молнии в засуху (этап 2) — до сдвига: в нём дымка
   catPass(w);
-  const gs = GEO.A * F + (g.fPin ?? 0) + co2Shift(g.co2) - GEO.ALB * g.iceLand;
+  if (g.volc > 0) volcPass(w);
+  const gs = GEO.A * F + (g.fPin ?? 0) + co2Warm(g, g.co2) - GEO.ALB * g.iceLand;
   g.geoShift = g.aer > 0 ? gs + aerShift(g) : gs;
   // годовой сдвиг (без сезона) — с кнопкой игрока «🌡» тоже: оба складываются. Лёд — и глобальный Vg, и ледники
   // острова — дымку не чувствует: она живёт год-два, а лёд копится тысячелетиями (трава и звери её чувствуют)
   const ann = gs + w.climate.shift;
-  const Vt = clamp(-ann / GEO.V_SHIFT, -0.5, 1.2);
+  // 🌍 эпоха планеты сдвигает цель льда: тёплая — льда нет и море выше, ледяная — лёд не уходит
+  const Vt = clamp(g.vBias ? -ann / GEO.V_SHIFT + g.vBias : -ann / GEO.V_SHIFT, -0.5, 1.2);
   const v0 = g.Vg;
   g.Vg += (Vt - g.Vg) * Math.min(1, k / (Vt > g.Vg ? GEO.TAU_UP : GEO.TAU_DN));
   g.G = clamp(g.Vg, 0, 1);
@@ -614,6 +677,17 @@ function iceStats(w: World): void {
   w.iceList = L.slice(0, m); // своя копия: буфер общий для всех миров процесса
 }
 
+/** ♾️ Доля сухопутных зверей с мехом (уровень ≥ 0,5) — только открытая эволюция. */
+function furShare(w: World): number {
+  let n = 0, f = 0;
+  for (const c of w.creatures) {
+    if (!c.alive || c.g.swim > 0.6) continue;
+    n++;
+    if (c.g.ph[P.FUR] >= 0.5) f++;
+  }
+  return n ? f / n : 0;
+}
+
 /** Летопись цикла: наступление льда, пик (когда таяние уже пошло), конец; сброс максимума льда в межледниковье. */
 function cycleLog(w: World): void {
   const g = w.geo!;
@@ -624,6 +698,7 @@ function cycleLog(w: World): void {
       g.vPeak = V;
       w.log('❄️ Наступает ледниковье: на севере растут ледники, море начинает отступать', 'info', undefined, undefined, 'geo_iceage');
       rangeOnGlacial(w);
+      g.fur0 = w.oe ? furShare(w) : -1;
     }
   } else if (g.phase === 1) {
     if (V > g.vPeak) {
@@ -640,6 +715,13 @@ function cycleLog(w: World): void {
       w.log(`🧊 Пик ледниковья позади: море опускалось на ${-metres(g.peakSea)} м, льдом было покрыто ${Math.round(100 * g.peakIce)}% суши`, 'milestone', undefined, undefined, 'geo_lgm');
       refugiaAtMax(w);
       meltOnMax(w);
+      if (w.oe && g.fur0 >= 0) {
+        // ♾️ холод — это отбор: мех обходится дорого (в тепле — жарко), а в ледниковье окупается
+        const f1 = furShare(w);
+        if (f1 - g.fur0 >= GEO.FUR_DP && f1 >= g.fur0 * GEO.FUR_K)
+          w.log(`❄️ За ледниковье звери с мехом стали обычнее: ${Math.round(100 * g.fur0)}% → ${Math.round(100 * f1)}% сухопутных`, 'evo', undefined, undefined, 'geo_glacialfur');
+        g.fur0 = -1;
+      }
       w.log('💧 Ледники тают: море поднимается и затапливает низины', 'info', undefined, undefined, 'geo_termination');
     } else if (V < 0.15) g.phase = 0; // похолодание не дошло до ледниковья
   } else if (V < 0.1) {
@@ -813,6 +895,7 @@ export function plateRift(w: World): number {
  * на освободившемся месте — дно разлома, у шва при надвиге — поднятие (в очередь). Пересчёт рельефа — сразу после.
  * Без случайностей. false — плита упёрлась (скорость сброшена, шага нет).
  */
+let plateBuf: Uint8Array | null = null;
 function driftStep(w: World): boolean {
   const W = w as unknown as GeoWorld;
   const g = w.geo!, p = g.plate!, t = w.terrain;
@@ -825,19 +908,18 @@ function driftStep(w: World): boolean {
     w.log('🧭 Плита упёрлась: дальше она не сдвинется', 'info', undefined, undefined, 'geo_plates');
     return false;
   }
-  // плита B сейчас — прямоугольник рядов [r0, r1) × столбцов [c0, c1); после шага — он же, сдвинутый и обрезанный краем
-  const onB = (cx: number, cy: number, ox: number, oy: number) => {
-    const sy = cy - oy, sx = cx - ox;
-    return sy >= p.rift && sy < rows && sx >= 0 && sx < cols;
-  };
+  // плита B сейчас — прямоугольник рядов [rift + oy, rows + oy) × столбцов [ox, cols + ox) (обрезанный краем карты);
+  // после шага — он же, сдвинутый на (dx, dy)
   const d = dx + dy * cols;
-  const inNew = new Uint8Array(n), inOld = new Uint8Array(n);
-  for (let cy = 0; cy < rows; cy++)
-    for (let cx = 0; cx < cols; cx++) {
-      const i = cy * cols + cx;
-      if (onB(cx, cy, p.ox, p.oy)) inOld[i] = 1;
-      if (onB(cx, cy, p.ox + dx, p.oy + dy)) inNew[i] = 1;
-    }
+  if (!plateBuf || plateBuf.length !== 2 * n) plateBuf = new Uint8Array(2 * n);
+  const inOld = plateBuf.subarray(0, n), inNew = plateBuf.subarray(n, 2 * n);
+  const rect = (a: Uint8Array, ox: number, oy: number) => {
+    a.fill(0);
+    const y0 = Math.max(0, p.rift + oy), y1 = Math.min(rows, rows + oy), x0 = Math.max(0, ox), x1 = Math.min(cols, cols + ox);
+    if (x1 > x0) for (let cy = y0; cy < y1; cy++) a.fill(1, cy * cols + x0, cy * cols + x1);
+  };
+  rect(inOld, p.ox, p.oy);
+  rect(inNew, p.ox + dx, p.oy + dy);
   // плита — прямоугольник: ряд за рядом copyWithin (порядок рядов — чтобы источник читался до перезаписи)
   const ny0 = Math.max(0, p.rift + p.oy + dy), ny1 = Math.min(rows, rows + p.oy + dy);
   const nx0 = Math.max(0, p.ox + dx), nx1 = Math.min(cols, cols + p.ox + dx);
@@ -1018,8 +1100,8 @@ export function geoAction(w: World, a: GeoAction): void {
       g.co2Pin = a.ppm === null ? null : clamp(Math.round(a.ppm), 100, 3000);
       if (g.co2Pin === null) w.log('🏭 CO₂ снова «как у природы»: следует за ледниками', 'player', undefined, undefined, 'geo_co2');
       else {
-        const dC = co2Shift(g.co2Pin) * CLIMATE_C;
-        w.log(`🏭 CO₂ теперь ${g.co2Pin} ppm → ${dC >= 0 ? '+' : '−'}${Math.abs(dC).toFixed(1).replace('.', ',')} °C к доиндустриальным 280 ppm (за год)`, 'player', undefined, undefined, 'geo_co2');
+        const dC = co2Warm(g, g.co2Pin) * CLIMATE_C;
+        w.log(`🏭 CO₂ теперь ${g.co2Pin} ppm → ${dC >= 0 ? '+' : '−'}${Math.abs(dC).toFixed(1).replace('.', ',')} °C к ${g.co2Base === 280 ? 'доиндустриальным 280' : `естественным для этой планеты ${g.co2Base}`} ppm (за год)`, 'player', undefined, undefined, 'geo_co2');
       }
       break;
     }

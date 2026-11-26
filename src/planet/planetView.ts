@@ -431,6 +431,16 @@ export class PlanetView {
       pressure: s.pressure + s.co2,
       magField: this.now < d.dynamo,
       heritage: h,
+      // 🌋 живой планете: эпоха (лёд модели планеты — только «снежок» и шапки, поэтому эпоху решает и температура:
+      // теплее +19 °C в среднем или CO₂ ≥ 1000 ppm — тёплая, без ледниковий), CO₂, орбита, луна, вулканизм
+      geo: {
+        co2ppm: clamp(Math.round((s.co2 * 1e6) / Math.max(1e-6, s.pressure + s.co2)), 150, 5000),
+        iceAge: s.ice >= 0.6 ? 2 : s.ice >= 0.05 ? 1 : s.T > 292 || (s.co2 * 1e6) / Math.max(1e-6, s.pressure + s.co2) >= 1000 ? 0 : 1,
+        ecc: this.params.ecc,
+        moon: this.params.moon > 0.3,
+        tectonics: !!d.tectonics,
+        volcanism: d.tectonics ? 1 : 0.3,
+      },
     };
   }
 

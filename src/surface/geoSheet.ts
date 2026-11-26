@@ -1,7 +1,7 @@
 // 🌋 «🛠 Стихии» живой планеты: на компьютере — всплывающая панель у инструментов, на телефоне — шторка снизу.
 // Этап 1a — вкладка «Климат»: CO₂, ледниковья, уровень моря, скорость геологии. Всё — действиями мира (их пишет
 // машина времени), сама панель мир не меняет и ссылку на w.geo не держит (loadWorld заменяет его целиком).
-import { beringiaLine, co2Shift, GEO, geoKyr, metres, panamaLine } from '../sim/geo';
+import { beringiaLine, co2Warm, GEO, geoKyr, metres, panamaLine } from '../sim/geo';
 import type { ActionInput } from '../sim/timeline';
 import { CLIMATE_C, type World } from '../sim/world';
 
@@ -210,7 +210,7 @@ export class GeoSheet {
       const e = q(s);
       if (e && e.innerHTML !== html) e.innerHTML = html;
     };
-    set('.gs-co2v', `${ppm} ppm → ${signC(co2Shift(ppm) * CLIMATE_C, 1)} °C${g.co2Pin === null && !this.dragging.has('co2') ? ' <em>(как у природы)</em>' : ''}`);
+    set('.gs-co2v', `${ppm} ppm → ${signC(co2Warm(g, ppm) * CLIMATE_C, 1)} °C${g.co2Pin === null && !this.dragging.has('co2') ? ' <em>(как у природы)</em>' : ''}`);
     set('.gs-seav', dm === 0 ? 'как у природы' : `${dm > 0 ? '+' : '−'}${Math.abs(dm)} м к ледникам`);
     set('.gs-phase', geoPhaseText(w));
     // кнопки — по состоянию мира (оно меняется и перемоткой, и уроками)

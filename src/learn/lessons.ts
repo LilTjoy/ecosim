@@ -5,7 +5,7 @@ import { wilson } from '../planet/stats';
 import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
 import {
-  CAP8, decomposerSwitch, iceBridgeOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
+  CAP8, decomposerSwitch, iceBridgeOk, iceMeltOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
   startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot, SHADOW_SEED, shadowLine, shadowNow,
 } from './scenarios';
 import { GEO, panamaLine } from '../sim/geo';
@@ -904,7 +904,7 @@ export const LESSONS: Lesson[] = [
     title: 'Ледниковый период',
     teaser: 'Охладим планету и посмотрим, как уходит море и растут ледники.',
     minutes: 6,
-    cards: ['geo.geo_iceage', 'geo.geo_lgm', 'geo.geo_sealevel', 'geo.geo_landbridge', 'geo.geo_timescale'],
+    cards: ['geo.geo_iceage', 'geo.geo_lgm', 'geo.geo_sealevel', 'geo.geo_landbridge', 'geo.geo_termination', 'geo.geo_moraine', 'geo.geo_timescale'],
     readout: (c) => iceReadout(c),
     steps: [
       {
@@ -984,7 +984,33 @@ export const LESSONS: Lesson[] = [
           q: 'Кому ледниковье опаснее всего?',
           options: ['Тем, кто живёт только на севере и не может уйти на юг', 'Морским животным', 'Хищникам на юге'],
           correct: 0,
-          explain: 'Лёд наступает с севера: кто живёт только там, теряет свою землю. Выживают те, кто успевает отступить в тёплые убежища — рефугиумы. Нажмите «💧 Конец ледниковья» во вкладке «🛠 Стихии → Климат», чтобы посмотреть, как быстро тает лёд.',
+          explain: 'Лёд наступает с севера: кто живёт только там, теряет свою землю. Выживают те, кто успевает отступить в тёплые убежища — рефугиумы (линза 🔬 «🏔 Рефугиумы» показывает их сразу после пика).',
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Теперь закончим ледниковье — так же, как это делает орбита: тепло держится, лёд тает. Таять он будет гораздо быстрее, чем рос: на Земле лёд копился 90 тысяч лет, а растаял примерно за 10.',
+        action: {
+          label: '💧 Конец ледниковья',
+          run: (c) => {
+            c.show('eco');
+            c.surface.act({ k: 'iceAge', mode: 'end' });
+            c.mem.tm = c.world.tick;
+          },
+        },
+        watch: {
+          hint: (c) => {
+            const s = iceNow(c.world);
+            return s ? `Лёд тает: ${Math.round(s.ice * 100)}% суши (ждём ≤ 6%), море ${sea(s.sea)} (ждём выше −12 м), глобальный лёд ${Math.round(Math.max(0, s.Vg) * 100)}%` : 'Мир без живой планеты';
+          },
+          test: (c) => iceMeltOk(iceNow(c.world)),
+          giveUp: { ticks: 30000 },
+          done: (c) => {
+            const s = iceNow(c.world)!;
+            const yrs = ((c.world.tick - num(c, 'tm')) / YEAR).toFixed(1).replace('.', ',');
+            const marks = s.moraines ? ` Ледник оставил следы: ${s.moraines} клеток морен (серые валы камней на его краю)${s.kettles ? `, ${s.kettles} котловин` : ''}${s.lakes ? ` и ${s.lakes} новых озёр` : ''}.` : '';
+            return `💧 Межледниковье за ${yrs} года острова: море ${sea(s.sea)}, льдом покрыто ${Math.round(s.ice * 100)}% суши.${marks} Мелкий пролив снова под водой — север и юг опять разделены. Кто отступал на юг, возвращается на север: это видно в летописи (🧭).`;
+          },
         },
       },
     ],

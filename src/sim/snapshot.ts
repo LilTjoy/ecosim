@@ -9,7 +9,7 @@ import { WEIGHTS } from './brain';
 import { mix32 } from '../lib/random';
 import type { SpeciesSave } from './species';
 import type { Terrain } from './terrain';
-import { allocGeoCells, deriveTerrain, geoInputsHash, labelLands, rebuildIceList, type PLATE_CELLS } from './geo';
+import { allocGeoCells, deriveTerrain, geoInputsHash, labelLands, rebuildIceList, type GeoState, type PLATE_CELLS } from './geo';
 
 export const SNAP_VERSION = 1;
 
@@ -216,9 +216,12 @@ export function snapDigest(s: WorldSnap): number {
 const isPlain = (v: unknown): v is Record<string, unknown> =>
   v !== null && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype;
 
+/** Условия без env.geo: 🌋 он читается только в reset() (в GeoState, а та — в снимке) и рельефа не меняет. */
+const envKey = (e: SurfaceEnv): string => JSON.stringify(e.geo === undefined ? e : { ...e, geo: undefined });
+
 /** Условия, от которых зависят рельеф и статичные поля почвы: снимок встаёт только в такой же мир. */
 export function sameWorld(w: World, s: WorldSnap): boolean {
-  return w.seed === s.seed && w.width === s.dims[0] && w.height === s.dims[1] && w.cell === s.dims[2] && JSON.stringify(w.env) === JSON.stringify(s.env);
+  return w.seed === s.seed && w.width === s.dims[0] && w.height === s.dims[1] && w.cell === s.dims[2] && envKey(w.env) === envKey(s.env);
 }
 
 // ---------------- снимок ----------------
@@ -396,6 +399,15 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
     // 🌋 geo — целиком (не слиянием): все его ключи есть всегда, а страница его не держит
     if (k !== 'geo' && isPlain(live) && isPlain(v)) Object.assign(live, v);
     else W[k] = v;
+  }
+  // 🌋 закладка из прошлой версии (до связи с планетой): недостающие ключи GeoState — как у острова-Земли
+  const G = c.geo as Partial<GeoState> | null | undefined;
+  if (G) {
+    G.iceAge ??= null;
+    G.co2Base ??= 280;
+    G.vBias ??= 0;
+    G.volc ??= 1;
+    G.fur0 ??= -1;
   }
   w.species.load(c.species as SpeciesSave);
   w.species.rand = w.r;

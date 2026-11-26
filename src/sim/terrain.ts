@@ -345,45 +345,17 @@ export class Terrain {
   private hydrology(derive = false): void {
     const { cols, rows, elev, biome, drain, order, flow, river, rivId } = this;
     const n = cols * rows;
+    // «вода» — biome ≤ Shallow прямо в коде (без замыкания: новое на каждый вызов, оно сбивало оптимизацию движка)
+    const SH = B.Shallow;
     // свой поток случайностей — имена регионов и карта не меняются
     const rand2 = mulberry32(this.seed ^ 0x9e3779b9);
-    const wet = (i: number) => biome[i] <= B.Shallow;
     const buf: HydroBuf = derive
       ? (this.hbuf ??= { hk: new Float32Array(n), hi: new Int32Array(n), filled: new Float32Array(n), visited: new Uint8Array(n) })
       : { hk: new Float32Array(n), hi: new Int32Array(n), filled: new Float32Array(n), visited: new Uint8Array(n) };
-    // двоичная куча на типизированных массивах
+    // двоичная куча на типизированных массивах (вставка и извлечение — прямо в цикле, без замыканий: пересчёт рельефа
+    // живой планеты гоняет этот цикл часто; порядок извлечения тот же, что у прежних push/pop)
     const { hk, hi, filled, visited } = buf;
     let hn = 0;
-    const push = (i: number, k: number) => {
-      let c = hn++;
-      while (c > 0) {
-        const p = (c - 1) >> 1;
-        if (hk[p] <= k) break;
-        hk[c] = hk[p];
-        hi[c] = hi[p];
-        c = p;
-      }
-      hk[c] = k;
-      hi[c] = i;
-    };
-    const pop = (): number => {
-      const top = hi[0];
-      const k = hk[--hn];
-      const i = hi[hn];
-      let c = 0;
-      for (;;) {
-        let m = 2 * c + 1;
-        if (m >= hn) break;
-        if (m + 1 < hn && hk[m + 1] < hk[m]) m++;
-        if (hk[m] >= k) break;
-        hk[c] = hk[m];
-        hi[c] = hi[m];
-        c = m;
-      }
-      hk[c] = k;
-      hi[c] = i;
-      return top;
-    };
     filled.set(elev);
     if (derive) {
       visited.fill(0);
@@ -394,17 +366,45 @@ export class Terrain {
     for (let i = 0; i < n; i++) {
       const x = i % cols;
       const y = (i / cols) | 0;
-      if (wet(i) || x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
+      if (biome[i] <= SH || x === 0 || y === 0 || x === cols - 1 || y === rows - 1) {
         visited[i] = 1;
-        push(i, elev[i]);
+        const kk = elev[i];
+        let c = hn++;
+        while (c > 0) {
+          const p = (c - 1) >> 1;
+          if (hk[p] <= kk) break;
+          hk[c] = hk[p];
+          hi[c] = hi[p];
+          c = p;
+        }
+        hk[c] = kk;
+        hi[c] = i;
       }
     }
     let k = 0;
     while (hn > 0) {
-      const i = pop();
+      // извлечь наименьшую
+      const i = hi[0];
+      {
+        const kk = hk[--hn];
+        const ii = hi[hn];
+        let c = 0;
+        for (;;) {
+          let m = 2 * c + 1;
+          if (m >= hn) break;
+          if (m + 1 < hn && hk[m + 1] < hk[m]) m++;
+          if (hk[m] >= kk) break;
+          hk[c] = hk[m];
+          hi[c] = hi[m];
+          c = m;
+        }
+        hk[c] = kk;
+        hi[c] = ii;
+      }
       order[k++] = i;
       const x = i % cols;
       const y = (i / cols) | 0;
+      const fi = filled[i] + 1e-5;
       for (let dy = -1; dy <= 1; dy++) {
         const yy = y + dy;
         if (yy < 0 || yy >= rows) continue;
@@ -414,23 +414,34 @@ export class Terrain {
           const j = yy * cols + xx;
           if (visited[j]) continue;
           visited[j] = 1;
-          filled[j] = Math.max(elev[j], filled[i] + 1e-5);
-          if (!wet(j)) drain[j] = i;
-          push(j, filled[j]);
+          const ej = elev[j];
+          filled[j] = ej > fi ? ej : fi;
+          if (biome[j] > SH) drain[j] = i;
+          const kk = filled[j];
+          let c = hn++;
+          while (c > 0) {
+            const p = (c - 1) >> 1;
+            if (hk[p] <= kk) break;
+            hk[c] = hk[p];
+            hi[c] = hi[p];
+            c = p;
+          }
+          hk[c] = kk;
+          hi[c] = j;
         }
       }
     }
     // сток: дождь на суше, сверху вниз
-    for (let i = 0; i < n; i++) flow[i] = wet(i) ? 0 : 0.3 + this.moist[i];
+    for (let i = 0; i < n; i++) flow[i] = biome[i] <= SH ? 0 : 0.3 + this.moist[i];
     for (let q = n - 1; q >= 0; q--) {
       const i = order[q];
       if (drain[i] >= 0) flow[drain[i]] += flow[i];
     }
-    for (let i = 0; i < n; i++) river[i] = wet(i) ? 0 : flow[i] >= RIVER_MIN ? 2 : flow[i] >= STREAM_MIN ? 1 : 0;
+    for (let i = 0; i < n; i++) river[i] = biome[i] <= SH ? 0 : flow[i] >= RIVER_MIN ? 2 : flow[i] >= STREAM_MIN ? 1 : 0;
 
     // имена: устья крупных рек
     const mouths: number[] = [];
-    for (let i = 0; i < n; i++) if (river[i] >= 2 && drain[i] >= 0 && wet(drain[i]) && flow[i] >= 150) mouths.push(i);
+    for (let i = 0; i < n; i++) if (river[i] >= 2 && drain[i] >= 0 && biome[drain[i]] <= SH && flow[i] >= 150) mouths.push(i);
     mouths.sort((a, b) => flow[b] - flow[a]);
     const used = new Set<string>();
     const base = derive ? this.base! : null;
@@ -497,7 +508,7 @@ export class Terrain {
     }
     if (derive) {
       // источники — исходные, только на суше
-      this.springs = (this.src ? base!.springs.map((c) => this.fwd(c)) : base!.springs).filter((c) => c >= 0 && !wet(c));
+      this.springs = (this.src ? base!.springs.map((c) => this.fwd(c)) : base!.springs).filter((c) => c >= 0 && biome[c] > SH);
       return;
     }
 
@@ -525,7 +536,7 @@ export class Terrain {
     const cand: number[] = [];
     for (let i = 0; i < n; i++) {
       const b = biome[i];
-      if (!wet(i) && b !== B.Snow && b !== B.Mountain && dist[i] >= 2 && dist[i] <= 6) cand.push(i);
+      if (biome[i] > SH && b !== B.Snow && b !== B.Mountain && dist[i] >= 2 && dist[i] <= 6) cand.push(i);
     }
     const nS = Math.round(1 + 4 * this.volcanism);
     for (let tries = 0; tries < 300 && cand.length && this.springs.length < nS; tries++) {

@@ -193,6 +193,12 @@ export interface IceNow {
   bridge: boolean;
   /** Пролив Уоллеса на юге всё ещё разделяет (глубокий). */
   wallace: boolean;
+  /** Фаза цикла (0 — межледниковье, 1 — лёд растёт, 2 — тает), ледниковий всего, следы ледника: морены, котловины, озёра. */
+  phase: 0 | 1 | 2;
+  glacials: number;
+  moraines: number;
+  kettles: number;
+  lakes: number;
   /** Самый южный ряд клеток суши со льдом толще 0,15 (−1 — льда нет). */
   iceRow: number;
 }
@@ -211,11 +217,18 @@ export function iceNow(w: World): IceNow | null {
     bridge: g.sills.some((s) => s.kind === 'sill' && s.open),
     wallace: g.sills.some((s) => s.kind === 'wallace' && !s.open),
     iceRow,
+    phase: g.phase,
+    glacials: g.stats.glacials,
+    moraines: g.stats.moraines,
+    kettles: g.stats.kettles,
+    lakes: g.stats.lakes,
   };
 }
 /** Цели урока: перешеек открыт и Vg ≥ 0,4; пик — Vg ≥ 0,85 и льдом покрыто ≥ 15 % суши. */
 export const iceBridgeOk = (s: IceNow | null) => !!s && s.Vg >= 0.4 && s.bridge;
 export const icePeakOk = (s: IceNow | null) => !!s && s.Vg >= 0.85 && s.ice >= 0.15;
+/** Шаг 6: ледниковье позади (пик пройден), наступило межледниковье, и лёд острова почти сошёл (≤ 6 % суши, море ≥ −12 м). */
+export const iceMeltOk = (s: IceNow | null) => !!s && s.glacials > 0 && s.phase === 0 && s.ice <= 0.06 && s.sea >= -12;
 /** Клетка карты ≈ 16 км (1 единица мира ≈ 1 км). */
 export const KM_PER_ROW = 16;
 

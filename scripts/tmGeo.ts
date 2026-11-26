@@ -7,9 +7,10 @@
 //  D2: в мир с затопленным и перекопанным рельефом встаёт снимок мира без живой планеты (и «старый» снимок без её
 //      ключей) → rev = 0 и все поля рельефа и почвы — как у свежего new Terrain / свежего мира.
 //  D3: две ветки с разными мазками, но равными суммами elevD → восстановление меняет рельеф правильно (туда и обратно).
+//  D4: env.geo (связь с планетой) — sameWorld его не сравнивает; снимок прошлой версии без ключей связи встаёт.
 //  P1: шаг с lp против без lp (один мир-снимок, попеременно кусками) и время пересчёта при шаге моря.
 import { World, type BrainMode } from '../src/sim/world';
-import { SNAP_DEV, uncoveredKeys, type WorldSnap } from '../src/sim/snapshot';
+import { SNAP_DEV, sameWorld, uncoveredKeys, type WorldSnap } from '../src/sim/snapshot';
 import { Terrain } from '../src/sim/terrain';
 import { deriveTerrain, GEO } from '../src/sim/geo';
 import { InputLog, inputArrays, type Action } from '../src/sim/timeline';
@@ -297,6 +298,40 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   const d3ok = sum1 === sum2 && B1.terrain.rev !== B2.terrain.rev && d3.every((x) => !/byte|rev|length|rivers|springs|sea|regions|\[/.test(x));
   console.log(`TM D3: ${d3ok ? 'ok' : 'FAIL'} sums ${sum1}/${sum2} rev ${hex(B1.terrain.rev)}/${hex(B2.terrain.rev)} ${d3.join(' ')}`);
 
+  // ---------------- D4 (этап 4): env.geo ----------------
+  // sameWorld не сравнивает env.geo: снимок мира планеты GA встаёт без reset в мир той же планеты в другой миг (GB) и
+  // идёт дальше до бита как живой; снимок «прошлой версии» (без ключей связи с планетой) встаёт как остров-Земля.
+  const GA = { co2ppm: 400, iceAge: 1 as const, ecc: 0.05, moon: false, tectonics: true, volcanism: 1 };
+  const GB = { co2ppm: 1200, iceAge: 0 as const, ecc: 0.017, moon: true, tectonics: true, volcanism: 0.3 };
+  const envW = (ge: typeof GA | typeof GB) => {
+    const w = mk();
+    w.settings.livePlanet = true;
+    w.reset(mode, seed, { ...w.env, geo: ge }, salt);
+    return w;
+  };
+  const A4 = envW(GA);
+  for (let i = 0; i < 300; i++) A4.step();
+  const S4 = A4.captureState();
+  const B4 = envW(GB);
+  const sw = sameWorld(B4, S4);
+  B4.loadState(S4);
+  for (let i = 0; i < 600; i++) { A4.step(); B4.step(); }
+  const dA = A4.captureState().digest, dB = B4.captureState().digest;
+  const old = structuredClone(S4);
+  const og = old.scal.geo as Record<string, unknown>;
+  for (const k of ['iceAge', 'co2Base', 'vBias', 'volc', 'fur0']) delete og[k];
+  const O4 = geoWorld(mk, mode, seed, salt);
+  let oldOk = false;
+  try {
+    O4.loadState(old);
+    for (let i = 0; i < 300; i++) O4.step();
+    oldOk = Number.isFinite(O4.geo!.geoShift) && Number.isFinite(O4.geo!.Vg) && O4.geo!.co2Base === 280;
+  } catch (e) {
+    console.log('D4 old:', (e as Error).message);
+  }
+  const d4ok = sw && dA === dB && B4.geo!.amps[1] === A4.geo!.amps[1] && oldOk && A4.geo!.amps[1] === 1.6 && Math.abs(A4.geo!.amps[0] - 1 / 0.736) < 1e-9;
+  console.log(`TM D4: ${d4ok ? 'ok' : 'FAIL'} sameWorld=${sw} digest ${hex(dA)}/${hex(dB)} amps ${A4.geo!.amps.map((x) => x.toFixed(2)).join('/')} old=${oldOk ? 'ok' : 'FAIL'}`);
+
   // ---------------- P1 ----------------
   // этап 1a: lp и без него — уже разные миры (лёд, пороги), поэтому сравниваем один и тот же мир: каждый кусок
   // 200 тактов идёт из одного снимка дважды — с живой планетой и с выключенными её хуками (lp = false; рельеф тот же)
@@ -329,5 +364,5 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   const over = msL / msN - 1;
   const p1 = over <= 0.05 && p(0.5) <= 7 && p(0.99) <= 10;
   console.log(`TM P1: ${p1 ? 'ok' : 'FAIL'} steady ${(msN / 2400).toFixed(3)} → ${(msL / 2400).toFixed(3)} ms/tick (${(100 * over).toFixed(1)}%) derive p50=${p(0.5).toFixed(2)} p99=${p(0.99).toFixed(2)} max=${warm.at(-1)!.toFixed(2)} ms (n=${warm.length}; cold first 3: ${cold.map((x) => x.toFixed(1)).join('/')})`);
-  if (!(d1 && d2ok && d3ok)) process.exitCode = 1;
+  if (!(d1 && d2ok && d3ok && d4ok)) process.exitCode = 1;
 }

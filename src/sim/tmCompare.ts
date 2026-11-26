@@ -118,6 +118,18 @@ export function comparePair(tl: Timeline, A: Branch, B: Branch): PairCmp | null 
       bullets.push({ text: '≈ Численности пока совпадают во всех рядах, но миры уже не те же: разница ещё не дошла до счёта зверей.' });
     }
   }
+  // 🌋 живая планета: море и лёд разошлись, катастрофы и массовые вымирания только в одной ветке
+  if (a.x.sea !== undefined && b.x.sea !== undefined) {
+    const sea = (r: SeriesRow) => `${r.x.sea > 0 ? '+' : r.x.sea < 0 ? '−' : ''}${Math.abs(Math.round(r.x.sea))} м`;
+    const ice = (r: SeriesRow) => Math.round(100 * (r.x.ice ?? 0));
+    if (Math.abs(a.x.sea - b.x.sea) >= 20 || Math.abs(ice(a) - ice(b)) >= 8)
+      bullets.push({ text: `🌊 Море в ${X} ${sea(a)}, в ${Y} ${sea(b)}; лёд — на ${ice(a)}% и ${ice(b)}% суши.`, fact: 'geo_sealevel' });
+    const cat = (br: Branch, mass: boolean) =>
+      tl.lineageMarks(br).filter((m) => m.kind === 'disaster' && m.t > td && m.t <= tc && m.text.startsWith('💀 Массовое') === mass).length;
+    const [ca, cb, ma, mb] = [cat(A, false), cat(B, false), cat(A, true), cat(B, true)];
+    if (ma !== mb) bullets.push({ text: `💀 Массовое вымирание было только в ветке ${ma > mb ? X : Y}.`, fact: 'geo_bigfive' });
+    else if (ca !== cb) bullets.push({ text: `🌋 Катастроф после развилки: в ${X} — ${ca}, в ${Y} — ${cb}.` });
+  }
   // 2–3. гильдии
   for (let g = 0; g < 4; g++) {
     const G = GUILD[g];

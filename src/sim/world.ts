@@ -12,7 +12,7 @@ import type { Action } from './timeline';
 import { geoCause, geoTrack, isoBirth, landAt } from './geoTrack';
 import { sillSide, type SillRec } from './geo';
 import { catAction, fireStep, growK } from './geoCat';
-import { allocGeoCells, carveSills, deriveTerrain, GEO, geoAction, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
+import { allocGeoCells, carveSills, deriveTerrain, GEO, geoAction, geoDescent, warmDerive, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -226,6 +226,26 @@ export interface SurfaceEnv {
   magField?: boolean;
   /** ♾️ Наследство планеты (heritage.ts); недостающие поля — как на Земле. Нет — Земля. */
   heritage?: Partial<Heritage>;
+  /**
+   * 🌋 Для живой планеты: эпоха, CO₂ и орбита планеты в этот миг. Нет — как на Земле. Читается только в reset()
+   * (в GeoState), поэтому sameWorld его не сравнивает: закладка той же планеты в другой миг встаёт в мир.
+   */
+  geo?: GeoEnv;
+}
+
+/** 🌍 Планета → остров (живая планета): из planetView.surfaceEnv(). */
+export interface GeoEnv {
+  /** Естественный CO₂ (ppm, 150–5000). */
+  co2ppm: number;
+  /** 0 — тёплая эпоха (льда нет, циклов нет), 1 — ледниковая эпоха с циклами, 2 — лёд круглый год. */
+  iceAge: 0 | 1 | 2;
+  /** Вытянутость орбиты (сила 100-тысячелетнего ритма). */
+  ecc: number;
+  /** Есть ли большая луна (без неё наклон оси качается сильнее). */
+  moon: boolean;
+  tectonics: boolean;
+  /** Сила вулканизма (Земля — 1). */
+  volcanism: number;
 }
 
 export const EARTH_ENV: SurfaceEnv = { name: 'Земля', sea: 0.3, tempOffset: 0, o2: 0.21, gravity: 1, seasonAmp: 0.16, landLife: true, starTint: [1, 1, 1], volcanism: 1, lifeStage: 7 };
@@ -464,8 +484,9 @@ export class World {
     this.lm = this.moistK = this.iceList = null;
     if (this.lp) {
       allocGeoCells(this, this.terrain.cols * this.terrain.rows);
-      this.geo = newGeo(seed);
+      this.geo = newGeo(seed, env.geo);
       carveSills(this);
+      warmDerive(this); // один раз на процесс: первые пересчёты рельефа — до оптимизации кода движком
       deriveTerrain(this, false);
       this.geo.lands = labelLands(this);
       this.iceList = new Int32Array(0);
@@ -560,6 +581,8 @@ export class World {
         this.bestiary.lastBn = 0;
       }
     }
+    // 🌍 спустились с планеты: какая там эпоха — и будут ли на острове ледниковья
+    if (this.lp && env.geo) this.log(geoDescent(env.geo), 'info', undefined, undefined, env.geo.iceAge === 1 ? 'geo_iceage' : 'geo_icehouse');
   }
 
   /** Почва без случайностей: тёплый старт около равновесия (поток случайных чисел основателей не меняется). */
@@ -2749,7 +2772,8 @@ export class World {
     });
     if (this.history.length > 900) this.history.shift();
     if (this.oe) {
-      trackBottleneck(this);
+      // 🌋 при живой планете «горлышко» — только при причине (ледниковье, катастрофа): как и в обычном режиме ниже
+      trackBottleneck(this, !this.lp || geoCause(this));
       if (this.tick % 200 === 0) updateBestiary(this);
     }
     // 🌋 при живой планете кольцо численности — всегда свежее, а «горлышко» — только при причине (ледниковье, катастрофа)

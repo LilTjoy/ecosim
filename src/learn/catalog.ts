@@ -58,6 +58,10 @@ function surfaceLink(key: string, source: CardSource): SimLink | undefined {
     if (key === 'geo_gabi') return { view: 'lesson', id: 'panama', label: '🌉 Урок «Опыт „Панама“»' };
     if (['geo_impactwinter', 'geo_bigfive', 'geo_islandiso', 'geo_supervolcano', 'geo_volcwinter', 'geo_tsunami', 'geo_fire'].includes(key)) return { view: 'lesson', id: 'kpg', label: '☄️ Урок «После астероида»' };
     if (['geo_rainshadow', 'geo_orogeny', 'geo_plates'].includes(key)) return { view: 'lesson', id: 'shadow', label: '🏜 Урок «Дождевая тень»' };
+    // 🌍 эпоха и луна планеты задают ледниковья острова: к планете без большой луны — и с неё «▼ на поверхность»
+    if (key === 'geo_moonclimate') return { view: 'planet', params: { moon: 0 }, label: '🌍 Планета без большой луны' };
+    if (key === 'geo_icehouse') return { view: 'planet', label: '🌍 К планете: какая там эпоха' };
+    if (key === 'geo_glacialfur') return { view: 'eco', tab: 'geo', label: '🌋 Вкладка «Планета»' };
     return { view: 'lesson', id: 'ice', label: '❄️ Урок «Ледниковый период»' };
   }
   if (source !== 'surface') {

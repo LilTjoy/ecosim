@@ -49,6 +49,12 @@ export function geoPanelHtml(w: World): string {
   const out: string[] = [];
   out.push(`<h4>Ледниковые циклы <a data-fact="geo_iceage">?</a></h4>${cycleChart(w)}
     <p class="small">Море ${sea(metres(g.seaQ))} · лёд на ${Math.round(100 * g.iceLand)}% суши · CO₂ ${Math.round(g.co2)} ppm · ледниковий: ${g.stats.glacials} · ≈ ${Math.round(geoKyr(g)).toLocaleString('ru-RU')} тыс. лет <a data-fact="geo_timescale">?</a></p>`);
+  // 🌍 остров спустился с планеты: её эпоха, CO₂ и луна задают ритм
+  if (g.iceAge !== null) {
+    const ep = g.iceAge === 0 ? '🌴 тёплая эпоха — ледниковий нет, море выше' : g.iceAge === 1 ? '❄️ ледниковая эпоха — циклы идут' : '🧊 эпоха вечного льда — лёд не уходит';
+    const moon = g.amps[1] > 0.6 ? ' · 🌑 без большой луны: наклон оси качается сильнее' : '';
+    out.push(`<p class="small">🌍 Планета: ${ep} · естественный CO₂ ${g.co2Base} ppm${moon} <a data-fact="geo_icehouse">?</a>${moon ? ' <a data-fact="geo_moonclimate">?</a>' : ''}</p>`);
+  }
   // проливы и мосты
   const rows = g.sills.map((s, si) => {
     const kind = s.kind === 'sill' ? 'мелкий порог (сохнет в ледниковье)' : s.kind === 'wallace' ? 'пролив Уоллеса (глубокий всегда)' : 'пролив игрока';

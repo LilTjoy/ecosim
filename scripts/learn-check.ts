@@ -6,7 +6,7 @@ import { mulberry32 } from '../src/lib/random';
 import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
-  outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, icePeakOk,
+  outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, iceMeltOk, icePeakOk,
   vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot, SHADOW_SEED, shadowLine, shadowNow,
 } from '../src/learn/scenarios';
 import { GEO, panamaLine } from '../src/sim/geo';
@@ -241,6 +241,15 @@ if (!args.includes('--planet')) {
     ok(!!s0 && s0.ice < 0.06 && Math.abs(s0.sea) <= 12, `Ледниковый период, зерно ${seed}: в начале межледниковье (море ${s0?.sea} м, лёд ${s0 ? (s0.ice * 100).toFixed(1) : '-'}%)`);
     ok(tb > 0 && tb < 30000, `Ледниковый период, зерно ${seed}: перешеек открылся за ${tb} тактов`);
     ok(!!s && icePeakOk(s) && s.wallace, `Ледниковый период, зерно ${seed}: пик за ${tk} тактов — море ${s?.sea} м, лёд ${s ? (s.ice * 100).toFixed(0) : '-'}%, ${s?.dT.toFixed(1)} °C, CO₂ ${s?.co2.toFixed(0)}, южный пролив глубок: ${s?.wallace}; видов ${sp0} → ${w.species.living().length}, зверей ${w.creatures.length}`);
+    // шаг 6: «💧 Конец ледниковья» → межледниковье, морены
+    w.apply({ t: w.tick, k: 'iceAge', mode: 'end' });
+    let tm = 0;
+    while (tm < 30000 && !iceMeltOk(iceNow(w))) {
+      steps(w, 60);
+      tm += 60;
+    }
+    const m = iceNow(w);
+    ok(!!m && iceMeltOk(m) && m.moraines > 0 && !m.bridge, `Ледниковый период, зерно ${seed}: межледниковье через ${tm} тактов — море ${m?.sea} м, лёд ${m ? (m.ice * 100).toFixed(0) : '-'}%, морен ${m?.moraines}, котловин ${m?.kettles}, озёр ${m?.lakes}, перешеек ${m?.bridge ? 'открыт' : 'под водой'}`);
     lap('ледниковый период', t);
   }
   // «🌊 Пролив рождает виды» (×1, зерно урока): вид по обе стороны пролива → 5 поколений врозь → разделение

@@ -68,7 +68,12 @@ const HER: Record<string, Record<string, unknown>> = {
   murky: { murk: 0.6 },
 };
 if (flags.her && !HER[flags.her]) throw new Error(`--her=${flags.her}: есть ${Object.keys(HER).join(', ')}`);
-const herEnv = flags.her ? ({ ...WM.EARTH_ENV, light: 1, murk: 0, pressure: 1, magField: true, ...HER[flags.her] } as WM.SurfaceEnv) : undefined;
+const herEnv0 = flags.her ? ({ ...WM.EARTH_ENV, light: 1, murk: 0, pressure: 1, magField: true, ...HER[flags.her] } as WM.SurfaceEnv) : undefined;
+// 🌍 этап 4: --penv=iceAge,co2ppm,ecc,moon,volc — условия планеты для живой планеты (env.geo), напр. --penv=1,400,0.017,1,1
+const penv = flags.penv ? flags.penv.split(',').map(Number) : null;
+const herEnv = penv
+  ? ({ ...(herEnv0 ?? WM.EARTH_ENV), geo: { iceAge: penv[0] as 0 | 1 | 2, co2ppm: penv[1] ?? 400, ecc: penv[2] ?? 0.017, moon: (penv[3] ?? 1) !== 0, tectonics: true, volcanism: penv[4] ?? 1 } } as WM.SurfaceEnv)
+  : herEnv0;
 /** 🌋 Флаги климата живой планеты — действиями мира (как кнопки вкладки «Климат»), на такте 0. */
 export function applyGeoFlags(w: InstanceType<typeof World>, f: Record<string, string>): void {
   const g = (w as any).geo;
@@ -112,7 +117,7 @@ if (W.lp) applyGeoFlags(w, flags);
 // ♾️ только при открытой эволюции: счётчики строк журнала, первые такты событий, смерти хищников
 const OE = !!W.oe;
 const chron0 = OE ? w.events.filter((e) => e.kind === 'evo').map((e) => e.fact).join(',') || '-' : '';
-const oe = { evoLines: 0, bottle: 0, first: {} as Record<string, number>, carnD: 0, poisonD: 0, creSum: 0, msSum: 0, cre0: 0, peak: new Float64Array(MM.KIND_NAMES.length), peakT: new Float64Array(MM.KIND_NAMES.length) };
+const oe = { evoLines: 0, bottle: 0, fur: [] as string[], first: {} as Record<string, number>, carnD: 0, poisonD: 0, creSum: 0, msSum: 0, cre0: 0, peak: new Float64Array(MM.KIND_NAMES.length), peakT: new Float64Array(MM.KIND_NAMES.length) };
 /** Носители вида модуля (накопленный уровень ≥ 0.3; ноги — пары / 2) по всем особям. */
 const carriers = (out: Float64Array) => {
   out.fill(0);
@@ -128,6 +133,7 @@ if (OE) {
   W.log = function (this: any, text: string, kind: string, ...rest: unknown[]) {
     if (kind === 'evo') oe.evoLines++;
     if (/бутылочн/i.test(text)) oe.bottle++;
+    if (text.startsWith('❄️ За ледниковье')) oe.fur.push(text.replace(/^.*: /, '').replace(/ сухопутных$/, ''));
     for (const m of ['🧪', '🌱', '🌟', '💨', '🌳', '🪞']) if (text.startsWith(m) && oe.first[m] === undefined) oe.first[m] = this.tick;
     return log0.call(this, text, kind, ...rest);
   };
@@ -376,7 +382,7 @@ if (OE) {
     `\n OE disc: ${B ? [...B.found.values()].filter((d: any) => !d.inherited).map((d: any) => `${d.id}@${d.tick}${d.times > 1 ? '×' + d.times : ''}${d.parallel ? '∥' + d.parallel : ''}${d.lost !== null ? '⚰' : ''}`).join(' ') || '-' : '-'}` +
     ` | prog ${B ? [...B.prog].filter(([, p]: [string, number]) => p >= 0.3).map(([id, p]: [string, number]) => `${id}:${p.toFixed(2)}`).join(' ') || '-' : '-'}` +
     `\n OE convdiag: tried=${B?.convDiag?.tried} young=${B?.convDiag?.young} bestDmax=${B?.convDiag?.best?.toFixed(2)} ${B ? B.conv.map((c: any) => `${c.a}~${c.b}@${c.tick}:${c.fact}${c.logged ? '' : '(silent)'}`).join(' ') || '-' : '-'} | plans ${B ? [...B.plans.values()].map((p: any) => `${p.ru}@${p.tick}`).join('; ') || '-' : '-'}` +
-    `\n OE first: 🧪@${ft('🧪')} 🌱@${ft('🌱')} 🌟@${ft('🌟')} 💨@${ft('💨')} 🌳@${ft('🌳')} 🪞@${ft('🪞')} evoLines=${oe.evoLines} bottleneckLogs=${oe.bottle}` +
+    `\n OE first: 🧪@${ft('🧪')} 🌱@${ft('🌱')} 🌟@${ft('🌟')} 💨@${ft('💨')} 🌳@${ft('🌳')} 🪞@${ft('🪞')} evoLines=${oe.evoLines} bottleneckLogs=${oe.bottle}${oe.fur.length ? ` glacialFur=${oe.fur.join(',')}` : ''}` +
     `\n OE death: poisoned=${S.poisoned} poisonDeaths=${S.poisonDeaths} zaps=${S.zaps} carnDeaths=${oe.carnD} carnPoisoned=${oe.poisonD}` +
     `\n OE perf: msK=${(oe.msSum / Math.max(1, oe.creSum / 1000)).toFixed(3)} (мс на 1000 особей·такт) heapMB=${(process.memoryUsage().heapUsed / 1048576).toFixed(1)}` +
     `\n OE body: EYE/ENDO herb=${kitMin[0]} omni=${kitMin[1]} carn=${kitMin[2]} swim=${kitMin[3]} fliers=${pc(fly, land)}% gliders=${pc(glide, land)}% of land(n=${land}) torpid=${torp}` +
@@ -407,5 +413,6 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
     const geoLine = `\n GEO: glacials=${W.geo.stats.glacials} bridges=${W.geo.stats.bridges} sillOpens=${gt.sillOpens} sillOpenYears=${(gt.sillOpenT / 6000).toFixed(2)} wallaceDeep=${gt.wallaceDeep ? 1 : 0} wallaceSplit=${gt.wallaceSplit ? 1 : 0} shift=${gt.sMin.toFixed(3)}..${gt.sMax.toFixed(3)} (${(gt.sMin * C).toFixed(1)}..${(gt.sMax * C).toFixed(1)} °C) Vg=${gt.vMin.toFixed(2)}..${gt.vMax.toFixed(2)} sea=${GM.metres(gt.seaMin)}..${GM.metres(gt.seaMax)} м iceMax%=${(100 * gt.iceMax).toFixed(1)} crossers=${gt.cross} tracked=${gt.side.size} kyr=${GM.geoKyr(W.geo).toFixed(0)} lgmAt=${gt.lgm.join(',') || '-'}`;
     const S = W.geo.stats, iso = W.geo.isolates as any[];
     const isoLine = `\n GEO 1b: iso=${iso.length} [${iso.map((r: any) => `${r.sill}:${r.sp}:ga${r.ga}:d${r.d.toFixed(2)}:L${r.leak}:${r.parts.join('/')}`).join(' ')}] splits=${S.splits} sill=${S.sSill}@${g1b.first.sill} wallace=${S.sWall}@${g1b.first.wallace} player=${S.sPlay} leaks=${S.leaks} invaders=${S.invaders} bridgesRec=${W.geo.bridges.length} refugiaTot=${S.refugia} atMax=${g1b.atMax.join(',') || '-'} moraines=${S.moraines} kettles=${S.kettles} lakes=${S.lakes}/${t1.lakes.length} seeds=${W.geo.lakeSeeds.length} minElevD=${Math.min(...(W.elevD as Int16Array))} sp=${w.species.living().length}`;
-    return geoLine + isoLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
+    const envLine = penv || S.eruptions ? `\n GEO env: iceAge=${W.geo.iceAge} co2Base=${W.geo.co2Base} vBias=${W.geo.vBias} volc=${W.geo.volc} amps=${W.geo.amps.map((x: number) => x.toFixed(2)).join('/')} orbit=${W.geo.orbit ? 1 : 0} eruptions=${S.eruptions} co2=${W.geo.co2.toFixed(0)}` : '';
+    return geoLine + isoLine + envLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
   })() : ''));
