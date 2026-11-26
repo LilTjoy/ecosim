@@ -60,6 +60,9 @@ export const EVO = {
   JIT: 0.15, // [new, B]
   BENTHIC: false,
   MUT_BOOST: 4,
+  COPY_UP: 0.04, // лишние копии «бесплатных» глаз и теплокровности тоже стоят (иначе мусор занимает слоты)
+  REPLACE_WEAK: false, // все слоты заняты — новое ложится на место слабого остатка (< NEW_LO); выключено: хищников −30…40% (стенд)
+  MATE_BASE: true, // правила: «идти к партнёру» по базовой энергии, как ready() (жир не откладывает свадьбу)
 };
 /** Происхождение модуля: 1..24 — наследство (= вид), 31 — заготовка игрока, 33..56 — палитра, ≥ 100 — новое. */
 export const ORIGIN = { INTRODUCED: 31, PALETTE: 32, FRESH: 100 };
@@ -126,7 +129,7 @@ export const HOMOLOGY: readonly (readonly M[])[] = (() => {
 export const MOD_INFO: readonly { emoji: string; label: string; gen: string; fact: string }[] = (() => {
   const t: { emoji: string; label: string; gen: string; fact: string }[] = Array.from({ length: M.COUNT }, () => ({ emoji: '', label: '', gen: '', fact: '' }));
   const s = (k: M, emoji: string, label: string, gen: string, fact: string) => (t[k] = { emoji, label, gen, fact });
-  s(M.EYE, '👁', 'зрение', 'глаза', 'sense');
+  s(M.EYE, '👁', 'зрение', 'глаза', 'eyeloss');
   s(M.EAR, '👂', 'слух', 'уха', 'echolocation');
   s(M.NOSE, '👃', 'нюх', 'носа', 'pheromone');
   s(M.PIT, '🌡', 'тепловые ямки', 'тепловых ямок', 'infrared');
@@ -149,7 +152,7 @@ export const MOD_INFO: readonly { emoji: string; label: string; gen: string; fac
   s(M.TOXIN, '☠️', 'ядовитая железа', 'ядовитой железы', 'poison');
   s(M.DIG, '⛏', 'роющие лапы', 'роющих лап', 'burrow');
   s(M.HORN, '🦏', 'рога', 'рогов', 'horns');
-  s(M.LIMB, '🦵', 'ноги', 'ноги', 'manylegs');
+  s(M.LIMB, '🦵', 'ноги', 'ноги', 'legs');
   return t;
 })();
 
@@ -161,8 +164,9 @@ function emptyBody(shape: number): Body {
 
 /** Тело из списка [вид, уровень]; происхождение по умолчанию — сам вид (наследство). */
 export function bodyFrom(list: readonly (readonly [M, number, number?])[], shape: number, origin?: number): Body {
+  if (list.length > NSLOT) throw new Error(`bodyFrom: ${list.length} модулей > ${NSLOT} слотов`);
   const b = emptyBody(shape);
-  for (let i = 0; i < list.length && i < NSLOT; i++) {
+  for (let i = 0; i < list.length; i++) {
     const [k, l, o] = list[i];
     b.km[i] = k | ((o ?? origin ?? k) << 5);
     b.lvl[i] = l;
@@ -231,12 +235,19 @@ export function mutateBody(b: Body, rate: number, ctx: ExprCtx, boost: number, n
   const r = rand();
   const pDup = EVO.P_DUP * k, pNeo = pDup + EVO.P_NEO * k, pNew = pNeo + EVO.P_NEW * k;
   if (r >= pNew) return o;
-  let empty = -1, occ = 0;
+  let empty = -1, occ = 0, weak = -1;
   for (let i = 0; i < NSLOT; i++) {
-    if (o.km[i] !== 0) occ++;
-    else if (empty < 0) empty = i;
+    if (o.km[i] !== 0) {
+      occ++;
+      if (o.lvl[i] < EVO.NEW_LO && (weak < 0 || o.lvl[i] < o.lvl[weak])) weak = i;
+    } else if (empty < 0) empty = i;
   }
-  if (empty < 0) return o; // все 8 слотов заняты — тело уже «торгуется» за место
+  // все 8 слотов заняты: новое ложится на место самого слабого остатка (< NEW_LO), как ген на месте псевдогена;
+  // если слабых нет — тело уже «торгуется» за место, события нет
+  if (empty < 0) {
+    if (weak < 0 || !EVO.REPLACE_WEAK) return o;
+    empty = weak;
+  }
   const newLvl = () => EVO.NEW_LO + rand() * (EVO.NEW_HI - EVO.NEW_LO);
   if (r < pNeo) {
     if (occ === 0) return o;
@@ -289,12 +300,14 @@ const LEG_MUL = [0.45, 0.95, 1, 1, 0.94];
 /** Экспрессия: из слотов — фенотип (один раз при рождении). С нейтральным набором все множители = 1. */
 export function express(b: Body, size: number, swim: number, ctx: ExprCtx): Float32Array {
   const p = new Float32Array(P.COUNT);
-  let legs = 0, len = 0, nLimb = 0, up = 0;
+  let legs = 0, len = 0, nLimb = 0, up = 0, eyes = 0, endos = 0;
   for (let i = 0; i < NSLOT; i++) {
     const km = b.km[i];
     if (km === 0) continue;
     const k = kindOf(km), v = b.lvl[i];
     up += UPKEEP[k] * v;
+    // первая копия глаз и теплокровности платится иначе (EYE — ничем, ENDO — обменом), каждая следующая — как орган
+    if ((k === M.EYE && eyes++ > 0) || (k === M.ENDO && endos++ > 0)) up += EVO.COPY_UP * v;
     if (k === M.LIMB) {
       nLimb++;
       len += v;

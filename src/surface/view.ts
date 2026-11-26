@@ -269,6 +269,8 @@ export class SurfaceView {
   private collection = new Set<string>();
   /** ♾️ Открытая эволюция для новых миров: выбор игрока (меню ▾ у «↻ Новый мир», localStorage) или ?oe=1 / ?oe=0. */
   private oePref = false;
+  /** Мир урока или справочника (newWorld): всегда классический, переключатель ♾️ в нём не действует. */
+  private classicWorld = false;
   /** ♾️ Тосты «🌟 Открытие»: очередь до 3, не чаще раза в 10 с. */
   private discQueue: string[] = [];
   private lastDiscToast = -1e9;
@@ -391,6 +393,7 @@ export class SurfaceView {
    */
   setEnv(env: SurfaceEnv, seed?: number, asked = false, oe = this.oePref): void {
     const lost = this.tl.branches.length > 1;
+    this.classicWorld = false;
     this.world.settings.openEvo = oe;
     this.world.reset(this.world.brainMode, seed, env);
     this.afterReset();
@@ -543,6 +546,7 @@ export class SurfaceView {
         if (at) {
           this.renderer.focusSpecies = at[2];
           this.cam.flyTo(at[0], at[1], 1.4);
+          this.showStage();
         }
         return;
       }
@@ -972,6 +976,16 @@ export class SurfaceView {
       if (d < bd) [bd, bx, by] = [d, c.x, c.y];
     }
     this.cam.flyTo(bx, by, 1.2);
+    this.showStage();
+  }
+
+  /** На телефоне панель под картой: после «показать на карте» прокрутить к самой карте, иначе полёта не видно. */
+  private showStage(): void {
+    if (!matchMedia('(max-width: 900px)').matches) return;
+    const st = this.root.querySelector<HTMLElement>('.s-stage');
+    if (!st) return;
+    const r = st.getBoundingClientRect();
+    if (r.top < 0 || r.bottom > innerHeight) requestAnimationFrame(() => st.scrollIntoView({ block: 'start', behavior: 'smooth' }));
   }
 
   // ---------------- карточки ----------------
@@ -1134,6 +1148,8 @@ export class SurfaceView {
   private pumpDisc(): void {
     const now = performance.now();
     if (!this.discQueue.length || now - this.lastDiscToast < 10000) return;
+    // на узком экране тост лёг бы поверх открытой карточки — ждём, пока её закроют
+    if (!$(this.root, '.s-fact').hidden && matchMedia('(max-width: 900px)').matches) return;
     this.lastDiscToast = now;
     this.toast(this.discQueue.shift()!, [{ label: '🌟 Открытия', run: () => this.openTab('discover', '.s-tab[data-tab=discover]') }], 3500);
   }
@@ -1430,7 +1446,7 @@ export class SurfaceView {
     card.innerHTML = `<div class="card">
       <div class="row"><b style="color:${spColor(sp)}">${sp.name}</b><button data-unfocus class="x">✕</button></div>
       <div class="latin">${sp.latin}</div>
-      <div class="muted small">Возник на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}»${parent ? `, предок — «${parent.name}»` : ' (основатель)'}. Освоил регионов: ${sp.regions.size}. Пик численности: ${sp.peak}.</div>${this.diseaseRow(sp)}
+      <div class="muted small">${sp.introduced && !parent ? `Завезён игроком на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}».` : `Возник на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}»${parent ? `, предок — «${parent.name}»` : ' (основатель)'}.`} Освоил регионов: ${sp.regions.size}. Пик численности: ${sp.peak}.</div>${this.diseaseRow(sp)}
       <div class="genes">${GENE_KEYS.map((k) => {
         const i = GENE_INFO[k];
         const v = (sp.mean[k] - i.min) / (i.max - i.min);
@@ -2181,7 +2197,9 @@ export class SurfaceView {
       <button data-sd="new">↻ Новый мир <em>случайный сид</em></button>
       <button data-sd="same">🔁 Этот же мир с начала <em>тот же сид — та же история</em></button>
       <button data-sd="form">🔢 Мир по сиду…</button>
-      <button data-sd="oe">♾️ Открытая эволюция: <b>${this.oePref ? 'вкл' : 'выкл'}</b> <em>${this.oePref ? 'выключить' : 'включить'} — новые органы и открытия; начнётся этот же мир с начала</em></button>
+      ${this.classicWorld
+        ? `<button data-sd="oe" disabled>♾️ Открытая эволюция: <b>выкл</b> <em>опыты и справочник идут в классическом мире; вернитесь к обычной Земле, чтобы включить</em></button>`
+        : `<button data-sd="oe">♾️ Открытая эволюция: <b>${this.world.oe ? 'вкл' : 'выкл'}</b> <em>${this.world.oe ? 'выключить' : 'включить'} — новые органы и открытия; начнётся этот же мир с начала</em></button>`}
       <div class="sd-form" hidden><input class="sd-in" placeholder="например 42 или 42-7" inputmode="numeric" maxlength="23" aria-label="Сид мира"><button data-sd="go">Создать</button></div>
       <div class="sd-err small" hidden></div>`;
     const st = $(this.root, '.s-stage').getBoundingClientRect(), bt = $(this.root, '.s-seedbtn').getBoundingClientRect();
@@ -2232,8 +2250,8 @@ export class SurfaceView {
 
   /** ♾️ Включить или выключить открытую эволюцию: тот же сид и те же условия планеты, мир с начала. */
   private toggleOE(): void {
-    if (!this.confirmReset()) return;
-    this.oePref = !this.oePref;
+    if (this.classicWorld || !this.confirmReset()) return;
+    this.oePref = !this.world.oe;
     try {
       localStorage.setItem('ecosim.openEvo', this.oePref ? '1' : '0');
     } catch {
@@ -2828,6 +2846,7 @@ export class SurfaceView {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
     this.setEnv(env, seed, false, false);
+    this.classicWorld = true;
     // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта;
     // вместо неё — путь назад к обычной Земле («↻ Новый мир» повторяет условия опыта)
     $(this.root, '.s-back').hidden = true;

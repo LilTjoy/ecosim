@@ -2390,11 +2390,12 @@ export class SurfaceRenderer {
       const pv = c.g.ph[P.PHOTO];
       if (pv < 0.2 || !vis(c.x, c.y)) continue;
       if (budget-- <= 0) break;
-      const a = Math.min(1, pv * night * 1.3);
+      // в полную силу уже там, где HUD показывает 🌙 (night ≈ 0.53): в сумерках свет только набирается
+      const a = Math.min(1, (0.45 + 0.55 * pv) * clamp((night - 0.12) / 0.38, 0, 1));
       if (!detail || c.g.size * z <= 2.5) {
-        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.3})`;
+        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.35})`;
         ctx.beginPath();
-        ctx.arc(c.x, c.y, 3 / z, 0, Math.PI * 2);
+        ctx.arc(c.x, c.y, 4 / z, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = `hsla(185,100%,75%,${a})`;
         ctx.fillRect(c.x - 0.75 / z, c.y - 0.75 / z, 1.5 / z, 1.5 / z);
@@ -2408,9 +2409,9 @@ export class SurfaceRenderer {
       for (let i = 0; i < n; i++) {
         const [px, py] = photoAt(i, n, rx, ry);
         const x = c.x + co * px - si * py, y = c.y + si * px + co * py;
-        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.25 * tw})`;
+        ctx.fillStyle = `hsla(185,100%,70%,${a * 0.3 * tw})`;
         ctx.beginPath();
-        ctx.arc(x, y, r * 3, 0, Math.PI * 2);
+        ctx.arc(x, y, r * 4, 0, Math.PI * 2);
         ctx.fill();
         ctx.fillStyle = `hsla(185,100%,78%,${a * tw})`;
         ctx.beginPath();

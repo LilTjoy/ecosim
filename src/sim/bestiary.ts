@@ -163,8 +163,9 @@ export interface BestiaryState {
   watchN: number[];
   beats: { '🧪': number; '🌱': number; '💨': number };
   lastSight: number;
-  /** Живые новые зачатки сейчас (для вкладки): [происхождение, вид, носителей], до 5. */
-  live: [number, number, number][];
+  /** Живые новые зачатки сейчас (для вкладки), по виду модуля: [происхождение крупнейшего, вид, носителей всего,
+   *  сколько независимых мутаций (нет в старых снимках = 1)], до 5; виды, обычные в наследстве, не показываются. */
+  live: [number, number, number, number?][];
   /** Прогресс неоткрытых рецептов (0..0.99) и вид, у которого «близко». */
   prog: Map<string, number>;
   near: Map<string, number>;
@@ -252,7 +253,8 @@ const KEY_OF: string[] = ['', 'EYE', 'EAR', 'NOSE', 'PIT', 'AMPUL', 'MAG', 'PHOT
   'SHELL', 'FUR', 'MEMB', 'CLAW', 'TOXIN', 'DIG', 'HORN'];
 const ROMAN = ['', ' II', ' III', ' IV', ' V', ' VI', ' VII', ' VIII', ' IX', ' X'];
 // существительные плана — мужского рода, кроме «соня»: прилагательное к ней — женского
-const femAdj = (a: string) => a.replace(/(ый|ий|ой)$/, (m) => (m === 'ий' && /[кгхжшчщ]ий$/.test(a) ? 'ая' : m === 'ий' ? 'яя' : 'ая'));
+const femAdj = (a: string) => /ийся$/.test(a) ? a.replace(/ийся$/, 'аяся') // светящийся → светящаяся
+  : a.replace(/(ый|ий|ой)$/, (m) => (m === 'ий' && /[кгхжшчщ]ий$/.test(a) ? 'ая' : m === 'ий' ? 'яя' : 'ая'));
 
 // ---------------- рабочие массивы прохода (не состояние: пересчитываются каждый раз) ----------------
 
@@ -405,7 +407,7 @@ function beats(w: World, B: BestiaryState, tick: number): void {
       B.beats['🌱']++;
       const sp = w.species.all.get(e!.c.sp);
       B.originInfo.set(wt.origin, { tick, sp: e!.c.sp, kind: wt.kind });
-      w.log(`🌱 Зачаток ${MOD_INFO[wt.kind].gen} прижился: у «${sp?.name ?? '?'}» уже ${n} носителей`, 'evo', e!.c.x, e!.c.y, 'duplication');
+      w.log(`🌱 Зачаток ${MOD_INFO[wt.kind].gen} прижился: у «${sp?.name ?? '?'}» уже ${n} ${plural(n, 'носитель', 'носителя', 'носителей')}`, 'evo', e!.c.x, e!.c.y, 'duplication');
     } else if (n === 0) {
       B.watch.splice(i, 1);
       if (B.held.includes(wt.kind)) continue;
@@ -414,12 +416,20 @@ function beats(w: World, B: BestiaryState, tick: number): void {
     }
   }
   // живые зачатки (вкладка) и прижившиеся без наблюдения — в originInfo (подсказка в инспекторе)
-  const live: [number, number, number][] = [];
+  const byKind = new Map<number, [number, number, number, number, number]>(); // вид → [происх., вид, всего, мутаций, n крупнейшего]
   for (const [key, e] of fresh) {
     const o = Math.floor(key / 32), k = key & 31;
-    live.push([o, k, e.n]);
     if (e.n >= BEST.HOLD_N && !B.originInfo.has(o)) B.originInfo.set(o, { tick, sp: e.c.sp, kind: k as M });
+    if (herK[k] > 0.2 * N) continue; // «зачаток глаза» там, где глаза у всех, — не новость (как и для 🧪)
+    const x = byKind.get(k);
+    if (!x) byKind.set(k, [o, k, e.n, 1, e.n]);
+    else {
+      x[2] += e.n;
+      x[3]++;
+      if (e.n > x[4] || (e.n === x[4] && o < x[0])) { x[0] = o; x[4] = e.n; }
+    }
   }
+  const live: [number, number, number, number][] = [...byKind.values()].map((x) => [x[0], x[1], x[2], x[3]]);
   live.sort((a, b) => b[2] - a[2] || a[0] - b[0]);
   B.live = live.slice(0, 5);
   // 🧪 первое новое происхождение ещё не замеченного вида модуля (редкого среди «наследственных»)
@@ -527,7 +537,7 @@ function discoveries(w: World, B: BestiaryState, tick: number): void {
         if (s.sig.some((o) => o >= ORIGIN.FRESH) && s.sig.every((o) => o < ORIGIN.FRESH || !stored.has(o))) {
           d.origins.push(s.sig);
           w.log(`♻ ${R.name} — снова в этом мире, из новой мутации`, 'evo', s.x, s.y, 'dollo');
-        }
+        } else w.log(`♻ ${R.icon} ${R.name}: снова выше порога — у потомков прежних носителей`, 'evo', s.x, s.y, 'drift');
         d.lost = null;
         if (!d.seen.includes(id)) d.seen.push(id);
         if (!d.roots.includes(sp.root)) d.roots.push(sp.root);
@@ -561,7 +571,17 @@ function discoveries(w: World, B: BestiaryState, tick: number): void {
     else if (tick - d.lastHeld >= BEST.LOSS_T) {
       d.lost = tick;
       const R = RECIPES[r];
-      w.log(`⚰ Утрачено: ${R.icon} ${R.name} — последние носители вымерли. Если вернётся, то уже из новой мутации`, 'evo', undefined, undefined, 'dollo');
+      // вымерли ли носители на самом деле — или признак только ослаб (модуль ещё есть, но ниже порога)
+      let weak = 0;
+      if (R.defs.length)
+        for (const c of w.creatures) {
+          const { km, lvl } = c.g.body;
+          for (let i = 0; i < NSLOT; i++) if (km[i] !== 0 && lvl[i] >= 0.1 && R.defs.includes(kindOf(km[i]))) { weak++; break; }
+        }
+      if (R.defs.length && weak === 0)
+        w.log(`⚰ Утрачено: ${R.icon} ${R.name} — последние носители вымерли. Если вернётся, то уже из новой мутации`, 'evo', undefined, undefined, 'dollo');
+      else
+        w.log(`⚰ Угасло: ${R.icon} ${R.name} — ни у кого больше не дотягивает до порога${weak ? ` (ослабевшие органы ещё у ${weak} ${plural(weak, 'зверя', 'зверей', 'зверей')})` : ''}`, 'evo', undefined, undefined, 'drift');
     }
   }
   // E. прогресс неоткрытых и «🍂 не успели»

@@ -5,7 +5,7 @@
 import type { SimResult } from '../planet/model';
 import { clamp, mulberry32, type Rand } from '../lib/random';
 import type { Genome } from './genome';
-import { bodyFrom, jitterKit, kitList, M, MOD_INFO, ORIGIN } from './modules';
+import { bodyFrom, jitterKit, kitList, M, MOD_INFO, NSLOT, ORIGIN } from './modules';
 
 export interface Crisis {
   id: string;
@@ -173,11 +173,18 @@ export function heritageFounder(g: Partial<Genome>, h: Heritage, r: Rand, palett
   for (const l of limbs) list.push([M.LIMB, l]);
   if (fur > 0) list.push([M.FUR, fur]);
   list.push(...extra);
-  // палитра: зачаток, «свой» номер происхождения 32 + вид
+  // Наследство планеты важнее всего остального: если с ним не влезает в NSLOT, уступает более слабое из
+  // чувств набора — нюх или слух (одно остаётся всегда), а дальше — последние из наследства.
+  while (list.length > NSLOT) {
+    const ear = list.findIndex((e) => e[0] === M.EAR), nose = list.findIndex((e) => e[0] === M.NOSE);
+    if (ear >= 0 && nose >= 0) list.splice(list[nose][1] <= list[ear][1] ? nose : ear, 1);
+    else list.pop();
+  }
+  // палитра: зачаток, «свой» номер происхождения 32 + вид — только в свободный слот (кости тянутся всегда)
   if (palette.length && r() < PAL.p) {
     const k = palette[Math.floor(r() * palette.length)];
     const l = PAL.lo + (PAL.hi - PAL.lo) * r();
-    if (!list.some((e) => e[0] === k)) list.splice(Math.min(list.length, 7), 0, [k, l, ORIGIN.PALETTE + k]);
+    if (list.length < NSLOT && !list.some((e) => e[0] === k)) list.push([k, l, ORIGIN.PALETTE + k]);
   }
   o.body = bodyFrom(list, swim > 0.6 ? 0.6 : 0.5);
   return o;

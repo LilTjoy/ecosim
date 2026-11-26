@@ -1706,7 +1706,8 @@ export class World {
     }
     const max = this.maxEnergy(c.g);
     // 2. размножение
-    if (p.mate && c.energy > max * 0.6) {
+    // ♾️ как в ready(): жировой запас не откладывает свадьбу
+    if (p.mate && c.energy > (this.oe && EVO.MATE_BASE ? this.baseEnergy(c.g) : max) * 0.6) {
       steer(Math.atan2(p.mate.y - c.y, p.mate.x - c.x));
       c.state = 'mate';
       return 0.7;

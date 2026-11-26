@@ -56,6 +56,8 @@ function noun(g: Genome, rand: Rand, oe: boolean): [string, string] {
     const p = g.ph;
     if (p[P.FLY] >= 1) return ['Летун', 'Volucer'];
     if (p[P.FLY] >= 0.45) return ['Планер', 'Planator'];
+    // крабовидная форма (как рецепт carcinization) — раньше просто панциря
+    if (p[P.SHELL] >= 0.5 && p[P.CLAW] >= 0.3 && p[P.LEGS] >= 3 && g.body.shape <= 0.3) return ['Краб', 'Carcinus'];
     if (p[P.SHELL] >= 0.6) return ['Панцирник', 'Testudo'];
     if (p[P.DIG] >= 0.5 && g.size < 5) return ['Землерой', 'Fossor'];
     if (p[P.LEGS] === 0 && g.swim < 0.5) return ['Ползун', 'Serpens'];
@@ -99,7 +101,7 @@ function adjective(g: Genome, rand: Rand, oe: boolean): [string, string] {
     if (p[P.TOXIN] >= 0.4) options.push(['Ядовитый', 'venenosus']);
     if (p[P.EYEQ] === 0) options.push(['Слепой', 'caecus']);
     if (p[P.ENDO] < 0.3) options.push(['Холоднокровный', 'frigidus']);
-    if (Math.min(p[P.EAR], p[P.VOICE]) >= 0.4) options.push(['Щелкун', 'sonans']);
+    if (Math.min(p[P.EAR], p[P.VOICE]) >= 0.4) options.push(['Звонкий', 'sonans']);
     if (p[P.FUR] >= 0.6) options.push(['Мохнатый', 'villosus']);
     if (p[P.DIG] >= 0.5) options.push(['Роющий', 'fossorius']);
     if (p[P.HORN] >= 0.5) options.push(['Рогатый', 'cornutus']);

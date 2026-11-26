@@ -57,7 +57,8 @@ export function bodyChips(w: World, c: Creature): string {
       txt = `${info.label} ${pc(lvl)}`;
     }
     const weak = lvl < 0.2;
-    out.push(`<span class="b-chip${weak ? ' weak' : ''}" data-fact="${info.fact}" title="${esc(originText(w, o))}">${info.emoji} ${txt}${weak ? ' (зачаток)' : ''}</span>`);
+    const fact = k === M.LIMB ? (ph[P.LEGS] >= 3 ? 'manylegs' : ph[P.LEGS] < 1 ? 'legless' : 'legs') : info.fact;
+    out.push(`<span class="b-chip${weak ? ' weak' : ''}" data-fact="${fact}" title="${esc(originText(w, o))}">${info.emoji} ${txt}${weak ? ' (зачаток)' : ''}</span>`);
   }
   if (!best.has(M.EYE)) out.push('<span class="b-chip blind" data-fact="eyeloss" title="глаз нет">🕳 без глаз</span>');
   if (ph[P.FLY] >= 0.45) out.push(`<span class="b-chip" data-fact="${ph[P.FLY] >= 1 ? 'flight' : 'gliding'}">${ph[P.FLY] >= 1 ? '🕊 летает' : '🪂 планирует'}</span>`);
@@ -241,9 +242,10 @@ export function discoverHtml(w: World, collection: ReadonlySet<string>): string 
   }).join('');
   const parts: string[] = [heritageHtml(w), `<h4>Открытия этого мира ${found}/${RECIPE_N} <a data-fact="openevo">?</a></h4>`, `<div class="d-grid">${cards}</div>`];
   if (B.live.length) {
-    parts.push(`<h4>🧪 Зачатки сейчас <a data-fact="duplication">?</a></h4><ul class="d-rows">${B.live.map(([o, k, n]) => {
+    parts.push(`<h4>🧪 Зачатки сейчас <a data-fact="duplication">?</a></h4><ul class="d-rows">${B.live.map(([o, k, n, m = 1]) => {
       const info = w.bestiary.originInfo.get(o);
-      return `<li>${MOD_INFO[k].emoji} зачаток ${MOD_INFO[k].gen} · ${n} ${plural(n, 'носитель', 'носителя', 'носителей')}${info ? ' · 🌱 прижился' : ''}</li>`;
+      const muts = m > 1 ? ` · из ${m} независимых мутаций` : '';
+      return `<li>${MOD_INFO[k].emoji} зачаток ${MOD_INFO[k].gen} · ${n} ${plural(n, 'носитель', 'носителя', 'носителей')}${muts}${info ? ' · 🌱 прижился' : ''}</li>`;
     }).join('')}</ul>`);
   }
   if (B.conv.length) {
@@ -279,7 +281,7 @@ export function discoverHtml(w: World, collection: ReadonlySet<string>): string 
     const rows = [...B.plans.values()].sort((a, b) => (live.get(b.sig)?.n ?? 0) - (live.get(a.sig)?.n ?? 0) || b.tick - a.tick).slice(0, 12);
     parts.push(`<h4>Бестиарий <a data-fact="tinkering">?</a></h4><ul class="d-best">${rows.map((p) => {
       const e = live.get(p.sig);
-      return `<li data-spg="${e?.c?.sp ?? p.sp}"><canvas class="d-pt" data-sig="${p.sig}"></canvas><span><b>${esc(p.ru)}</b> · <i>${esc(p.latin)}</i><br><span class="muted">${e ? `живых ${e.n} · ${plural(e.r, 'линия', 'линии', 'линий')} ${e.r}` : 'вымер'}</span></span></li>`;
+      return `<li data-spg="${e?.c?.sp ?? p.sp}"><canvas class="d-pt" data-sig="${p.sig}"></canvas><span><b>${esc(p.ru)}</b> · <i>${esc(p.latin)}</i><br><span class="muted">${e ? `живых ${e.n} · ${e.r} ${plural(e.r, 'линия', 'линии', 'линий')}` : 'вымер'}</span></span></li>`;
     }).join('')}</ul>`);
   }
   parts.push(`<div class="s-collection">За все миры открыто: ${[...collection].filter((id) => R_BY_ID.has(id)).length}/${RECIPE_N}</div>`);
