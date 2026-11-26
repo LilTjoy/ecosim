@@ -109,7 +109,39 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   let evac = 0;
   // этап 1c: ещё до 3 точек «посреди выпахивания» — сразу после пачки правок ледника (очередь pend не пуста, мазка нет)
   let scourCaps = 0, lastScour = -1e9;
+  // этап 2 (--cat=1): катастрофы — извержение, удар, цунами, засуха и пожар, K–Pg; до 3 точек «посреди пожара»
+  const cats: Action[] = [];
+  if (flags.cat === '1') {
+    const t0 = A.terrain;
+    const pick = (pred: (i: number) => boolean, k: number) => {
+      const L: number[] = [];
+      for (let i = 0; i < t0.biome.length; i++) if (pred(i)) L.push(i);
+      const i = L[Math.floor(((k * 0.37) % 1) * L.length)];
+      return [((i % t0.cols) + 0.5) * A.cell, (Math.floor(i / t0.cols) + 0.5) * A.cell];
+    };
+    const land = (i: number) => t0.biome[i] > 1, shal = (i: number) => t0.biome[i] === 1;
+    const [vx, vy] = pick((i) => t0.springs.includes(i), 1), [ix, iy] = pick(land, 2), [sx, sy] = pick(shal, 3), [fx, fy] = pick((i) => t0.biome[i] === 3 || t0.biome[i] === 5, 4), [kx, ky] = pick(land, 5);
+    cats.push({ k: 'volcano', t: Math.round(T * 0.12), x: vx, y: vy, vei: 7 });
+    cats.push({ k: 'impact', t: Math.round(T * 0.3), x: ix, y: iy, size: 2 });
+    cats.push({ k: 'tsunami', t: Math.round(T * 0.45), x: sx, y: sy });
+    cats.push({ k: 'drought', t: Math.round(T * 0.58) });
+    cats.push({ k: 'fire', t: Math.round(T * 0.58) + 1, x: fx, y: fy });
+    cats.push({ k: 'impact', t: Math.round(T * 0.78), x: kx, y: ky, size: 3 });
+  }
+  let fireCaps = 0, lastFire = -1e9, ci = 0;
   while (A.tick < T) {
+    if (fireCaps < 3 && A.geo!.fire.length > 0 && A.tick % 10 === 5 && A.tick - lastFire >= 400 && !ops.some((o) => o.t === A.tick)) {
+      caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
+      fireCaps++;
+      lastFire = A.tick;
+      open = null;
+    }
+    while (ci < cats.length && cats[ci].t === A.tick) {
+      const a = cats[ci++];
+      A.apply(a);
+      merged.push(structuredClone(a));
+      open = null;
+    }
     if (capAt.has(`${A.tick}:-1`)) {
       caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
       open = null;
@@ -177,7 +209,7 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   const workerOk = !!done && done.digest[0] === dEnd;
   const midN = caps.filter((c) => c.pend > 0).length;
   const d1 = okN === caps.length && workerOk && cover.length === 0 && midN >= 3 && A.terrain.rev !== 0;
-  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} midScour=${scourCaps} lakes=${A.terrain.lakes.length} kettles=${A.geo!.stats.kettles} isolates=${A.geo!.isolates.length} splits=${A.geo!.stats.splits} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
+  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} midScour=${scourCaps} midFire=${fireCaps} cat=${A.geo!.stats.eruptions}/${A.geo!.stats.impacts}/${A.geo!.stats.fires}/${A.geo!.stats.massExt} lakes=${A.terrain.lakes.length} kettles=${A.geo!.stats.kettles} isolates=${A.geo!.isolates.length} splits=${A.geo!.stats.splits} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
   console.log(` caps: ${caps.map((c) => `${c.t}${c.j >= 0 ? `/${c.j}` : ''}(pend ${c.pend}, sea ${c.sea} м)`).join(' ')} | glacials=${A.geo!.stats.glacials} bridges=${A.geo!.stats.bridges} Vg=${A.geo!.Vg.toFixed(2)}`);
 
   // ---------------- D2 ----------------

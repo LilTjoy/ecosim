@@ -8,6 +8,7 @@ import { clamp, mulberry32 } from '../lib/random';
 import { BASE_INPUT, BIOMES, B, deriveHash, properName, type DeriveInput } from './terrain';
 import type { Creature, World } from './world';
 import type { Genome } from './genome';
+import { aerShift, catHabitat, catPass } from './geoCat';
 import { bridgeClosed, bridgeOpened, meltOnMax, rangeOnGlacial, rangeOnInterglacial, refugiaAtMax, updateHomes } from './geoTrack';
 
 /** Такты года (= world.YEAR; свой — чтобы не было цикла импорта при вычислении таблицы). */
@@ -29,8 +30,10 @@ export const GEO = {
   AER_K: 0.12,
   VEI: { 6: { kill: 60, ash: 400, aer: 0.12 }, 7: { kill: 110, ash: 800, aer: 0.3 }, 8: { kill: 160, ash: 1600, aer: 1.0 } },
   IMPACT: { 2: { kill: 400, aer: 0.5, fires: 15 }, 3: { kill: 700, aer: 1.2, fires: 40 } },
-  FIRE_EVERY: 10, FIRE_P: 0.35, FIRE_MAX: 4000, LIGHTNING: 2e-4,
+  FIRE_EVERY: 10, FIRE_P: 0.5, FIRE_MAX: 4000, LIGHTNING: 2e-4,
   EXT_SHARE: 0.5, EXT_MIN: 4, ISOLATE: 2 * YEAR, LOG_GAP: 300,
+  /** После катастрофы радиацию (🌳) считаем через RAD_WAIT тактов. */
+  RAD_WAIT: 4 * YEAR,
   DRIFT_T: 1500, UPLIFT: 300, UPLIFT_W: 4, OCEAN_FLOOR: -0.13,
   /** Кисть «🏔 Рельеф»: предел правки высоты кистью, 1e-4 единицы (±0,3 ≈ ±900 м). */
   TERRA_MAX: 3000,
@@ -127,7 +130,16 @@ export interface GeoState {
   wsplit: string[]; wLogT: number;
   /** Затравки озёр — клетки котловин (вход пересчёта рельефа). */
   lakeSeeds: number[];
-  extRing: number[]; lastMass: number; lastCause: number;
+  /** 💀 Виды, жившие при катастрофе (через год — сколько исчезло), её такт, медиана размера травоядных и число зверей тогда. */
+  extRing: number[]; extT: number; med0: number; n0: number; lastMass: number; lastCause: number;
+  /** Итог «год спустя» последней катастрофы (панель, урок). */
+  lastSum: { t: number; k: number; N: number; m0: number; m1: number; n0: number; n1: number } | null;
+  /** История катастроф (последние CAT.HIST). */
+  cats: { t: number; kind: 'volcano' | 'impact' | 'tsunami' | 'fire'; x: number; y: number; text: string }[];
+  /** Пожар сейчас: сколько клеток выгорело, где начался, объявлен ли мегапожар. */
+  fireEp: { n: number; x: number; y: number; mega: boolean; t: number } | null;
+  /** Есть ли на клетках пепел, гарь или соль (иначе их проходы пропускаются). */
+  fxOn: boolean;
   plate: { rift: number; ox: number; oy: number; vx: number; vy: number; next: number; collided: boolean } | null;
   stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number;
     leaks: number; invaders: number; moraines: number; kettles: number; lakes: number; refugia: number;
@@ -157,7 +169,7 @@ export function newGeo(seed: number): GeoState {
     aer: 0, dark: 0, geoShift: 0, isolatedUntil: 0, lastLogT: -1e9,
     fire: [], sills: [], lands: { n: 0, anchors: [], sizes: [] },
     bridges: [], isolates: [], refugia: null, refT: -1e9, rangeRef: [], wide: [], wsplit: [], wLogT: -1e9, lakeSeeds: [],
-    extRing: [], lastMass: -1e9, lastCause: -1e9, plate: null,
+    extRing: [], extT: -1e9, med0: 0, n0: 0, lastMass: -1e9, lastCause: -1e9, lastSum: null, cats: [], fireEp: null, fxOn: false, plate: null,
     stats: { glacials: 0, bridges: 0, splits: 0, vicariance: 0, impacts: 0, eruptions: 0, fires: 0, massExt: 0, derives: 0, leaks: 0, invaders: 0, moraines: 0, kettles: 0, lakes: 0, refugia: 0, sSill: 0, sWall: 0, sPlay: 0 },
   };
 }
@@ -300,7 +312,10 @@ function deriveTerrain0(w: World, live: boolean): void {
       if (fresh.length) {
         g.stats.lakes += fresh.length;
         const l0 = fresh[0], x = ((l0.cell % t.cols) + 0.5) * w.cell, y = (Math.floor(l0.cell / t.cols) + 0.5) * w.cell;
-        w.log(fresh.length === 1 ? `🏞 Новое озеро «${l0.name}» — подарок тающего льда` : `🏞 Новые озёра — подарок тающего льда: ${fresh.slice(0, 4).map((l) => `«${l.name}»`).join(', ')}${fresh.length > 4 ? ` и ещё ${fresh.length - 4}` : ''}`, 'info', x, y, 'geo_kettle');
+        // ☄️🌋 озеро у недавнего кратера или кальдеры — не от льда
+        const crater = g.cats.find((c) => (c.kind === 'volcano' || c.kind === 'impact') && Math.hypot(c.x - x, c.y - y) < 400);
+        if (crater) w.log(`🏞 Новое озеро «${l0.name}» — в ${crater.kind === 'volcano' ? 'кальдере вулкана' : 'кратере от удара'}`, 'info', x, y, crater.kind === 'volcano' ? 'geo_supervolcano' : 'geo_impactwinter');
+        else w.log(fresh.length === 1 ? `🏞 Новое озеро «${l0.name}» — подарок тающего льда` : `🏞 Новые озёра — подарок тающего льда: ${fresh.slice(0, 4).map((l) => `«${l.name}»`).join(', ')}${fresh.length > 4 ? ` и ещё ${fresh.length - 4}` : ''}`, 'info', x, y, 'geo_kettle');
       }
     }
   }
@@ -422,9 +437,13 @@ export function geoPass(w: World): void {
   // CO₂: «как у природы» — следует за льдом (ледниковье 190, межледниковье 280 ppm), меняется за год
   const cT = g.co2Pin ?? 280 - GEO.CO2_FOLLOW * clamp(g.Vg, 0, 1);
   g.co2 += (cT - g.co2) * Math.min(1, k / YEAR);
-  g.geoShift = GEO.A * F + (g.fPin ?? 0) + co2Shift(g.co2) - GEO.ALB * g.iceLand;
-  // годовой сдвиг (без сезона) — с кнопкой игрока «🌡» тоже: оба складываются
-  const ann = g.geoShift + w.climate.shift;
+  // ☄️🌋 дымка и темнота оседают, следы катастроф убывают, молнии в засуху (этап 2) — до сдвига: в нём дымка
+  catPass(w);
+  const gs = GEO.A * F + (g.fPin ?? 0) + co2Shift(g.co2) - GEO.ALB * g.iceLand;
+  g.geoShift = g.aer > 0 ? gs + aerShift(g) : gs;
+  // годовой сдвиг (без сезона) — с кнопкой игрока «🌡» тоже: оба складываются. Лёд — и глобальный Vg, и ледники
+  // острова — дымку не чувствует: она живёт год-два, а лёд копится тысячелетиями (трава и звери её чувствуют)
+  const ann = gs + w.climate.shift;
   const Vt = clamp(-ann / GEO.V_SHIFT, -0.5, 1.2);
   const v0 = g.Vg;
   g.Vg += (Vt - g.Vg) * Math.min(1, k / (Vt > g.Vg ? GEO.TAU_UP : GEO.TAU_DN));
@@ -612,6 +631,7 @@ function cycleLog(w: World): void {
  * soilPass не тронуты): потолок травы, листвы и ягод ×max(0, 1 − ICE_FOOD·H).
  */
 export function geoHabitat(w: World): void {
+  if (w.geo!.fxOn || w.geo!.dark > 0.02) catHabitat(w);
   const L = w.iceList;
   if (!L || L.length === 0) return;
   const H = w.ice!, bi = w.terrain.biome, gr = w.grass, br = w.browse, fo = w.forage;

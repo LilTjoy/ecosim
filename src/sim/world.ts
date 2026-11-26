@@ -11,6 +11,7 @@ import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './
 import type { Action } from './timeline';
 import { geoCause, geoTrack, isoBirth, landAt } from './geoTrack';
 import { sillSide, type SillRec } from './geo';
+import { catAction, fireStep, growK } from './geoCat';
 import { allocGeoCells, carveSills, deriveTerrain, GEO, geoAction, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
 
 /**
@@ -1345,6 +1346,7 @@ export class World {
     } else if (this.birch > 0) this.birch--;
     this.growGrass();
     if (this.lp) geoHabitat(this);
+    if (this.lp && this.geo!.fire.length && this.tick % GEO.FIRE_EVERY === 0) fireStep(this); // 🔥 до buildHash, кости мира
     this.buildHash();
     this.updateCorpses();
 
@@ -1601,7 +1603,9 @@ export class World {
 
   private growGrass(): void {
     const t = this.terrain;
-    const rate = 0.0024 * this.settings.grassGrowth * (this.drought > 0 ? 0.1 : 1);
+    let rate = 0.0024 * this.settings.grassGrowth * (this.drought > 0 ? 0.1 : 1);
+    // 🌋 ударная и вулканическая зима: темнота и дымка — меньше света траве (без них множитель не применяется)
+    if (this.lp && (this.geo!.dark > 0 || this.geo!.aer > 0)) rate *= growK(this.geo!);
     const br = this.browse;
     const fo = this.forage;
     const shift = this.shiftNow;
@@ -2436,6 +2440,12 @@ export class World {
       case 'geoSpeed':
         geoAction(this, a);
         break;
+      case 'volcano':
+      case 'impact':
+      case 'tsunami':
+      case 'fire':
+        catAction(this, a);
+        break;
       case 'climate': {
         const cl = this.climate;
         cl.target = a.target;
@@ -2742,6 +2752,11 @@ export class World {
     }
     // 🌋 при живой планете кольцо численности — всегда свежее, а «горлышко» — только при причине (ледниковье, катастрофа)
     if (this.lp && !this.oe) trackBottleneck(this, geoCause(this));
+    // ☄️🌋 после катастрофы радиацию ждём дольше (2–4 года), чем после обычного «горлышка»
+    if (this.lp) {
+      const bn = this.bestiary.bn;
+      if (bn && bn.tick === this.tick && this.tick - this.geo!.lastCause < 2000) bn.wait = GEO.RAD_WAIT;
+    }
     if (this.lp && this.tick % 200 === 0) geoTrack(this);
   }
 

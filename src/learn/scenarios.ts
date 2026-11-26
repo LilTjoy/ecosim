@@ -300,3 +300,24 @@ export function panamaNow(w: World): PanamaNow | null {
 /** Зёрна уроков (подобраны стендом learn-check: викарианс и обмен там случаются за время урока). */
 export const VIC_SEED = 7;
 export const PANAMA_SEED = 42;
+
+/** ☄️ Урок «После астероида»: зерно и место удара — суша ближе всего к середине острова (px). */
+export const KPG_SEED = 2024;
+export function kpgSpot(w: World): [number, number] {
+  const t = w.terrain;
+  let best = 0, bd = Infinity;
+  for (let i = 0; i < t.biome.length; i++) {
+    if (BIOMES[t.biome[i]].water) continue;
+    const d = Math.hypot((i % t.cols) - t.cols / 2, Math.floor(i / t.cols) - t.rows / 2);
+    if (d < bd) { bd = d; best = i; }
+  }
+  return [((best % t.cols) + 0.5) * w.cell, (Math.floor(best / t.cols) + 0.5) * w.cell];
+}
+/** Что сейчас после удара: темнота, итог «год спустя», была ли радиация после такта t0. */
+export function kpgNow(w: World, t0: number): { dark: number; aer: number; sum: { k: number; N: number; m0: number; m1: number } | null; rad: boolean; mass: boolean } | null {
+  const g = w.geo;
+  if (!w.lp || !g) return null;
+  const ev = w.events.filter((e) => e.tick >= t0);
+  const s = g.lastSum && g.lastSum.t > t0 ? g.lastSum : null;
+  return { dark: g.dark, aer: g.aer, sum: s, rad: ev.some((e) => e.text.startsWith('🌳 Адаптивная радиация')), mass: ev.some((e) => e.text.startsWith('💀 Массовое вымирание')) };
+}

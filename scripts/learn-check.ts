@@ -7,7 +7,7 @@ import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
   outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, icePeakOk,
-  vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED,
+  vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot,
 } from '../src/learn/scenarios';
 import { GEO, panamaLine } from '../src/sim/geo';
 import { LESSONS } from '../src/learn/lessons';
@@ -287,6 +287,29 @@ if (!args.includes('--planet')) {
     const p = panamaNow(w);
     ok(!!pts && to >= 0 && !!p?.reported, `Опыт «Панама», зерно ${PANAMA_SEED}: фауны ${f?.north}/${f?.south} (общих ${f?.shared}); перешеек открылся за ${to} тактов; сводка через ${tk}: перешли ${p?.cross.join('/')}, прижились с севера ${p?.fromN}, с юга ${p?.fromS}, вымерли ${p?.lost}`);
     lap('опыт панама', t);
+  }
+  // «☄️ После астероида»: 2 года → удар K–Pg → итог через год (вымирание, медиана размера) → радиация за 4 года
+  {
+    const t = Date.now();
+    const L = LESSONS.find((x) => x.id === 'kpg');
+    const ids = new Set(allCards().map((c) => c.id));
+    ok(!!L && L.cards.every((id) => ids.has(id)), `После астероида: урок есть, карточки на месте`);
+    Math.random = mulberry32(KPG_SEED * 7919 + 1);
+    const w = new World(3200, 2000);
+    w.settings.livePlanet = true;
+    w.reset('rules', KPG_SEED, { ...EARTH_ENV });
+    steps(w, 2 * YEAR);
+    const [x, y] = kpgSpot(w);
+    const t0 = w.tick;
+    w.apply({ t: w.tick, k: 'impact', x, y, size: 3 });
+    let tk = 0;
+    while (tk < 2 * YEAR && !kpgNow(w, t0)?.sum) { steps(w, 200); tk += 200; }
+    const s = kpgNow(w, t0)?.sum;
+    let tr = 0;
+    while (tr < 4 * YEAR && !kpgNow(w, t0)?.rad) { steps(w, 600); tr += 600; }
+    const k = kpgNow(w, t0);
+    ok(!!s && s.k * 2 >= s.N, `После астероида, зерно ${KPG_SEED}: итог через ${tk} тактов — исчезло ${s?.k}/${s?.N} видов, медиана травоядных ${s?.m0.toFixed(2)} → ${s?.m1.toFixed(2)}; массовое вымирание ${k?.mass ? 'да' : 'нет'}; радиация ${k?.rad ? `через ${tr}` : 'нет'} (не обязательна: шаг урока с giveUp)`);
+    lap('после астероида', t);
   }
 }
 console.log(`\n${failed ? `✗ Провалено проверок: ${failed}` : '✓ Все проверки пройдены'} · ${((Date.now() - t0) / 1000).toFixed(0)} с`);

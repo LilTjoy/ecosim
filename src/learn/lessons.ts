@@ -6,7 +6,7 @@ import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
 import {
   CAP8, decomposerSwitch, iceBridgeOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
-  startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED,
+  startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot,
 } from './scenarios';
 import { GEO, panamaLine } from '../sim/geo';
 
@@ -1145,7 +1145,84 @@ export const LESSONS: Lesson[] = [
       },
     ],
   },
+  {
+    id: 'kpg',
+    icon: '☄️',
+    title: 'После астероида',
+    teaser: 'Уроним на остров астероид, как 66 млн лет назад, и посмотрим, кто переживёт ударную зиму.',
+    minutes: 8,
+    cards: ['geo.geo_impactwinter', 'geo.geo_bigfive', 'surface.lilliput', 'surface.radiation', 'geo.geo_islandiso'],
+    readout: (c) => kpgReadout(c),
+    steps: [
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Остров на живой планете. Дадим жизни два года устояться и запомним, какие здесь звери.',
+        action: { label: '🌋 Новый мир: живая планета', run: (c) => startEco(c, {}, 'После астероида', true, KPG_SEED) },
+        watch: {
+          hint: (c) => `Мир устраивается… ${Math.min(ticks(c), 2 * YEAR)}/${2 * YEAR}`,
+          test: (c) => ticks(c) >= 2 * YEAR && c.world.lp,
+          giveUp: { ticks: 4 * YEAR, text: 'Мир без живой планеты — нажмите «↻ Ещё раз».' },
+          done: (c) => `Сейчас на острове ${c.world.creatures.length} зверей и ${c.world.species.living().length} видов.`,
+        },
+      },
+      {
+        text: 'Сейчас упадёт астероид размером с тот, что 66 млн лет назад упал у Юкатана.',
+        quiz: {
+          q: 'Кто скорее переживёт месяцы темноты?',
+          options: ['Самые крупные — у них большой запас жира', 'Мелкие: им хватает крох, и их много', 'Хищники — еды станет много'],
+          correct: 1,
+          explain: 'Крупный зверь может долго голодать, но ему нужно много еды каждый день, а темнота убивает растения на месяцы. Мелким хватает семян и остатков — и их больше, поэтому хоть кто-то уцелеет. Хищники держатся недолго: за травоядными исчезают и они.',
+        },
+      },
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Удар! Смотрите, как темнеет небо, горят леса, а график численности падает. Через год острова подведём итог (то же можно сделать самому: «🛠 Стихии → Небо → ☄️»).',
+        action: {
+          label: '☄️ Уронить астероид',
+          run: (c) => {
+            c.show('eco');
+            const [x, y] = kpgSpot(c.world);
+            c.surface.act({ k: 'impact', x, y, size: 3 });
+            c.mem.t0 = c.world.tick;
+          },
+        },
+        watch: {
+          hint: (c) => {
+            const k = kpgNow(c.world, num(c, 't0'));
+            return k ? `Год ударной зимы: ${Math.min(ticks(c), YEAR)}/${YEAR} · света ${Math.round(100 * (1 - k.dark))}%` : 'Мир без живой планеты';
+          },
+          test: (c) => !!kpgNow(c.world, num(c, 't0'))?.sum,
+          giveUp: { ticks: 2 * YEAR },
+          done: (c) => {
+            const s = kpgNow(c.world, num(c, 't0'))!.sum!;
+            const sz = (v: number) => v.toFixed(1).replace('.', ',');
+            const lil = s.m0 > 0 && s.m1 > 0 ? (s.m1 < s.m0 ? ` Медиана размера травоядных ${sz(s.m0)} → ${sz(s.m1)}: мелкие пережили беду лучше — это «эффект лилипута».` : ` Медиана размера травоядных ${sz(s.m0)} → ${sz(s.m1)}: в этот раз крупные удержались — так тоже бывает.`) : ' Травоядных суши почти не осталось.';
+            return `💀 За год исчезло ${s.k} из ${s.N} видов (${Math.round((100 * s.k) / Math.max(1, s.N))}%).${lil}`;
+          },
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Остров закрыт для переселенцев на два года. Ждём, займут ли потомки выживших пустые места — адаптивную радиацию.',
+        watch: {
+          hint: (c) => `Ждём новых видов от выживших… год ${Math.floor(ticks(c) / YEAR) + 1}`,
+          test: (c) => !!kpgNow(c.world, num(c, 't0'))?.rad,
+          giveUp: { ticks: 4 * YEAR, text: 'В этот раз выжившие не дали много новых видов — остров заселили переселенцы. Так тоже бывает.' },
+          done: () => '🌳 Потомки выживших дали новые виды — так после мелового вымирания мелкие млекопитающие заняли места динозавров.',
+        },
+      },
+    ],
+  },
 ];
+
+/** ☄️ Живая строка урока «После астероида». */
+const kpgReadout = (c: LessonCtx) => {
+  const k = kpgNow(c.world, num(c, 't0'));
+  if (!k) return '';
+  return `${k.dark > 0.02 ? `🌑 света ${Math.round(100 * (1 - k.dark))}% · ` : ''}${k.aer > 0.02 ? `🌫 дымка ${Math.round(100 * k.aer)}% · ` : ''}зверей ${c.world.creatures.length} · видов ${c.world.species.living().length}`;
+};
 
 /** 🌋 Живая строка урока «Пролив рождает виды». */
 const vicReadout = (c: LessonCtx) => {

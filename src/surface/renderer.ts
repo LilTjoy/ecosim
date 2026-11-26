@@ -1056,8 +1056,10 @@ export class SurfaceRenderer {
       if (H <= 0.02) return true;
     } else if (water) return false;
     else if (H <= 0.02) {
-      // 🪨 морена — серые камни там, докуда доходил лёд
       const F = w.fx8;
+      // ☄️🌋 следы катастроф: огонь (мерцает), гарь, пепел, соль цунами — поверх травы
+      if (F && w.geo?.fxOn && this.catColor(i, F, out, o)) return true;
+      // 🪨 морена — серые камни там, докуда доходил лёд
       if (!F || !(F[3 * this.pixWater.length + i] & 1)) return false;
       const t = w.terrain;
       const h = hash2((i % t.cols) * 1.7, Math.floor(i / t.cols) * 1.7);
@@ -1074,6 +1076,41 @@ export class SurfaceRenderer {
     out[o + 1] = 236 + n;
     out[o + 2] = 250;
     out[o + 3] = Math.max(pw !== water ? out[o + 3] / 255 : 0, k) * 255;
+    return true;
+  }
+
+  /** 🔥 огонь, гарь, пепел, соль (fx8: пепел [0, n), гарь [n, 2n), соль [2n, 3n)); false — следов нет. */
+  private catColor(i: number, F: Uint8Array, out: Float32Array, o: number): boolean {
+    const n = this.pixWater.length;
+    const b = F[n + i], a = F[i], s = F[2 * n + i];
+    if (!a && !b && !s) return false;
+    const t = this.world.terrain;
+    const h = hash2((i % t.cols) * 1.3, Math.floor(i / t.cols) * 1.3);
+    if (b === 255) {
+      // горит: оранжево-красное, мерцает от кадра к кадру (только картинка)
+      const f = 0.5 + 0.5 * Math.sin(this.frame * 0.9 + h * 30);
+      out[o] = 255; out[o + 1] = 90 + 110 * f; out[o + 2] = 20; out[o + 3] = (0.75 + 0.2 * f) * 255;
+      return true;
+    }
+    let r = 0, g = 0, bb = 0, al = 0;
+    if (b) {
+      // гарь: чёрная, светлеет по мере зарастания
+      const k = b / 255;
+      r = g = bb = 30 + 20 * h;
+      al = 0.85 * k;
+    }
+    if (a) {
+      // пепел: серый
+      const k = (a / 255) * 0.9;
+      if (k > al) { r = 150 + 30 * h; g = 146 + 30 * h; bb = 140 + 30 * h; al = k; }
+    }
+    if (s) {
+      // соль: белесая корка
+      const k = (s / 255) * 0.6;
+      if (k > al) { r = 230; g = 228; bb = 210 + 20 * h; al = k; }
+    }
+    if (al < 0.04) return false;
+    out[o] = r; out[o + 1] = g; out[o + 2] = bb; out[o + 3] = al * 255;
     return true;
   }
 
@@ -1958,6 +1995,21 @@ export class SurfaceRenderer {
     if (oe) this.drawEcho(vis, z, night);
 
     this.drawParticles();
+
+    // ☄️🌋 ударная зима — бурая тьма, вулканическая — желтоватая дымка
+    const geo = world.lp ? world.geo : null;
+    if (geo && (geo.dark > 0.02 || geo.aer > 0.03)) {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      if (geo.aer > 0.03) {
+        ctx.fillStyle = `rgba(190,170,120,${Math.min(0.3, 0.18 * geo.aer)})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+      if (geo.dark > 0.02) {
+        ctx.fillStyle = `rgba(28,18,10,${Math.min(0.7, 0.65 * geo.dark)})`;
+        ctx.fillRect(0, 0, W, H);
+      }
+      ctx.setTransform(dpr * z, 0, 0, dpr * z, dpr * (W / 2 - cam.x * z), dpr * (H / 2 - cam.y * z));
+    }
 
     // ночь: тёмно-синяя вуаль
     if (night > 0.02) {

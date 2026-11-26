@@ -6,7 +6,7 @@ import type { ActionInput } from '../sim/timeline';
 import { CLIMATE_C, type World } from '../sim/world';
 
 /** Инструменты «Земли»: кисть ⬆/⬇, ✂️ глубокий и мелкий пролив, 🌉 перешеек (рисуются на карте). */
-export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus';
+export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus' | 'volcano' | 'impact' | 'tsunami' | 'fire';
 
 export interface GeoSheetHost {
   world: World;
@@ -24,7 +24,18 @@ const TOOL_HINT: Record<GeoTool, string> = {
   strait: '✂️ Проведите линию поперёк суши — глубокий пролив, как у Уоллеса: пешком не перейти никогда',
   straitS: '✂️ Проведите линию поперёк суши — мелкий пролив: в ледниковье он осохнет и станет мостом',
   isthmus: '🌉 Проведите линию поперёк пролива — от берега до берега',
+  volcano: '🌋 Нажмите на карту — проснётся ближайший вулкан (горы или горячий источник)',
+  impact: '☄️ Нажмите на карту — туда упадёт астероид',
+  tsunami: '🌊 Нажмите на море у берега — оттуда придёт волна',
+  fire: '🔥 Нажмите на траву или лес — огонь пойдёт по ветру на восток',
 };
+
+const narrow = () => typeof matchMedia === 'function' && matchMedia('(max-width: 600px)').matches;
+
+/** Силы «Неба»: выбранные в шторке (их читает карта при нажатии). */
+export const SKY = { vei: 8 as 6 | 7 | 8, size: 3 as 1 | 2 | 3 };
+const VEI_TIP: Record<number, string> = { 6: 'VEI 6 — как Пинатубо 1991: дымка на год, −0,5 °C', 7: 'VEI 7 — как Тамбора 1815: «год без лета»', 8: 'VEI 8 — супервулкан, как Тоба: пепел на 1600 км' };
+const SIZE_TIP: Record<number, string> = { 1: 'Метеорит — выжженный круг', 2: 'Большой астероид — тёмное небо, пожары', 3: 'Как Чиксулуб 66 млн лет назад: ударная зима, мировые пожары, массовое вымирание' };
 
 /** Сдвиг температуры острова, целые °C («0» без знака). */
 const tC = (w: World) => {
@@ -52,14 +63,16 @@ export function geoChip(w: World): string {
   const sea = metres(g.seaQ), ice = Math.round(g.iceLand * 100), kyr = Math.round(geoKyr(g) / 10) * 10;
   const seaTxt = `${sea > 0 ? '+' : sea < 0 ? '−' : ''}${Math.abs(sea)}`;
   const tip = `${geoPhaseText(w)} · нажмите — «🛠 Стихии → Климат»`;
-  return `<span class="s-chip s-geo" title="${tip}"><i class="g-full">${dT < 0 ? '❄️' : '🌡'} ${dT === 0 ? '0' : signC(dT)} °C · 🌊 ${seaTxt} м · 🧊 ${ice}% · CO₂ ${Math.round(g.co2)} · ≈ ${kyr.toLocaleString('ru-RU')} тыс. лет${g.speed === 4 ? ' · ⏩×4' : ''}</i><i class="g-short">🧊${ice}% 🌊${seaTxt}м</i></span>`;
+  // ☄️🌋 пока действуют: темнота, дымка, пожар, закрытый остров
+  const st = `${g.dark > 0.02 ? '🌑' : ''}${g.aer > 0.05 ? '🌫' : ''}${g.fire.length ? '🔥' : ''}${w.tick < g.isolatedUntil ? '⛵' : ''}`;
+  return `<span class="s-chip s-geo" title="${tip}"><i class="g-full">${st ? st + ' · ' : ''}${dT < 0 ? '❄️' : '🌡'} ${dT === 0 ? '0' : signC(dT)} °C · 🌊 ${seaTxt} м · 🧊 ${ice}% · CO₂ ${Math.round(g.co2)} · ≈ ${kyr.toLocaleString('ru-RU')} тыс. лет${g.speed === 4 ? ' · ⏩×4' : ''}</i><i class="g-short">${st}🧊${ice}% 🌊${seaTxt}м</i></span>`;
 }
 
 export class GeoSheet {
   /** Ползунки, которые игрок сейчас тянет (не перерисовывать их значение). */
   private dragging = new Set<string>();
   /** Открытая вкладка шторки. */
-  private tab: 'land' | 'climate' = 'climate';
+  private tab: 'land' | 'sky' | 'climate' = 'climate';
 
   constructor(private el: HTMLElement, private host: GeoSheetHost) {
     el.addEventListener('click', (e) => this.click(e));
@@ -99,7 +112,7 @@ export class GeoSheet {
     const mode = g.fPin !== null ? (g.fPin < 0 ? 'now' : 'end') : g.orbit ? 'cycle' : 'off';
     const b = (k: string, v: string, label: string, on: boolean, tip: string) =>
       `<button data-g="${k}" data-v="${v}" class="${on ? 'active' : ''}" title="${tip}">${label}</button>`;
-    const head = `<div class="gs-head"><nav class="gs-tabs"><button class="${this.tab === 'land' ? 'active' : ''}" data-gt="land">⛰ Земля</button><button class="${this.tab === 'climate' ? 'active' : ''}" data-gt="climate">🌡 Климат</button></nav><button class="x" data-g="close" title="Закрыть">✕</button></div>`;
+    const head = `<div class="gs-head"><nav class="gs-tabs"><button class="${this.tab === 'land' ? 'active' : ''}" data-gt="land">⛰ Земля</button><button class="${this.tab === 'sky' ? 'active' : ''}" data-gt="sky">🌋 Небо</button><button class="${this.tab === 'climate' ? 'active' : ''}" data-gt="climate">🌡 Климат</button></nav><button class="x" data-g="close" title="Закрыть">✕</button></div>`;
     if (this.tab === 'land') {
       const tb = (t: GeoTool, label: string) => `<button data-gtool="${t}" class="${this.host.tool() === t ? 'active' : ''}" title="${TOOL_HINT[t]}">${label}</button>`;
       const sills = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
@@ -112,6 +125,22 @@ export class GeoSheet {
         <div class="gs-tip muted small">${TOOL_HINT[(this.host.tool() as GeoTool)] ?? 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.'}</div>
         <ul class="gs-sills">${sills}</ul>
       </div>`;
+      return;
+    }
+    if (this.tab === 'sky') {
+      const tb = (t: GeoTool, label: string) => `<button data-gtool="${t}" class="${this.host.tool() === t ? 'active' : ''}" title="${TOOL_HINT[t]}">${label}</button>`;
+      const pick = (k: 'vei' | 'size', v: number, label: string, tip: string) => `<button data-g="${k}" data-v="${v}" class="${SKY[k] === v ? 'active' : ''}" title="${tip}">${label}</button>`;
+      this.el.innerHTML = `${head}<div class="gs-body">
+        <div class="gs-row"><b>🌋 Вулкан</b> <a data-fact="geo_supervolcano">?</a> <a data-fact="geo_volcwinter">?</a></div>
+        <div class="gs-btns">${tb('volcano', '🌋 Извержение')}${pick('vei', 6, 'VEI 6', VEI_TIP[6])}${pick('vei', 7, 'VEI 7', VEI_TIP[7])}${pick('vei', 8, 'VEI 8', VEI_TIP[8])}</div>
+        <div class="gs-row"><b>☄️ Астероид</b> <a data-fact="geo_impactwinter">?</a> <a data-fact="geo_bigfive">?</a></div>
+        <div class="gs-btns">${tb('impact', '☄️ Удар')}${pick('size', 1, 'малый', SIZE_TIP[1])}${pick('size', 2, 'большой', SIZE_TIP[2])}${pick('size', 3, 'K–Pg', SIZE_TIP[3])}</div>
+        <div class="gs-row"><b>🌊 Цунами и 🔥 пожар</b> <a data-fact="geo_tsunami">?</a> <a data-fact="geo_fire">?</a></div>
+        <div class="gs-btns">${tb('tsunami', '🌊 Цунами')}${tb('fire', '🔥 Пожар')}</div>
+        <div class="gs-tip muted small">${TOOL_HINT[(this.host.tool() as GeoTool)] ?? 'Выберите силу и нажмите на карту. Всё можно отменить или перемотать назад.'}</div>
+        <div class="gs-now small"></div>
+      </div>`;
+      this.update();
       return;
     }
     this.el.innerHTML = `${head}
@@ -138,12 +167,18 @@ export class GeoSheet {
     if (!this.open) return;
     const w = this.host.world, g = w.geo;
     if (!g || !w.lp) return this.close();
-    if (this.tab === 'land') {
+    if (this.tab === 'land' || this.tab === 'sky') {
       // кнопки инструментов — по выбору на карте (его меняют и кнопки 🔍 🌱 …)
       this.el.querySelectorAll<HTMLElement>('button[data-gtool]').forEach((x) => x.classList.toggle('active', x.dataset.gtool === this.host.tool()));
       const tip = this.el.querySelector<HTMLElement>('.gs-tip');
-      const txt = TOOL_HINT[this.host.tool() as GeoTool] ?? 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.';
+      const txt = TOOL_HINT[this.host.tool() as GeoTool] ?? (this.tab === 'sky' ? 'Выберите силу и нажмите на карту. Всё можно отменить или перемотать назад.' : 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.');
       if (tip && tip.textContent !== txt) tip.textContent = txt;
+      if (this.tab === 'sky') {
+        const now = this.el.querySelector<HTMLElement>('.gs-now');
+        const html = skyNow(w);
+        if (now && now.innerHTML !== html) now.innerHTML = html;
+        return;
+      }
       const ul = this.el.querySelector<HTMLElement>('.gs-sills');
       const html = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
       if (ul && ul.innerHTML !== html) ul.innerHTML = html;
@@ -180,7 +215,7 @@ export class GeoSheet {
     if (f) return this.host.showFact(f.dataset.fact!);
     const tabB = t.closest('button[data-gt]') as HTMLElement | null;
     if (tabB) {
-      this.tab = tabB.dataset.gt === 'land' ? 'land' : 'climate';
+      this.tab = tabB.dataset.gt === 'land' ? 'land' : tabB.dataset.gt === 'sky' ? 'sky' : 'climate';
       return this.render();
     }
     const tl = t.closest('button[data-gtool]') as HTMLElement | null;
@@ -188,12 +223,23 @@ export class GeoSheet {
       const want = tl.dataset.gtool as GeoTool;
       this.host.setTool(this.host.tool() === want ? null : want);
       if (this.host.tool() === want) this.host.toast(TOOL_HINT[want]);
+      // на телефоне шторка закрывает карту: силы «Неба» ставятся одним нажатием — шторку убираем
+      if (this.tab === 'sky' && this.host.tool() === want && narrow()) return this.close();
       return this.update();
     }
     const b = t.closest('button[data-g]') as HTMLElement | null;
     if (!b) return;
     const k = b.dataset.g, v = b.dataset.v ?? '';
     if (k === 'close') return this.close();
+    if (k === 'vei' || k === 'size') {
+      if (k === 'vei') SKY.vei = Number(v) as 6 | 7 | 8;
+      else SKY.size = Number(v) as 1 | 2 | 3;
+      const want: GeoTool = k === 'vei' ? 'volcano' : 'impact';
+      if (this.host.tool() !== want) this.host.setTool(want);
+      this.host.toast(`${k === 'vei' ? VEI_TIP[SKY.vei] : SIZE_TIP[SKY.size]} — ${TOOL_HINT[want].slice(3).toLowerCase()}`);
+      if (narrow()) return this.close();
+      return this.render();
+    }
     if (k === 'beringia') {
       this.host.act({ k: 'strait', pts: beringiaLine(this.host.world), deep: false });
       return this.render();
@@ -230,6 +276,19 @@ export class GeoSheet {
     if (r.dataset.g === 'sea' && v !== g.seaPin) this.host.act({ k: 'sea', dm: v });
     this.render();
   }
+}
+
+/** Строка «сейчас» вкладки «Небо»: дымка, темнота, огонь, закрытый остров. */
+export function skyNow(w: World): string {
+  const g = w.geo;
+  if (!g) return '';
+  const p: string[] = [];
+  if (g.dark > 0.02) p.push(`🌑 темно: света ${Math.round(100 * (1 - g.dark))}%`);
+  if (g.aer > 0.02) p.push(`🌫 дымка: ${signC(-0.12 * g.aer * CLIMATE_C, 1)} °C`);
+  if (g.fire.length) p.push(`🔥 горит ${g.fire.length / 2} клеток`);
+  if (w.tick < g.isolatedUntil) p.push(`⛵ остров отрезан ещё ${((g.isolatedUntil - w.tick) / 6000).toFixed(1).replace('.', ',')} г.`);
+  const S = g.stats;
+  return `${p.length ? p.join(' · ') : 'Небо чистое'} · извержений: ${S.eruptions} · ударов: ${S.impacts} · пожаров: ${S.fires} · массовых вымираний: ${S.massExt}`;
 }
 
 /** Шкала CO₂ 150…1500 ppm — логарифмическая (как и парниковый эффект): ползунок в тысячных долях ln(ppm). */

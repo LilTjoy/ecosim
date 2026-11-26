@@ -56,6 +56,7 @@ function surfaceLink(key: string, source: CardSource): SimLink | undefined {
   if (source === 'geo') {
     if (['geo_vicariance', 'geo_subspecies', 'geo_hybrid', 'geo_wallace', 'geo_flyers'].includes(key)) return { view: 'lesson', id: 'vic', label: '🌊 Урок «Пролив рождает виды»' };
     if (key === 'geo_gabi') return { view: 'lesson', id: 'panama', label: '🌉 Урок «Опыт „Панама“»' };
+    if (['geo_impactwinter', 'geo_bigfive', 'geo_islandiso', 'geo_supervolcano', 'geo_volcwinter', 'geo_tsunami', 'geo_fire'].includes(key)) return { view: 'lesson', id: 'kpg', label: '☄️ Урок «После астероида»' };
     return { view: 'lesson', id: 'ice', label: '❄️ Урок «Ледниковый период»' };
   }
   if (source !== 'surface') {

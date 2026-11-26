@@ -77,6 +77,18 @@ export function geoPanelHtml(w: World): string {
       const [a, bb] = s ? sideWords(s, true) : ['одной стороны', 'другой'];
       return `<li><b>${esc(s?.name ?? '?')}</b> <span class="muted small">(с такта ${b.open}${b.close !== null ? ` по ${b.close}` : ''})</span>: прижились с ${a} ${est.filter((v) => v.from === 0).length}, с ${bb} ${est.filter((v) => v.from === 1).length}${est.length ? ` — ${est.slice(0, 3).map((v) => sp(v.sp)).join(', ')}` : ''}; вымерли местных: ${b.lost.length}</li>`;
     }).join('')}</ul>`);
+  // ☄️🌋 катастрофы: что сейчас в небе, история, итог «год спустя»
+  {
+    const now: string[] = [];
+    if (g.dark > 0.02) now.push(`🌑 темно — света ${Math.round(100 * (1 - g.dark))}% <a data-fact="geo_impactwinter">?</a>`);
+    if (g.aer > 0.02) now.push(`🌫 дымка: ${(-0.12 * g.aer * 100 / 3).toFixed(1).replace('.', ',')} °C <a data-fact="geo_volcwinter">?</a>`);
+    if (g.fire.length) now.push(`🔥 горит ${g.fire.length / 2} клеток${g.fireEp ? `, выгорело ${g.fireEp.n}` : ''} <a data-fact="geo_fire">?</a>`);
+    if (w.tick < g.isolatedUntil) now.push(`⛵ остров отрезан ещё ${((g.isolatedUntil - w.tick) / 6000).toFixed(1).replace('.', ',')} г. <a data-fact="geo_islandiso">?</a>`);
+    const S = g.stats, ls = g.lastSum;
+    const sum = ls ? `<p class="small">Год после катастрофы: исчезло ${ls.k} из ${ls.N} ${plural(ls.N, 'вида', 'видов', 'видов')}${ls.m0 > 0 ? ` · медиана размера травоядных ${ls.m0.toFixed(1).replace('.', ',')} → ${ls.m1 > 0 ? ls.m1.toFixed(1).replace('.', ',') : 'нет травоядных'}` : ''} · зверей ${ls.n0} → ${ls.n1} <a data-fact="lilliput">?</a></p>` : '';
+    if (g.cats.length || now.length)
+      out.push(`<h4>Катастрофы <a data-fact="geo_bigfive">?</a></h4>${now.length ? `<p class="small">${now.join(' · ')}</p>` : ''}<ul class="gp-list">${[...g.cats].reverse().slice(0, 6).map((c) => `<li class="small">${esc(c.text)} <span class="muted">(год ${Math.floor(c.t / 6000) + 1})</span></li>`).join('')}</ul>${sum}<p class="muted small">Извержений: ${S.eruptions} · ударов: ${S.impacts} · пожаров: ${S.fires} · массовых вымираний: ${S.massExt}</p>`);
+  }
   // следы льда
   const lakes = t.lakes;
   out.push(`<h4>Следы ледников <a data-fact="geo_moraine">?</a> <a data-fact="geo_kettle">?</a></h4><p class="small">Морен: ${g.stats.moraines} клеток · котловин: ${g.stats.kettles} · озёр сейчас: ${lakes.length}${lakes.length ? ` (${lakes.slice(0, 4).map((l) => esc(l.name)).join(', ')}${lakes.length > 4 ? '…' : ''})` : ''}</p>`);

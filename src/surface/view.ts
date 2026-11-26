@@ -8,7 +8,7 @@ import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { CLIMATE_C, DAY, DIS, EARTH_ENV, YEAR, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
 import { SNAP_DEV, SNAP_VERSION, recycleSnap, sameWorld } from '../sim/snapshot';
-import { GeoSheet, geoChip, type GeoTool } from './geoSheet';
+import { GeoSheet, geoChip, SKY, type GeoTool } from './geoSheet';
 import { geoPanelHtml, isoGauge } from './geoPanel';
 import { TM, Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch, type Mark } from '../sim/timeline';
 import { TimelineBar } from './timelineBar';
@@ -850,6 +850,11 @@ export class SurfaceView {
         else if (wx >= 0 && wy >= 0 && wx < WORLD_W && wy < WORLD_H) this.selectCell(this.world.terrain.index(wx, wy));
       }
       else if (this.tool === 'meteor') this.act({ k: 'meteor', x: wx, y: wy });
+      // 🌋 «Небо»: вулкан, удар, цунами, пожар — нажатием на карту (сила — из шторки)
+      else if (this.tool === 'volcano') this.act({ k: 'volcano', x: Math.round(wx), y: Math.round(wy), vei: SKY.vei });
+      else if (this.tool === 'impact') this.act({ k: 'impact', x: Math.round(wx), y: Math.round(wy), size: SKY.size });
+      else if (this.tool === 'tsunami') this.act({ k: 'tsunami', x: Math.round(wx), y: Math.round(wy) });
+      else if (this.tool === 'fire') this.act({ k: 'fire', x: Math.round(wx), y: Math.round(wy) });
       else if (this.tool === 'mutagen') this.act({ k: 'mutagen', x: wx, y: wy });
       else if (this.tool === 'spawn') {
         const p = PRESETS[this.preset];
