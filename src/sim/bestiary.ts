@@ -84,10 +84,10 @@ export const BEST = {
   /** Мир после катастрофы (наследство планеты): первые виды отделяются только к 12–15 тысячам тактов — ждём радиацию дольше. */
   RAD_HER: 21000,
 };
-/** Конвергенция Стейтона C1. */
-export const CONV = { SPLIT: 8000, TIP: 0.25, MAX: 0.7, C1: 0.65, DEDUP: 5000, N: 8 };
+/** Конвергенция Стейтона C1. MAX — запасные ручки спецификации 0.7 → 0.55 и ещё шаг до 0.5 (стенд, scripts/BENCH.md). */
+export const CONV = { SPLIT: 8000, TIP: 0.25, MAX: 0.5, C1: 0.65, DEDUP: 5000, N: 8 };
 
-/** Стенд: записать все пары с похожим обликом (tip ≤ 0.45) — [такт, tip, Dmax, возраст разделения]. */
+/** Стенд: записать все пары с похожим обликом (tip ≤ 0.45) — [такт, tip, Dmax, возраст разделения, A, B, замеров Dmax]. */
 export const CONV_DIAG = { on: false, rows: [] as number[][] };
 /** Измерения облика (L1). */
 export const FORM_D = 11;
@@ -756,16 +756,21 @@ function convergence(w: World, B: BestiaryState, tick: number): void {
         if (s > dmax) { dmax = s; swimMax = bigI === 3; }
       };
       if (!mrca) terms(formOfGenome(la[la.length - 1].founder), 0, formOfGenome(lb[lb.length - 1].founder), 0);
+      // Состояние линии в момент T — ближайший к вершине член цепи, живший тогда (с замером). Пока ветвь A ещё не
+      // отделилась от общего предка (её дочерний вид родился позже, чем у B), линия A в T — это сам предок:
+      // без него у позднего отделения не было ни одного замера до рождения дочернего вида, и Dmax занижался.
+      const sa_ = mrca ? [...la, mrca] : la, sb_ = mrca ? [...lb, mrca] : lb;
       const Ts = new Set<number>();
-      for (const s of la) if (s.formT) for (let k = 0, m = Math.min(s.formN, RING); k < m; k++) if (s.formT[k] >= split) Ts.add(s.formT[k]);
+      let nT = 0;
+      for (const s of [...la, ...lb]) if (s.formT) for (let k = 0, m = Math.min(s.formN, RING); k < m; k++) if (s.formT[k] >= split) Ts.add(s.formT[k]);
       for (const T of Ts) {
         let sa: Species | null = null, oa = -1, sb: Species | null = null, ob = -1;
-        for (const s of la) if ((oa = formAt(s, T)) >= 0) { sa = s; break; }
-        for (const s of lb) if ((ob = formAt(s, T)) >= 0) { sb = s; break; }
-        if (sa && sb) terms(sa.formHist!, oa, sb.formHist!, ob);
+        for (const s of sa_) if ((oa = formAt(s, T)) >= 0) { sa = s; break; }
+        for (const s of sb_) if ((ob = formAt(s, T)) >= 0) { sb = s; break; }
+        if (sa && sb && sa !== sb) { terms(sa.formHist!, oa, sb.formHist!, ob); nT++; }
       }
       if (CONV_DIAG.on) {
-        CONV_DIAG.rows.push([tick, tip, dmax, mrca ? tick - split : 1e9, A.id, Bs.id]);
+        CONV_DIAG.rows.push([tick, tip, dmax, mrca ? tick - split : 1e9, A.id, Bs.id, nT]);
         if (tip > CONV.TIP || (mrca && tick - split < CONV.SPLIT)) continue;
       }
       if (dmax > B.convDiag.best) B.convDiag.best = dmax;

@@ -975,7 +975,7 @@ export class World {
     if (ph[P.DIG] > 0 && DIGGABLE[b] === 1) climate *= 1 - EVO.DIG_WARM * ph[P.DIG]; // в норе ровнее
     const wet = water ? 0.03 * m * v * v * (1 - swim) : 0;
     const flyingOverSea = ph[P.FLY] >= 1 && water && swim < 0.5;
-    let total = base + muscles + move + eyes + gills + climate + (flyingOverSea ? 0.03 * m : wet * (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow ? 0.3 : 1));
+    let total = base + muscles + move + eyes + gills + climate + (flyingOverSea ? 0.03 * m : wet * (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow ? 1 - 0.7 * ph[P.BENTH] : 1));
     if (c.torpor > 0) total *= 1 - 0.85 * ph[P.TORPOR];
     if (ph[P.PSYM] > 0 && b !== B.Forest && b !== B.Deep) total -= 0.24 * base0 * ph[P.PSYM] * this.dl * (this.env.light ?? 1);
     return total;
@@ -1598,7 +1598,9 @@ export class World {
     if (!this.passable(c.g, i)) return -Infinity;
     const d = Math.abs(this.temp(i) - c.g.tempPref);
     const water = BIOMES[this.terrain.biome[i]].water ? 1 : 0;
-    const habitat = c.g.swim > 0.6 ? (water ? 0.3 : -0.3) : 0;
+    let habitat = c.g.swim > 0.6 ? (water ? 0.3 : -0.3) : 0;
+    // ♾️ донный держится мелководья: там его еда и там до него не дойдут сухопутные хищники
+    if (this.oe && EVO.BENTHIC && c.g.ph[P.BENTH] > 0 && this.terrain.biome[i] === B.Shallow) habitat += EVO.B_HOME * c.g.ph[P.BENTH];
     return this.foodValue(c, i) - Math.max(0, d - 0.08) * Math.max(0, d - 0.08) * 6 + habitat;
   }
 
@@ -1644,7 +1646,11 @@ export class World {
     if (water) {
       const a = c.g.swim > 0.5 ? 1 : 0;
       // ♾️ донный (панцирь и ноги) пасётся на мелководье — как краб или морской ёж
-      if (a === 0 && this.oe && EVO.BENTHIC && c.g.ph[P.BENTH] > 0 && this.terrain.biome[i] === B.Shallow) return 0.6;
+      // доля растёт с панцирем (степень донности), клешнями (срывают водоросли) и плоским телом (держится на дне)
+      if (a === 0 && this.oe && EVO.BENTHIC && c.g.ph[P.BENTH] > 0 && this.terrain.biome[i] === B.Shallow) {
+        const ph = c.g.ph;
+        return Math.min(1, EVO.B_WADE + EVO.B_CLAW * ph[P.CLAW] + EVO.B_SHELL * (ph[P.BENTH] - 0.25) / 0.75 + EVO.B_FLAT * (1 - c.g.body.shape));
+      }
       return a;
     }
     return clamp(1 - 1.2 * Math.max(0, c.g.swim - 0.3), 0, 1);
@@ -1830,7 +1836,7 @@ export class World {
       if (ph[P.FLY] >= 1 && swim < 0.5) mul = 1.2;
       else {
         mul = (0.25 + 0.75 * swim) * ph[P.WATERMUL];
-        if (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow) mul = Math.max(mul, 0.55 + 0.25 * (1 - c.g.body.shape));
+        if (EVO.BENTHIC && ph[P.BENTH] > 0 && b === B.Shallow) mul = Math.max(mul, mul + ph[P.BENTH] * (0.55 + 0.25 * (1 - c.g.body.shape) - mul));
       }
     } else {
       mul *= (1 - 0.55 * Math.max(0, swim - 0.3)) * ph[P.LANDMUL];

@@ -59,6 +59,9 @@ export const EVO = {
   HORN_DEF: 0.35, HORN_HURT: 2, // [new, B]
   JIT: 0.15, // [new, B]
   BENTHIC: false,
+  // донная ниша (только при BENTHIC): доступ к траве мелководья = B_WADE + B_CLAW·клешни + B_SHELL·(панцирь B_SH_LO…B_SH_HI)
+  // + B_FLAT·(1 − форма), не больше 1; B_HOME — тяга донного к мелководью при выборе клетки. Краб и конвергенция — scripts/BENCH.md
+  B_WADE: 0.3, B_CLAW: 0.6, B_SHELL: 0.3, B_FLAT: 0.5, B_SH_LO: 0.1, B_SH_HI: 0.5, B_HOME: 0.3,
   MUT_BOOST: 4,
   COPY_UP: 0.04, // лишние копии «бесплатных» глаз и теплокровности тоже стоят (иначе мусор занимает слоты)
   REPLACE_WEAK: false, // все слоты заняты — новое ложится на место слабого остатка (< NEW_LO); выключено: хищников −30…40% (стенд)
@@ -331,7 +334,9 @@ export function express(b: Body, size: number, swim: number, ctx: ExprCtx): Floa
   p[P.EYEQ] = p[P.EYE] > 0 ? 0.4 + 0.6 * Math.min(1, p[P.EYE] / 0.8) : 0;
   p[P.FATK] = 1 + 0.6 * p[P.FAT];
   p[P.DEF] = shell * (1.2 - 0.4 * b.shape) + EVO.HORN_DEF * p[P.HORN] * Math.min(1, size / 6);
-  p[P.BENTH] = legs >= 3 && shell >= 0.35 && swim < 0.5 ? 1 : 0;
+  // донный: ≥ 3 ног, не пловец. Степень 0.25..1: многоногий уже бродит по мелководью (0.25), панцирь от B_SH_LO
+  // до B_SH_HI доводит до полной — у ниши есть пологий склон (бродяга → клешни → скорлупа → краб), а не обрыв на 0.35
+  p[P.BENTH] = legs >= 3 && swim < 0.5 ? 0.25 + 0.75 * clamp((shell - EVO.B_SH_LO) / (EVO.B_SH_HI - EVO.B_SH_LO), 0, 1) : 0;
   return p;
 }
 

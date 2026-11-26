@@ -3,7 +3,7 @@
 #   scripts/oe-o0.sh [B0-ref] [доп. флаги обоим прогонам…]
 # B0-ref по умолчанию — eaa3ae0 (main перед открытой эволюцией, см. scripts/BENCH.md).
 # JOBS="seed:ticks:mode …" — набор прогонов (по умолчанию 3 зерна × 6000 правил + 1 нейросеть, как в спецификации);
-# OUT — куда класть выводы. Не больше 4 node-процессов одновременно. Сравнивается вывод без строки флагов и без
+# OUT — куда класть выводы. Не больше MAXJ (3) node-процессов одновременно. Сравнивается вывод без строки флагов и без
 # полей времени (ms=, soilMs=). Код выхода 1 — если хоть один прогон разошёлся.
 set -u
 cd "$(dirname "$0")/.."
@@ -21,7 +21,7 @@ npx esbuild scripts/bench.ts --bundle --platform=node --outfile="$OUT/cur.cjs" -
 for j in $JOBS; do
   IFS=: read -r s t m <<< "$j"
   for v in b0 cur; do
-    while [ "$(jobs -r | wc -l)" -ge 4 ]; do sleep 1; done
+    while [ "$(jobs -r | wc -l)" -ge "${MAXJ:-3}" ]; do sleep 1; done
     node "$OUT/$v.cjs" "$s" "$t" "$m" --oe=0 "$@" > "$OUT/$v-$s-$m-$t.txt" 2>&1 &
   done
 done

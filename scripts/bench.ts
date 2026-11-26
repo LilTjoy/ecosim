@@ -7,7 +7,7 @@
 // ♾️ открытая эволюция: --oe=0|1 (= --openEvo), любая ручка EVO из src/sim/modules.ts (--P_DUP=0 --BENTHIC=1 …,
 //   логические — «!== '0'»), --benthic=0|1, --her=cold|dark|lowO2|bottle|young|murky (условия планеты).
 //   Строки OE:/modfreq/… печатаются только при включённой открытой эволюции; без неё вывод прежний (ворота O0,
-//   см. scripts/oe-o0.sh).
+//   см. scripts/oe-o0.sh). --convdiag=1 — все пары с похожим обликом (CONVROWS), --crabdiag=1 — части рецепта краба.
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';
@@ -148,12 +148,27 @@ const landN = tLand();
 let budget = 0;
 // O10: трава мелководья — печатается при --oe=1 или --shg=1 (без них вывод прежний)
 const shg = { on: OE || !!flags.shg, sum: 0, k: 0, ben: 0, benSh: 0 };
+const crab = OE && flags.crabdiag ? { peak: new Array(11).fill(0), last: [] as number[], full: 0, k: 0 } : null;
 for (let t = 1; t <= T; t++) {
   w.step();
   if (OE) {
     oe.creSum += w.creatures.length;
     // O11: наибольшее число носителей каждого модуля за прогон (раз в 500 тактов)
     if (t % 500 === 0) { carriers(carrBuf); for (let k = 1; k < carrBuf.length; k++) if (carrBuf[k] > oe.peak[k]) { oe.peak[k] = carrBuf[k]; oe.peakT[k] = t; } }
+    // --crabdiag=1: части рецепта краба по особям (панцирь ≥ .5, клешни ≥ .3, ≥ 3 ног, плоское ≤ .3), полные тела, донные
+    if (crab && t % 500 === 0) {
+      const v = new Array(11).fill(0);
+      for (const c of w.creatures) {
+        const ph = c.g.ph as Float32Array, b = c.g.body;
+        const s = ph[MM.P.SHELL] >= 0.5 ? 1 : 0, k = ph[MM.P.CLAW] >= 0.3 ? 1 : 0, l = ph[MM.P.LEGS] >= 3 ? 1 : 0, f = b.shape <= 0.3 ? 1 : 0;
+        v[0] += s; v[1] += k; v[2] += l; v[3] += f; v[4] += s + k + l + f >= 3 ? 1 : 0; v[5] += s && k && l && f ? 1 : 0;
+        let occ = 0; for (let i = 0; i < MM.NSLOT; i++) if (b.km[i] !== 0) occ++;
+        v[6] += occ === MM.NSLOT ? 1 : 0; v[7] += ph[MM.P.BENTH] > 0 ? 1 : 0; v[8] += s && l ? 1 : 0; v[9] += s && l && k ? 1 : 0; v[10] += s && l && f ? 1 : 0;
+      }
+      for (let i = 0; i < 11; i++) crab.peak[i] = Math.max(crab.peak[i], v[i]);
+      crab.full += v[6] / Math.max(1, w.creatures.length); crab.k++;
+      crab.last = v;
+    }
   }
   for (const sp of w.species.all.values()) if (sp.extinct === null && sp.count > 400) budget += sp.count * w.crowding(sp.id);
   if (t % 10 === 0) {
@@ -193,12 +208,12 @@ for (let t = 1; t <= T; t++) {
     for (const c of w.creatures) g[guild(c)]++;
     for (const k in g) if (g[k] === 0) { if (extinct[k] === undefined) extinct[k] = t; zero[k]++; lastZero[k] = t; }
     if (W.nut && W.soil) { clSum += clampShare(); clN++; }
-    // O10: трава мелководья (доля от плодородия) с 6000 такта; донные — сколько их и сколько на мелководье
+    // O10: трава мелководья (доля от плодородия) с 6000 такта; донные с панцирем (BENTH > 0.25, не просто многоногие бродяги) — сколько их и сколько на мелководье
     if (shg.on && t >= 6000) {
       let a = 0, n = 0;
       for (let i = 0; i < t1b.length; i++) if (t1b[i] === TB.Shallow) { a += w.grass[i] / BIOMES[t1b[i]].fert; n++; }
       shg.sum += a / Math.max(1, n); shg.k++;
-      if (OE) for (const c of w.creatures) if ((c.g.ph as Float32Array)[MM.P.BENTH] > 0) { shg.ben++; if (t1b[c.cell ?? 0] === TB.Shallow) shg.benSh++; }
+      if (OE) for (const c of w.creatures) if ((c.g.ph as Float32Array)[MM.P.BENTH] > 0.25) { shg.ben++; if (t1b[c.cell ?? 0] === TB.Shallow) shg.benSh++; }
     }
   }
   if (t % EV === 0) {
@@ -248,7 +263,7 @@ if (OE) {
   const S = W.evoStats ?? {}, B = W.bestiary;
   const K = MM.KIND_NAMES.length, NG = 4;
   // modfreq: % особей (не слотов), у которых накопленный уровень вида ≥ 0.3; в целом и по гильдиям (LIMB — пары ног / 2)
-  const cnt = Array.from({ length: NG + 1 }, () => new Float64Array(K)), gN = new Float64Array(NG + 1);
+  const cnt = Array.from({ length: NG + 1 }, () => new Float64Array(K)), cntN = Array.from({ length: NG + 1 }, () => new Float64Array(K)), gN = new Float64Array(NG + 1);
   for (const c of w.creatures) {
     const gi = guildOf(c.g), ph = c.g.ph as Float32Array;
     gN[gi]++; gN[NG]++;
@@ -256,6 +271,10 @@ if (OE) {
       const v = k === MM.M.LIMB ? ph[MM.P.LEGS] / 2 : ph[k - 1];
       if (v >= 0.3) { cnt[gi][k]++; cnt[NG][k]++; }
     }
+    // O6 «не из набора»: сильнейшая копия вида ≥ 0.3 и происхождение не наследственное (мех набора у холодолюбивых — набор)
+    const b = c.g.body, bl = new Float32Array(K), bo = new Int32Array(K);
+    for (let i = 0; i < MM.NSLOT; i++) if (b.km[i] !== 0) { const k = b.km[i] & 31; if (b.lvl[i] > bl[k]) { bl[k] = b.lvl[i]; bo[k] = b.km[i] >>> 5; } }
+    for (let k = 1; k < K; k++) if (k !== MM.M.LIMB && ph[k - 1] >= 0.3 && bo[k] !== k) { cntN[gi][k]++; cntN[NG][k]++; }
   }
   // O7: средние по виду EYE и ENDO (видов ≥ 5 особей) — минимум по видам в каждой гильдии; летуны и планеры среди сухопутных
   const spAcc = new Map<number, { n: number; eye: number; endo: number; g: number }>();
@@ -295,10 +314,12 @@ if (OE) {
     `\n OE senses: hidden=${hid} avoided=${(B?.avoidTot ?? 0) + [...(W.avoided as Map<number, number>).values()].reduce((x, y) => x + y, 0)} chan=${[...W.chan].map((x: number) => x.toFixed(2)).join('/')} airSnd=${f2(W.airSnd, 2)} | ${w.passport()}` +
     `\n OE her: palette=${(W.palette as number[]).map((k) => MM.KIND_NAMES[k]).join(',')} founders=${W.founderPlan.length} n0=${f2(W.founderPlan.reduce((a: number, x: any) => a + x.n, 0), 0)} maxSize=${f2(Math.max(...W.founderPlan.map((x: any) => x.g.size ?? 4)), 2)} palFounders=${W.founderPlan.filter((x: any) => Array.from(x.g.body.km as Int32Array).some((km) => km >>> 5 > MM.ORIGIN.PALETTE && km >>> 5 < 100)).length} blind=${W.founderPlan.filter((x: any) => !Array.from(x.g.body.km as Int32Array).some((km) => (km & 31) === MM.M.EYE)).length} chron=${chron0}` +
     `\n OE benthic: on=${MM.EVO.BENTHIC ? 1 : 0} shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)} benthicAvg=${f2(shg.k ? shg.ben / shg.k : undefined, 1)} inShallowAvg=${f2(shg.k ? shg.benSh / shg.k : undefined, 1)} crab=${B?.found?.has('carcinization') ? B.found.get('carcinization').tick : '-'}` +
+    (crab ? `\n OE crabdiag: shell/claw/legs3/flat/any3/crab/fullBody/benth/shell+legs/+claw/+flat peak=${crab.peak.join('/')} final=${crab.last.join('/')} fullShare=${(100 * crab.full / Math.max(1, crab.k)).toFixed(0)}%` : '') +
     `\n OE peak: ${MM.KIND_NAMES.slice(1).map((nm, j) => `${nm}${oe.peak[j + 1]}`).join(' ')}` +
     (BM.CONV_DIAG.on ? `\n CONVROWS ${JSON.stringify(BM.CONV_DIAG.rows.map((r) => r.map((x) => +x.toFixed(3))))}` : '') +
     `\n modfreq all(n=${gN[NG]}): ${mf(NG)}` +
-    ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('');
+    ['herb', 'omni', 'carn', 'swim'].map((nm, gi) => `\n modfreq ${nm}(n=${gN[gi]}): ${mf(gi)}`).join('') +
+    `\n modfreqNew (не наследство): ${['all', 'herb', 'omni', 'carn', 'swim'].map((nm, j) => { const gi = j ? j - 1 : NG; let bk = 0, bv = 0; for (let k = 1; k < K; k++) if (k !== MM.M.LIMB && cntN[gi][k] > bv) { bv = cntN[gi][k]; bk = k; } return `${nm} max ${MM.KIND_NAMES[bk]}${Math.round(100 * bv / Math.max(1, gN[gi]))}`; }).join(' ')}`;
 }
 const rivers = t1.river ? (() => { let r2 = 0, r1 = 0; for (let i = 0; i < t1.river.length; i++) { if (t1.river[i] >= 2) r2++; else if (t1.river[i] === 1) r1++; } return ` rivers: ${t1.rivers?.length} named, river>=2 ${(100 * r2 / landN).toFixed(2)}% land, stream ${(100 * r1 / landN).toFixed(2)}%`; })() : '';
 console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n') +
