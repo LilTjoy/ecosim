@@ -9,6 +9,8 @@ import { BEST, newBestiary, trackBottleneck, updateBestiary, type BestiaryState 
 import { chronicle, founderPlan, heritageOf, worldPalette, type Founder, type Heritage } from './heritage';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 import type { Action } from './timeline';
+import { geoCause, geoTrack, isoBirth, landAt } from './geoTrack';
+import { sillSide, type SillRec } from './geo';
 import { allocGeoCells, carveSills, deriveTerrain, GEO, geoAction, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
 
 /**
@@ -505,6 +507,7 @@ export class World {
     this.avoided.clear();
     this.bestiary = newBestiary();
     this.species.oe = this.oe;
+    this.species.lp = this.lp;
     this.chan = new Float32Array([1, 1, 1, 1]);
     this.airSnd = 1;
     if (this.oe) {
@@ -522,12 +525,12 @@ export class World {
       her = heritageOf(env.heritage);
       this.palette = worldPalette(seed, her);
       this.founderPlan = founderPlan(base, her, seed, this.palette).plan;
-      for (const f of this.founderPlan) this.colonize(f.g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
+      for (const f of this.founderPlan) this.colonize(f.g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)), undefined, undefined, false, false, this.lp && (f.g.swim ?? 0.1) <= 0.6);
     } else
       for (const f of FOUNDERS) {
         // до выхода на сушу живут только морские существа
         const g = env.landLife ? f.g : { ...f.g, swim: 0.9 };
-        this.colonize(g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)));
+        this.colonize(g, Math.round(f.n * (mode === 'neural' ? 1.8 : 1.3)), undefined, undefined, false, false, this.lp && (g.swim ?? 0.1) <= 0.6);
       }
     this.metRef = 1;
     this.upRef = 0;
@@ -726,35 +729,53 @@ export class World {
   }
 
   /** Поселить группу одинаковых особей туда, где им комфортно. */
-  colonize(base: Partial<Genome>, n: number, x?: number, y?: number, introduced = false): Species {
+  colonize(base: Partial<Genome>, n: number, x?: number, y?: number, introduced = false, migrant = false, both = false): Species {
     const neural = this.brainMode === 'neural';
     const g0 = genome(base, neural, this.r, this.expr);
     let cx = x;
     let cy = y;
-    if (cx === undefined || cy === undefined) [cx, cy] = this.findHome(g0);
+    // 🌋 пришельцы с большой земли высаживаются на берег (живая планета)
+    if (cx === undefined || cy === undefined) [cx, cy] = this.lp && migrant ? this.findShore(g0) : this.findHome(g0);
     const region = this.terrain.regionAt(cx, cy)?.name ?? 'неизвестные земли';
     // основатели — всегда отдельный вид; пришельцы присоединяются к очень близкому родственнику
     // завезённые игроком (introduced) — всегда новый вид: открытие не достанется местным
-    const sp = this.tick === 0 ? this.species.create(g0, null, 0, region, introduced) : this.species.match(g0, this.tick, region, introduced);
+    // 🌋 при живой планете — только к родственнику с того же материка
+    const sp = this.tick === 0
+      ? this.species.create(g0, null, 0, region, introduced)
+      : this.lp
+        ? this.species.match(g0, this.tick, region, introduced, landAt(this, cx, cy))
+        : this.species.match(g0, this.tick, region, introduced);
+    // 🌋 основатели суши — по обе стороны пролива Уоллеса (половина группы — за проливом): там им и расходиться
+    let n1 = n, c2: [number, number] | null = null;
+    if (both && this.geo) {
+      const s = this.geo.sills.find((q) => q.kind === 'wallace');
+      const sd = s ? sillSide(s, cx, cy) : -1;
+      if (s && sd >= 0) c2 = this.findHome(g0, s, sd === 0 ? 1 : 0);
+      if (c2) n1 = n - (n >> 1);
+    }
     for (let i = 0; i < n; i++) {
       const g = mutate(g0, 0.03, this.r, this.expr); // основатели никогда не «изобретают»
       if (neural) g.brain = genome({}, true, this.r).brain;
       g.hue = g0.hue + (this.r() - 0.5) * 10;
-      const [px, py] = this.nearbyLand(cx, cy, 120, g);
+      const [px, py] = i < n1 ? this.nearbyLand(cx, cy, 120, g) : this.nearbyLand(c2![0], c2![1], 120, g);
       this.spawn(sp.id, g, px, py);
     }
     return sp;
   }
 
   /** Случайная точка, где этому геному удобно: подходящая температура и можно стоять. */
-  findHome(g: Genome): [number, number] {
-    let best: [number, number] = [this.width / 2, this.height / 2];
+  findHome(g: Genome): [number, number];
+  /** 🌋 …только по сторону want пролива s (null — не нашлось). */
+  findHome(g: Genome, s: SillRec, want: 0 | 1): [number, number] | null;
+  findHome(g: Genome, s?: SillRec, want?: 0 | 1): [number, number] | null {
+    let best: [number, number] | null = s ? null : [this.width / 2, this.height / 2];
     let bestScore = -Infinity;
     for (let i = 0; i < 400; i++) {
       const x = this.r() * this.width;
       const y = this.r() * this.height;
       const idx = this.terrain.index(x, y);
       if (!this.passable(g, idx)) continue;
+      if (s && sillSide(s, x, y) !== want) continue;
       const wet = BIOMES[this.terrain.biome[idx]].water;
       const score = -Math.abs(this.temp(idx) - g.tempPref) * 3 + this.maxGrass(idx) * (1 - g.diet) + (g.swim > 0.6 ? (wet ? 2 : -1) : 0);
       if (score > bestScore) {
@@ -763,6 +784,30 @@ export class World {
       }
     }
     return best;
+  }
+
+  /** 🌋 Как findHome, но только берег: пляж или суша у воды (морские — любая вода). */
+  private findShore(g: Genome): [number, number] {
+    const t = this.terrain, cols = t.cols, n = cols * t.rows;
+    let best: [number, number] | null = null;
+    let bestScore = -Infinity;
+    const wet = (i: number) => i >= 0 && i < n && BIOMES[t.biome[i]].water;
+    for (let i = 0; i < 400; i++) {
+      const x = this.r() * this.width;
+      const y = this.r() * this.height;
+      const idx = t.index(x, y);
+      if (!this.passable(g, idx)) continue;
+      const w0 = BIOMES[t.biome[idx]].water;
+      const cx = idx % cols;
+      const shore = g.swim > 0.6 ? w0 : !w0 && (t.biome[idx] === B.Beach || (cx > 0 && wet(idx - 1)) || (cx < cols - 1 && wet(idx + 1)) || wet(idx - cols) || wet(idx + cols));
+      if (!shore) continue;
+      const score = -Math.abs(this.temp(idx) - g.tempPref) * 3 + this.maxGrass(idx) * (1 - g.diet);
+      if (score > bestScore) {
+        bestScore = score;
+        best = [x, y];
+      }
+    }
+    return best ?? this.findHome(g);
   }
 
   private nearbyLand(x: number, y: number, r: number, g: Genome): [number, number] {
@@ -2112,7 +2157,9 @@ export class World {
     let y = a.y + Math.sin(angle) * a.g.size * 2;
     if (!this.passable(g, this.terrain.index(x, y))) [x, y] = [a.x, a.y];
     const region = this.terrain.regionAt(x, y)?.name ?? 'море';
-    const { species, isNew } = this.species.classify(g, b ? [a.sp, b.sp] : [a.sp], this.tick, region);
+    const { species, isNew } = this.lp
+      ? this.species.classify(g, b ? [a.sp, b.sp] : [a.sp], this.tick, region, landAt(this, x, y))
+      : this.species.classify(g, b ? [a.sp, b.sp] : [a.sp], this.tick, region);
     const child = this.spawn(species.id, g, x, y);
     this.creatures.pop(); // добавим после тика
 
@@ -2135,6 +2182,7 @@ export class World {
     if (b) b.lonely = 0;
     // материнские антитела: детёныш переболевшей матери первое время не заражается
     child.immune = a.immune > 0 ? DIS.MAT_IMM : 0;
+    if (this.lp) isoBirth(this, a, b, child); // 🌋 метка стороны барьера — от матери; отец с другой стороны — утечка генов
     if (this.oe) {
       // ☢️ всплеск мутаций держится и у потомков; отвращение к ядовитой окраске мать «передаёт» детёнышу
       child.mutT = Math.max(a.mutT, b?.mutT ?? 0);
@@ -2160,8 +2208,11 @@ export class World {
     const gc = [0, 0, 0, 0];
     for (const c of this.creatures) gc[guildOf(c.g)]++;
     const [herb, omni, meat, swim] = gc;
+    // 🌋 остров отрезан (после массового вымирания) — приплывают только морские
+    const cut = this.lp && this.tick < this.geo!.isolatedUntil;
     const arrive = (base: Partial<Genome>, n: number, what: string) => {
-      const sp = this.colonize(base, n);
+      if (cut && (base.swim ?? 0) <= 0.6) return;
+      const sp = this.colonize(base, n, undefined, undefined, false, true);
       this.log(`⛵ С большой земли приплыли ${what}: «${sp.name}» (${n})`, 'migration');
     };
     const pickF = (f: (g: Partial<Genome>) => boolean) => {
@@ -2377,6 +2428,8 @@ export class World {
       case 'restoreRes':
         this.restoreResource(a.kind);
         break;
+      case 'strait':
+      case 'isthmus':
       case 'co2':
       case 'iceAge':
       case 'sea':
@@ -2687,6 +2740,9 @@ export class World {
       trackBottleneck(this);
       if (this.tick % 200 === 0) updateBestiary(this);
     }
+    // 🌋 при живой планете кольцо численности — всегда свежее, а «горлышко» — только при причине (ледниковье, катастрофа)
+    if (this.lp && !this.oe) trackBottleneck(this, geoCause(this));
+    if (this.lp && this.tick % 200 === 0) geoTrack(this);
   }
 
   // ---------------- опыты для уроков 📚 (по умолчанию ничего не меняют) ----------------

@@ -8,7 +8,8 @@ import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { CLIMATE_C, DAY, DIS, EARTH_ENV, YEAR, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
 import { SNAP_DEV, SNAP_VERSION, recycleSnap, sameWorld } from '../sim/snapshot';
-import { GeoSheet, geoChip } from './geoSheet';
+import { GeoSheet, geoChip, type GeoTool } from './geoSheet';
+import { geoPanelHtml, isoGauge } from './geoPanel';
 import { TM, Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch, type Mark } from '../sim/timeline';
 import { TimelineBar } from './timelineBar';
 import { TmPanel } from './tmPanel';
@@ -60,9 +61,9 @@ const STATE_NAMES: Record<Creature['state'], string> = {
 };
 
 /** Линзы 🔬 по кругу и их легенды. Цвета — как в renderer.lensColor. */
-const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease', 'depth'];
-/** Линзы этого мира: «🌊 Глубины» — только у живой планеты. */
-const lensesOf = (w: World): Lens[] => (w.lp ? LENS_ORDER : LENS_ORDER.filter((l) => l !== 'depth'));
+const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease', 'depth', 'refugia'];
+/** Линзы этого мира: «🌊 Глубины» и «🏔 Рефугиумы» — только у живой планеты. */
+const lensesOf = (w: World): Lens[] => (w.lp ? LENS_ORDER : LENS_ORDER.filter((l) => l !== 'depth' && l !== 'refugia'));
 const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; caption: string; grad?: string; lo?: string; hi?: string }> = {
   fert: {
     title: '🟫 Плодородие', fact: 'liebig',
@@ -84,6 +85,10 @@ const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; cap
     title: '🌊 Глубины', fact: 'geo_bathymetry',
     caption: 'Глубина моря от нынешнего берега. <b class="yel">—</b> 50 м: осушится, когда море уйдёт на 50 м (мост через пролив); <b>—</b> 120 м: берег ледникового максимума',
     grad: 'linear-gradient(90deg,rgb(150,235,230),rgb(40,120,200) 50%,rgb(8,22,70))', lo: 'мелко', hi: '400 м и глубже',
+  },
+  refugia: {
+    title: '🏔 Рефугиумы', fact: 'geo_refugia',
+    caption: 'Убежища последнего пика ледниковья: цветом — тёплые клочки суши без льда, где пережили холод звери (у каждого рефугиума свой цвет); белое — лёд, серое — прочая суша',
   },
 };
 
@@ -172,6 +177,7 @@ const TEMPLATE = /* html */ `
       <button data-tab="charts">Графики</button>
       <button data-tab="micro">Микромир</button>
       <button data-tab="discover" data-oe hidden title="Что изобрела эволюция в этом мире">🌟 Открытия</button>
+      <button data-tab="geo" data-lp hidden title="Живая планета: ледниковые циклы, проливы, половины видов, рефугиумы">🌋 Планета</button>
       <button data-tab="log">Летопись</button>
       <button data-tab="time" title="Машина времени: ветки истории и их сравнение">⏳ Ветки</button>
     </nav>
@@ -205,6 +211,7 @@ const TEMPLATE = /* html */ `
       <div class="s-legend s-soillegend"></div>
     </div>
     <div class="s-tab" data-tab="discover" hidden></div>
+    <div class="s-tab" data-tab="geo" hidden></div>
     <div class="s-tab" data-tab="log" hidden><ol class="s-log"></ol></div>
     <div class="s-tab" data-tab="time" hidden></div>
   </aside>
@@ -222,7 +229,9 @@ export class SurfaceView {
   private canvas: HTMLCanvasElement;
   private mini: HTMLCanvasElement;
   private speed = 1;
-  private tool: 'inspect' | 'grass' | 'meteor' | 'spawn' | 'mutagen' = 'inspect';
+  private tool: 'inspect' | 'grass' | 'meteor' | 'spawn' | 'mutagen' | GeoTool = 'inspect';
+  /** 🌋 Начало линии пролива или перешейка (мир, px). */
+  private lineStart: [number, number] | null = null;
   /** Показаны ли кнопки открытой эволюции (☢️, краб, летун, мутант) — сверяется с world.oe в renderHud. */
   private oeShown: boolean | null = null;
   private preset = 0;
@@ -412,6 +421,9 @@ export class SurfaceView {
       world: this.world,
       act: (a) => this.act(a),
       showFact: (id) => this.showFact(id),
+      tool: () => this.tool,
+      setTool: (t) => this.setGeoTool(t),
+      toast: (t) => this.toast(t),
     });
     this.bindUi();
     this.bindInput();
@@ -561,6 +573,14 @@ export class SurfaceView {
       if (!(e.target as HTMLElement).closest('.s-sick')) return;
       this.setLens('disease');
       this.openTab('micro');
+    });
+    // 🌋 вкладка «🌋 Планета»: карточки и линза рефугиумов
+    $(r, '.s-tab[data-tab=geo]').addEventListener('click', (e) => {
+      const t = e.target as HTMLElement;
+      const l = t.closest('[data-glens]') as HTMLElement | null;
+      if (l) this.setLens(l.dataset.glens as Lens);
+      const f = t.closest('[data-fact]') as HTMLElement | null;
+      if (f) this.showFact(f.dataset.fact!);
     });
     // вкладка «Микромир»: показать линзу, карточка, выбор болезни
     $(r, '.s-tab[data-tab=micro]').addEventListener('click', (e) => {
@@ -762,6 +782,9 @@ export class SurfaceView {
         pinch = Math.hypot(a.x - b.x, a.y - b.y);
       }
       if (this.tool === 'grass') this.act({ k: 'grass', pts: this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), r: 50 });
+      // 🌋 кисть рельефа — как трава; пролив и перешеек — линией от нажатия до отпускания
+      if (this.tool === 'terraUp' || this.tool === 'terraDown') this.act({ k: 'terra', pts: this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), r: 60, dz: this.tool === 'terraUp' ? 100 : -100 });
+      if (this.tool === 'strait' || this.tool === 'straitS' || this.tool === 'isthmus') this.lineStart = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
     });
     c.addEventListener('pointermove', (e) => {
       const [x, y] = local(e);
@@ -788,6 +811,10 @@ export class SurfaceView {
         }
       } else if (this.tool === 'grass') {
         this.act({ k: 'grass', pts: [...this.cursor], r: 50 });
+      } else if (this.tool === 'terraUp' || this.tool === 'terraDown') {
+        this.act({ k: 'terra', pts: [...this.cursor], r: 60, dz: this.tool === 'terraUp' ? 100 : -100 });
+      } else if (this.lineStart) {
+        // линия пролива: карту не двигаем
       } else if (moved) {
         this.cam.pan(x - prev.x, y - prev.y, c.clientWidth, c.clientHeight);
         this.follow = false;
@@ -802,6 +829,18 @@ export class SurfaceView {
       if (this.world.player?.alive && !this.keys.size && this.inputFree) {
         this.world.input.dx = 0;
         this.world.input.dy = 0;
+      }
+      if (this.lineStart && !pointers.size) {
+        const [ex, ey] = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
+        const [sx, sy] = this.lineStart;
+        this.lineStart = null;
+        if (Math.hypot(ex - sx, ey - sy) < 30) {
+          this.toast(this.tool === 'isthmus' ? '🌉 Проведите линию поперёк пролива — от берега до берега' : '✂️ Проведите линию поперёк суши — где резать пролив');
+          return;
+        }
+        const pts = [Math.round(sx), Math.round(sy), Math.round(ex), Math.round(ey)];
+        this.act(this.tool === 'isthmus' ? { k: 'isthmus', pts } : { k: 'strait', pts, deep: this.tool === 'strait' });
+        return;
       }
       if (moved || pointers.size) return;
       const [wx, wy] = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
@@ -930,6 +969,20 @@ export class SurfaceView {
 
   // ---------------- линзы 🔬 ----------------
 
+  /** 🌋 Инструмент «Земли» (кисть рельефа, пролив, перешеек) или обратно 🔍 (null). */
+  private setGeoTool(t: GeoTool | null): void {
+    if (!t || this.tool === t) {
+      $<HTMLButtonElement>(this.root, '[data-tool=inspect]').click();
+      return;
+    }
+    this.tool = t;
+    this.forkNext = null;
+    this.lineStart = null;
+    this.root.querySelectorAll('[data-tool]').forEach((x) => x.classList.remove('active'));
+    $(this.root, '.s-spawn').hidden = true;
+    this.canvas.style.cursor = 'crosshair';
+  }
+
   /** 🌋 «🛠 Стихии»: открыть или закрыть (кнопка инструментов и чип HUD). */
   private toggleGeoSheet(): void {
     if (!this.world.lp) return;
@@ -986,6 +1039,10 @@ export class SurfaceView {
         else if (c.immune > 0) imm++;
       }
       txt = n ? `Рядом: ${n} ${plural(n, 'зверь', 'зверя', 'зверей')} · болеют ${sick} · защищены ${imm}` : 'Рядом никого нет';
+    } else if (l === 'refugia') {
+      const R = w.geo?.refugia ?? null;
+      const k = this.renderer.refugiumOf(w.terrain.region[i]);
+      txt = !R ? 'Рефугиумы появятся на пике ледниковья' : k >= 0 && R[k] ? `Рефугиум «${w.terrain.regions[R[k].region]?.name ?? '?'}»: ${R[k].n} зверей, ${R[k].species.length} ${plural(R[k].species.length, 'вид', 'вида', 'видов')} на пике` : 'Не рефугиум';
     } else if (l === 'depth') {
       const m = this.renderer.depthAt(i);
       txt = m < 0 ? `Глубина ${-m} м${m >= -50 ? ' — осушится первой' : m >= -120 ? ' — суша в пик ледниковья' : m < -180 ? ' — глубоко: не осохнет' : ''}` : `Суша: ${m} м над нынешним морем`;
@@ -1393,8 +1450,10 @@ export class SurfaceView {
       this.lpShown = w.lp;
       this.root.querySelectorAll<HTMLElement>('[data-lp]').forEach((b) => (b.hidden = !w.lp));
       if (!w.lp) {
+        if (this.tab === 'geo') $<HTMLButtonElement>(this.root, '.s-tabs [data-tab=species]').click();
+        if (this.tool !== 'inspect' && this.tool !== 'grass' && this.tool !== 'meteor' && this.tool !== 'spawn' && this.tool !== 'mutagen') $<HTMLButtonElement>(this.root, '[data-tool=inspect]').click();
         this.geoSheet.close();
-        if (this.renderer.lens === 'depth') this.setLens('off');
+        if (this.renderer.lens === 'depth' || this.renderer.lens === 'refugia') this.setLens('off');
       }
     }
     this.geoSheet.update();
@@ -1466,8 +1525,19 @@ export class SurfaceView {
     });
   }
 
+  /** 🌋 Вкладка «🌋 Планета»: разметка — только если изменилась. */
+  private renderGeoPanel(): void {
+    const el = $(this.root, '.s-tab[data-tab=geo]');
+    const html = geoPanelHtml(this.world);
+    if (this.htmlCache.get(el) === html) return;
+    const top = el.scrollTop;
+    this.setHtml(el, html);
+    el.scrollTop = top;
+  }
+
   private renderPanel(): void {
     if (this.tab === 'discover') return this.renderDiscover();
+    if (this.tab === 'geo') return this.renderGeoPanel();
     if (this.tab === 'species') this.renderSpecies();
     else if (this.tab === 'tree') this.drawTree();
     else if (this.tab === 'web') this.drawWeb();
@@ -1503,7 +1573,7 @@ export class SurfaceView {
     card.innerHTML = `<div class="card">
       <div class="row"><b style="color:${spColor(sp)}">${sp.name}</b><button data-unfocus class="x">✕</button></div>
       <div class="latin">${sp.latin}</div>
-      <div class="muted small">${sp.introduced && !parent ? `Завезён игроком на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}».` : `Возник на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}»${parent ? `, предок — «${parent.name}»` : ' (основатель)'}.`} Освоил регионов: ${sp.regions.size}. Пик численности: ${sp.peak}.</div>${this.diseaseRow(sp)}
+      <div class="muted small">${sp.introduced && !parent ? `Завезён игроком на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}».` : `Возник на ${Math.floor(sp.born / DAY)}-й день в «${sp.origin}»${parent ? `, предок — «${parent.name}»` : ' (основатель)'}.`} Освоил регионов: ${sp.regions.size}. Пик численности: ${sp.peak}.</div>${this.diseaseRow(sp)}${isoGauge(this.world, sp.id) ?? ''}
       <div class="genes">${GENE_KEYS.map((k) => {
         const i = GENE_INFO[k];
         const v = (sp.mean[k] - i.min) / (i.max - i.min);

@@ -6,6 +6,7 @@ import { EARTH, luminosity0, PRESETS, simulate, type PlanetParams, type SimResul
 import type { Pathogen } from '../sim/microbes';
 import type { World } from '../sim/world';
 import { BIOMES } from '../sim/terrain';
+import { sillSide } from '../sim/geo';
 
 /** Орбита, на которой планета у звезды массы m получает `flux` земного тепла. */
 export const orbitFor = (m: number, flux: number) => Math.sqrt(luminosity0(m) / 0.72 / flux);
@@ -217,3 +218,85 @@ export const iceBridgeOk = (s: IceNow | null) => !!s && s.Vg >= 0.4 && s.bridge;
 export const icePeakOk = (s: IceNow | null) => !!s && s.Vg >= 0.85 && s.ice >= 0.15;
 /** Клетка карты ≈ 16 км (1 единица мира ≈ 1 км). */
 export const KM_PER_ROW = 16;
+
+// ---------------- 🌋 уроки «Пролив рождает виды» и «Опыт „Панама“» ----------------
+
+/** Половины видов и разделения сейчас (null — мир без живой планеты). */
+export interface VicNow {
+  /** Записей «половины вида по разные стороны пролива». */
+  iso: number;
+  /** Лидер: дальше всех «врозь». */
+  best: { name: string; ga: number; d: number; leak: number; sill: string } | null;
+  /** Видов, родившихся от викарианса, и утечек генов (переплыли — гены смешались). */
+  splits: number;
+  leaks: number;
+}
+export function vicNow(w: World): VicNow | null {
+  const g = w.geo;
+  if (!w.lp || !g) return null;
+  let best: VicNow['best'] = null;
+  for (const r of g.isolates) {
+    const sp = w.species.all.get(r.sp);
+    if (!sp || (best && best.ga >= r.ga)) continue;
+    best = { name: sp.name, ga: r.ga, d: r.d, leak: r.leak, sill: g.sills[r.sill]?.name ?? '?' };
+  }
+  return { iso: g.isolates.length, best, splits: g.stats.vicariance, leaks: g.stats.leaks };
+}
+
+/** Фауны по обе стороны пролива Уоллеса: виды суши (≥ 5 особей) к северу, к югу и общие. */
+export function wallaceFaunas(w: World): { north: number; south: number; shared: number; onlySouth: string[] } | null {
+  const g = w.geo;
+  const s = g?.sills.find((x) => x.kind === 'wallace');
+  if (!w.lp || !g || !s) return null;
+  const cnt = new Map<number, [number, number]>();
+  for (const c of w.creatures) {
+    if (!c.alive || c.g.swim > 0.6) continue;
+    const sd = sillSide(s, c.x, c.y);
+    if (sd < 0) continue;
+    let v = cnt.get(c.sp);
+    if (!v) cnt.set(c.sp, (v = [0, 0]));
+    v[sd as 0 | 1]++;
+  }
+  let north = 0, south = 0, shared = 0;
+  const onlySouth: string[] = [];
+  for (const [id, v] of cnt) {
+    const n = v[0] >= 5, so = v[1] >= 5;
+    if (n) north++;
+    if (so) south++;
+    if (n && so) shared++;
+    if (so && !n) onlySouth.push(w.species.all.get(id)?.name ?? '?');
+  }
+  return { north, south, shared, onlySouth };
+}
+
+/** Перешеек через пролив Уоллеса: открыт ли и что показал обмен. */
+export interface PanamaNow {
+  open: boolean;
+  /** Тактов с открытия (−1 — моста ещё нет). */
+  age: number;
+  fromN: number;
+  fromS: number;
+  lost: number;
+  cross: [number, number];
+  reported: boolean;
+}
+export function panamaNow(w: World): PanamaNow | null {
+  const g = w.geo;
+  const si = g ? g.sills.findIndex((x) => x.kind === 'wallace') : -1;
+  if (!w.lp || !g || si < 0) return null;
+  const r = [...g.bridges].reverse().find((b) => b.sill === si) ?? null;
+  const est = r ? r.invaders.filter((v) => v.t >= 0) : [];
+  return {
+    open: g.sills[si].open,
+    age: r ? w.tick - r.open : -1,
+    fromN: est.filter((v) => v.from === 0).length,
+    fromS: est.filter((v) => v.from === 1).length,
+    lost: r ? r.lost.length : 0,
+    cross: r ? [r.cross[0], r.cross[1]] : [0, 0],
+    reported: !!r?.reported,
+  };
+}
+
+/** Зёрна уроков (подобраны стендом learn-check: викарианс и обмен там случаются за время урока). */
+export const VIC_SEED = 7;
+export const PANAMA_SEED = 42;

@@ -7,7 +7,9 @@ import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
   outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, icePeakOk,
+  vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED,
 } from '../src/learn/scenarios';
+import { GEO, panamaLine } from '../src/sim/geo';
 import { LESSONS } from '../src/learn/lessons';
 import { allCards } from '../src/learn/catalog';
 
@@ -240,6 +242,51 @@ if (!args.includes('--planet')) {
     ok(tb > 0 && tb < 30000, `Ледниковый период, зерно ${seed}: перешеек открылся за ${tb} тактов`);
     ok(!!s && icePeakOk(s) && s.wallace, `Ледниковый период, зерно ${seed}: пик за ${tk} тактов — море ${s?.sea} м, лёд ${s ? (s.ice * 100).toFixed(0) : '-'}%, ${s?.dT.toFixed(1)} °C, CO₂ ${s?.co2.toFixed(0)}, южный пролив глубок: ${s?.wallace}; видов ${sp0} → ${w.species.living().length}, зверей ${w.creatures.length}`);
     lap('ледниковый период', t);
+  }
+  // «🌊 Пролив рождает виды» (×1, зерно урока): вид по обе стороны пролива → 5 поколений врозь → разделение
+  {
+    const t = Date.now();
+    const L = LESSONS.find((x) => x.id === 'vic');
+    const ids = new Set(allCards().map((c) => c.id));
+    ok(!!L && L.cards.every((id) => ids.has(id)), `Пролив рождает виды: урок есть, карточки на месте`);
+    Math.random = mulberry32(VIC_SEED * 7919 + 1);
+    const w = new World(3200, 2000);
+    w.settings.livePlanet = true;
+    w.reset('rules', VIC_SEED, { ...EARTH_ENV });
+    let t1 = -1, t2 = -1, t3 = -1, tk = 0;
+    while (tk < 90000 && t3 < 0) {
+      steps(w, 200);
+      tk += 200;
+      const v = vicNow(w)!;
+      if (t1 < 0 && v.best) t1 = tk;
+      if (t2 < 0 && ((v.best?.ga ?? 0) >= GEO.ISO_GEN / 2 || v.splits > 0)) t2 = tk;
+      if (t3 < 0 && v.splits > 0) t3 = tk;
+    }
+    const f = wallaceFaunas(w);
+    ok(t1 >= 0 && t1 <= 30000 && t2 >= 0 && t2 - t1 <= 30000 && t3 >= 0 && t3 - t2 <= 30000, `Пролив рождает виды, зерно ${VIC_SEED}: вид по обе стороны — ${t1}, подвиды — ${t2}, новый вид — ${t3} тактов; утечек ${vicNow(w)!.leaks}; фауны за Уоллесом: ${f?.north}/${f?.south}, общих ${f?.shared}`);
+    lap('пролив рождает виды', t);
+  }
+  // «🌉 Опыт „Панама“»: 3 года врозь → перешеек через Уоллеса → мост открылся → сводка обмена за 2 года
+  {
+    const t = Date.now();
+    const L = LESSONS.find((x) => x.id === 'panama');
+    const ids = new Set(allCards().map((c) => c.id));
+    ok(!!L && L.cards.every((id) => ids.has(id)), `Опыт «Панама»: урок есть, карточки на месте`);
+    Math.random = mulberry32(PANAMA_SEED * 7919 + 1);
+    const w = new World(3200, 2000);
+    w.settings.livePlanet = true;
+    w.reset('rules', PANAMA_SEED, { ...EARTH_ENV });
+    steps(w, 3 * YEAR);
+    const f = wallaceFaunas(w);
+    const pts = panamaLine(w);
+    if (pts) w.apply({ t: w.tick, k: 'isthmus', pts });
+    let to = -1, tk = 0;
+    while (tk < 3000 && to < 0) { steps(w, 20); tk += 20; if (panamaNow(w)?.open) to = tk; }
+    tk = 0;
+    while (tk < 3 * YEAR && !panamaNow(w)?.reported) { steps(w, 200); tk += 200; }
+    const p = panamaNow(w);
+    ok(!!pts && to >= 0 && !!p?.reported, `Опыт «Панама», зерно ${PANAMA_SEED}: фауны ${f?.north}/${f?.south} (общих ${f?.shared}); перешеек открылся за ${to} тактов; сводка через ${tk}: перешли ${p?.cross.join('/')}, прижились с севера ${p?.fromN}, с юга ${p?.fromS}, вымерли ${p?.lost}`);
+    lap('опыт панама', t);
   }
 }
 console.log(`\n${failed ? `✗ Провалено проверок: ${failed}` : '✓ Все проверки пройдены'} · ${((Date.now() - t0) / 1000).toFixed(0)} с`);

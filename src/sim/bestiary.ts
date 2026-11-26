@@ -834,12 +834,12 @@ const plural = (n: number, one: string, few: string, many: string) => {
 };
 
 /** Каждые 20 тактов (из World.record при oe). */
-export function trackBottleneck(w: World): void {
+export function trackBottleneck(w: World, armOk = true): void {
   const B = w.bestiary, tick = w.tick, n = w.creatures.length;
   B.popRing[Math.floor(tick / 20) % B.popRing.length] = n;
   let mx = 0;
   for (const v of B.popRing) mx = Math.max(mx, v);
-  if (!B.bn && n < BEST.BN_DROP * mx && mx - n >= BEST.BN_ABS && tick - B.lastBn >= BEST.BN_COOL) {
+  if (armOk && !B.bn && n < BEST.BN_DROP * mx && mx - n >= BEST.BN_ABS && tick - B.lastBn >= BEST.BN_COOL) {
     const survivors: number[] = [];
     for (const sp of w.species.all.values()) if (sp.extinct === null && sp.announced && sp.count > 0) survivors.push(sp.id);
     B.bn = { tick, survivors, n };

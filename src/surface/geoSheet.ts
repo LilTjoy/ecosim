@@ -1,15 +1,30 @@
 // 🌋 «🛠 Стихии» живой планеты: на компьютере — всплывающая панель у инструментов, на телефоне — шторка снизу.
 // Этап 1a — вкладка «Климат»: CO₂, ледниковья, уровень моря, скорость геологии. Всё — действиями мира (их пишет
 // машина времени), сама панель мир не меняет и ссылку на w.geo не держит (loadWorld заменяет его целиком).
-import { co2Shift, geoKyr, metres } from '../sim/geo';
+import { beringiaLine, co2Shift, geoKyr, metres, panamaLine } from '../sim/geo';
 import type { ActionInput } from '../sim/timeline';
 import { CLIMATE_C, type World } from '../sim/world';
+
+/** Инструменты «Земли»: кисть ⬆/⬇, ✂️ глубокий и мелкий пролив, 🌉 перешеек (рисуются на карте). */
+export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus';
 
 export interface GeoSheetHost {
   world: World;
   act(a: ActionInput): void;
   showFact(id: string): void;
+  /** Текущий инструмент карты и выбор инструмента «Земли» (null — обратно 🔍). */
+  tool(): string;
+  setTool(t: GeoTool | null): void;
+  toast(text: string): void;
 }
+
+const TOOL_HINT: Record<GeoTool, string> = {
+  terraUp: '⬆ Водите по карте — суша поднимается (до +900 м)',
+  terraDown: '⬇ Водите по карте — суша опускается; ниже моря — вода',
+  strait: '✂️ Проведите линию поперёк суши — глубокий пролив, как у Уоллеса: пешком не перейти никогда',
+  straitS: '✂️ Проведите линию поперёк суши — мелкий пролив: в ледниковье он осохнет и станет мостом',
+  isthmus: '🌉 Проведите линию поперёк пролива — от берега до берега',
+};
 
 /** Сдвиг температуры острова, целые °C («0» без знака). */
 const tC = (w: World) => {
@@ -43,6 +58,8 @@ export function geoChip(w: World): string {
 export class GeoSheet {
   /** Ползунки, которые игрок сейчас тянет (не перерисовывать их значение). */
   private dragging = new Set<string>();
+  /** Открытая вкладка шторки. */
+  private tab: 'land' | 'climate' = 'climate';
 
   constructor(private el: HTMLElement, private host: GeoSheetHost) {
     el.addEventListener('click', (e) => this.click(e));
@@ -82,7 +99,22 @@ export class GeoSheet {
     const mode = g.fPin !== null ? (g.fPin < 0 ? 'now' : 'end') : g.orbit ? 'cycle' : 'off';
     const b = (k: string, v: string, label: string, on: boolean, tip: string) =>
       `<button data-g="${k}" data-v="${v}" class="${on ? 'active' : ''}" title="${tip}">${label}</button>`;
-    this.el.innerHTML = `<div class="gs-head"><nav class="gs-tabs"><button class="active" data-gt="climate">🌡 Климат</button></nav><button class="x" data-g="close" title="Закрыть">✕</button></div>
+    const head = `<div class="gs-head"><nav class="gs-tabs"><button class="${this.tab === 'land' ? 'active' : ''}" data-gt="land">⛰ Земля</button><button class="${this.tab === 'climate' ? 'active' : ''}" data-gt="climate">🌡 Климат</button></nav><button class="x" data-g="close" title="Закрыть">✕</button></div>`;
+    if (this.tab === 'land') {
+      const tb = (t: GeoTool, label: string) => `<button data-gtool="${t}" class="${this.host.tool() === t ? 'active' : ''}" title="${TOOL_HINT[t]}">${label}</button>`;
+      const sills = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
+      this.el.innerHTML = `${head}<div class="gs-body">
+        <div class="gs-row"><b>🏔 Рельеф</b> <a data-fact="geo_bathymetry">?</a></div>
+        <div class="gs-btns">${tb('terraUp', '⬆ Поднять')}${tb('terraDown', '⬇ Опустить')}</div>
+        <div class="gs-row"><b>✂️ Проливы и мосты</b> <a data-fact="geo_wallace">?</a> <a data-fact="geo_landbridge">?</a></div>
+        <div class="gs-btns">${tb('strait', '✂️ Глубокий пролив')}${tb('straitS', '✂️ Мелкий пролив')}${tb('isthmus', '🌉 Перешеек')}</div>
+        <div class="gs-btns"><button data-g="beringia" title="Мелкий пролив во всю ширину на севере острова: в межледниковье — море, в ледниковье — мост, как Берингия">🗺 Берингия</button><button data-g="panama" title="Перешеек через пролив Уоллеса — две давно разделённые фауны встретятся, как в Панаме">🌉 Опыт «Панама»</button> <a data-fact="geo_gabi">?</a></div>
+        <div class="gs-tip muted small">${TOOL_HINT[(this.host.tool() as GeoTool)] ?? 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.'}</div>
+        <ul class="gs-sills">${sills}</ul>
+      </div>`;
+      return;
+    }
+    this.el.innerHTML = `${head}
       <div class="gs-body">
         <div class="gs-row"><b>🏭 CO₂</b> <span class="gs-co2v"></span> <a data-fact="geo_co2">?</a></div>
         <input type="range" data-g="co2" min="${LO}" max="${HI}" step="1" value="${toSlider(ppm)}" aria-label="CO₂, ppm">
@@ -106,6 +138,17 @@ export class GeoSheet {
     if (!this.open) return;
     const w = this.host.world, g = w.geo;
     if (!g || !w.lp) return this.close();
+    if (this.tab === 'land') {
+      // кнопки инструментов — по выбору на карте (его меняют и кнопки 🔍 🌱 …)
+      this.el.querySelectorAll<HTMLElement>('button[data-gtool]').forEach((x) => x.classList.toggle('active', x.dataset.gtool === this.host.tool()));
+      const tip = this.el.querySelector<HTMLElement>('.gs-tip');
+      const txt = TOOL_HINT[this.host.tool() as GeoTool] ?? 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.';
+      if (tip && tip.textContent !== txt) tip.textContent = txt;
+      const ul = this.el.querySelector<HTMLElement>('.gs-sills');
+      const html = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
+      if (ul && ul.innerHTML !== html) ul.innerHTML = html;
+      return;
+    }
     const q = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
     const co2 = q<HTMLInputElement>('input[data-g=co2]');
     const sea = q<HTMLInputElement>('input[data-g=sea]');
@@ -135,10 +178,32 @@ export class GeoSheet {
     const t = e.target as HTMLElement;
     const f = t.closest('[data-fact]') as HTMLElement | null;
     if (f) return this.host.showFact(f.dataset.fact!);
+    const tabB = t.closest('button[data-gt]') as HTMLElement | null;
+    if (tabB) {
+      this.tab = tabB.dataset.gt === 'land' ? 'land' : 'climate';
+      return this.render();
+    }
+    const tl = t.closest('button[data-gtool]') as HTMLElement | null;
+    if (tl) {
+      const want = tl.dataset.gtool as GeoTool;
+      this.host.setTool(this.host.tool() === want ? null : want);
+      if (this.host.tool() === want) this.host.toast(TOOL_HINT[want]);
+      return this.update();
+    }
     const b = t.closest('button[data-g]') as HTMLElement | null;
     if (!b) return;
     const k = b.dataset.g, v = b.dataset.v ?? '';
     if (k === 'close') return this.close();
+    if (k === 'beringia') {
+      this.host.act({ k: 'strait', pts: beringiaLine(this.host.world), deep: false });
+      return this.render();
+    }
+    if (k === 'panama') {
+      const pts = panamaLine(this.host.world);
+      if (pts) this.host.act({ k: 'isthmus', pts });
+      else this.host.toast('🌉 Пролив Уоллеса уже перекрыт — или его нет в этом мире');
+      return this.render();
+    }
     if (k === 'co2nat') this.host.act({ k: 'co2', ppm: null });
     else if (k === 'seanat') this.host.act({ k: 'sea', dm: 0 });
     else if (k === 'ice') this.host.act({ k: 'iceAge', mode: v as 'cycle' | 'now' | 'end' | 'off' });

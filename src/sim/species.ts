@@ -44,6 +44,9 @@ export interface Species {
   mhue: number;
   mpat: number;
   mshape: number;
+  // ---- 🌋 живая планета ----
+  /** Материк (метка lm), где живёт больше всего особей; только при живой планете (без неё ключа нет). */
+  home?: number;
 }
 
 const ROMAN = ['', ' II', ' III', ' IV', ' V', ' VI', ' VII', ' VIII', ' IX', ' X'];
@@ -127,6 +130,8 @@ export interface SpeciesSave {
   /** ♾️ Вес тела в расстоянии (0 — без открытой эволюции). */
   bodyW?: number;
   oe?: boolean;
+  /** 🌋 Живая планета (ключ — только у миров с ней). */
+  lp?: boolean;
 }
 
 export class SpeciesRegistry {
@@ -139,6 +144,8 @@ export class SpeciesRegistry {
   bodyW = 0;
   /** ♾️ Открытая эволюция: имена по органам тела. */
   oe = false;
+  /** 🌋 Живая планета: пришельцы и «сёстры» — только с того же материка (Species.home). */
+  lp = false;
 
   get peekNextId(): number {
     return this.nextId;
@@ -146,7 +153,9 @@ export class SpeciesRegistry {
 
   /** ЖИВЫЕ ссылки — вызывающий обязан клонировать (одним structuredClone вместе с остальным). */
   save(): SpeciesSave {
-    return { all: [...this.all], nextId: this.nextId, names: [...this.names], bodyW: this.bodyW, oe: this.oe };
+    const s: SpeciesSave = { all: [...this.all], nextId: this.nextId, names: [...this.names], bodyW: this.bodyW, oe: this.oe };
+    if (this.lp) s.lp = true;
+    return s;
   }
 
   load(s: SpeciesSave): void {
@@ -155,6 +164,7 @@ export class SpeciesRegistry {
     this.names = new Map(s.names);
     this.bodyW = s.bodyW ?? 0;
     this.oe = s.oe ?? false;
+    this.lp = s.lp ?? false;
     // старые снимки (закладки) — без полей открытой эволюции
     for (const sp of this.all.values()) {
       if (sp.abil) continue;
@@ -233,7 +243,7 @@ export class SpeciesRegistry {
    * Определить вид новорождённого. Если он слишком далеко ушёл от основателя
    * своего вида — это новый вид.
    */
-  classify(g: Genome, parents: number[], tick: number, origin: string): { species: Species; isNew: boolean } {
+  classify(g: Genome, parents: number[], tick: number, origin: string, land?: number): { species: Species; isNew: boolean } {
     let best: Species | null = null;
     let bestD = Infinity;
     for (const id of parents) {
@@ -250,18 +260,22 @@ export class SpeciesRegistry {
     // а не плодим по виду на каждую особь.
     for (const sp of this.all.values()) {
       if (sp.extinct !== null || sp.parent !== best?.id) continue;
+      // 🌋 сестра за морем — не сестра: присоединяемся только к отколовшимся на том же материке
+      if (land !== undefined && sp.home !== undefined && sp.home !== land) continue;
       if (distance(g, sp.founder, this.bodyW) < SPECIES_LIMIT * 0.75) return { species: sp, isNew: false };
     }
     return { species: this.create(g, best?.id ?? null, tick, origin), isNew: true };
   }
 
   /** Подобрать существующий вид для «чужака» (кнопка добавить) или создать новый. Завезённые игроком — всегда новый вид. */
-  match(g: Genome, tick: number, origin: string, introduced = false): Species {
+  match(g: Genome, tick: number, origin: string, introduced = false, land?: number): Species {
     if (introduced) return this.create(g, null, tick, origin, true);
     let best: Species | null = null;
     let bestD = SPECIES_LIMIT * 0.5;
     for (const sp of this.all.values()) {
       if (sp.extinct !== null) continue;
+      // 🌋 пришелец сливается только с видом того материка, куда высадился
+      if (land !== undefined && sp.home !== land) continue;
       const d = distance(g, sp.founder, this.bodyW);
       if (d < bestD) {
         bestD = d;

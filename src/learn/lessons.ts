@@ -6,8 +6,9 @@ import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
 import {
   CAP8, decomposerSwitch, iceBridgeOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
-  startLessonEpidemic,
+  startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED,
 } from './scenarios';
+import { GEO, panamaLine } from '../sim/geo';
 
 // ---------------- помощники ----------------
 
@@ -37,9 +38,9 @@ const startPlanet = (c: LessonCtx, p: PlanetParams, speed: 0.1 | 0.3 | 1 = 0.3) 
   c.mem.gen = S(c).gen;
   c.show('planet');
 };
-const startEco = (c: LessonCtx, env: Partial<SurfaceEnv>, name: string, geo = false) => {
+const startEco = (c: LessonCtx, env: Partial<SurfaceEnv>, name: string, geo = false, seed = 42) => {
   c.show('eco');
-  c.surface.newWorld({ ...EARTH_ENV, ...env, name }, 42, geo);
+  c.surface.newWorld({ ...EARTH_ENV, ...env, name }, seed, geo);
   c.surface.changeSpeed(12);
   c.mem.rg = c.world.resetGen;
   c.mem.t0 = c.world.tick;
@@ -994,4 +995,167 @@ export const LESSONS: Lesson[] = [
       c.surface.act({ k: 'geoSpeed', v: 1 });
     },
   },
+  {
+    id: 'vic',
+    icon: '🌊',
+    title: 'Пролив рождает виды',
+    teaser: 'Море разрезает вид надвое — и через много поколений половины становятся разными видами.',
+    minutes: 8,
+    cards: ['geo.geo_vicariance', 'geo.geo_subspecies', 'geo.geo_hybrid', 'geo.geo_wallace'],
+    readout: (c) => vicReadout(c),
+    steps: [
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Остров на живой планете режут два пролива: мелкий посередине (в ледниковье он сохнет) и глубокий на юге — пролив Уоллеса. Основателей поселили по обе его стороны. Посмотрим, что станет с половинами одного вида, которые больше не встречаются. Геология здесь — обычная, ×1: эволюции нужны поколения.',
+        action: { label: '🌋 Новый мир: живая планета', run: (c) => startEco(c, {}, 'Пролив рождает виды', true, VIC_SEED) },
+        watch: {
+          hint: () => 'Ищем вид, который живёт по обе стороны закрытого пролива…',
+          test: (c) => !!vicNow(c.world)?.best,
+          giveUp: { ticks: 30000, text: 'Ни один вид не оказался по обе стороны пролива — так бывает. Можно повторить опыт.' },
+          onPass: (c) => (c.mem.sp0 = vicNow(c.world)!.splits),
+          done: (c) => {
+            const v = vicNow(c.world)!;
+            return `🌊 «${v.best!.name}» живёт по обе стороны пролива ${v.best!.sill}. Пешком его не перейти, поэтому у каждой половины теперь своя родословная. Шкала «поколений врозь» — в карточке вида и во вкладке «🌋 Планета».`;
+          },
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Каждый детёныш помечен: с какой он стороны. Если зверь переплывёт пролив и оставит там потомство, гены смешаются — и счёт поколений начнётся заново. Ждём, пока половины проживут врозь хотя бы пять поколений.',
+        watch: {
+          hint: (c) => {
+            const b = vicNow(c.world)?.best;
+            return b ? `«${b.name}»: поколений врозь ${b.ga}/${GEO.ISO_GEN}, гены разошлись на ${Math.round(100 * b.d)}%` : 'Сейчас ни один вид не разделён проливом — ждём';
+          },
+          test: (c) => (vicNow(c.world)?.best?.ga ?? 0) >= GEO.ISO_GEN / 2 || (vicNow(c.world)?.splits ?? 0) > num(c, 'sp0'),
+          giveUp: { ticks: 30000, text: 'В этот раз звери переплыли пролив — гены смешались (карточка «Встреча до развода»). Так тоже бывает.' },
+          done: (c) => {
+            const b = vicNow(c.world)?.best;
+            return b ? `🧬 Половины «${b.name}» живут врозь уже ${b.ga} поколений — это уже подвиды: гены разошлись на ${Math.round(100 * b.d)}%.` : '🌿 Один вид уже успел разделиться!';
+          },
+        },
+      },
+      {
+        text: 'Север острова холодный, юг — жаркий. Вопрос.',
+        quiz: {
+          q: 'Что ускорит расхождение половин?',
+          options: ['Одинаковый климат по обе стороны', 'Разный климат по обе стороны пролива', 'Климат тут ни при чём'],
+          correct: 1,
+          explain: 'Мутации случайны, но отбор в разном климате тянет половины в разные стороны: на юге выгоднее любить жару, на севере — холод. Поэтому половины расходятся быстрее, чем от одной случайности.',
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Ждём главного: когда поколений врозь наберётся достаточно, а гены разойдутся, половины станут двумя видами — и больше не смогут скрещиваться, даже если встретятся.',
+        watch: {
+          hint: (c) => {
+            const b = vicNow(c.world)?.best;
+            return b ? `«${b.name}»: поколений врозь ${b.ga}/${GEO.ISO_GEN} · гены разошлись ${Math.round(100 * b.d)}% (нужно ${Math.round(100 * GEO.ISO_D)}%)` : 'Ждём…';
+          },
+          test: (c) => (vicNow(c.world)?.splits ?? 0) > num(c, 'sp0'),
+          giveUp: { ticks: 30000, text: 'В этот раз мост вернулся раньше или звери переплыли — гены смешались, и половины остались одним видом. Это тоже бывает (карточка «Встреча до развода»).' },
+          done: () => '🌿 Викарианс: теперь это два вида. Летопись и древо жизни (вкладка «Древо») показывают, от кого откололся новый вид.',
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Сравним фауны по обе стороны пролива Уоллеса.',
+        watch: {
+          hint: () => '',
+          test: () => true,
+          done: (c) => {
+            const f = wallaceFaunas(c.world);
+            if (!f) return '';
+            return `К северу от пролива — ${f.north} видов суши, к югу — ${f.south}; общих — ${f.shared}.${f.onlySouth.length ? ` Только на юге: ${f.onlySouth.slice(0, 3).map((n) => `«${n}»`).join(', ')}.` : ''} Так и на Земле: по разные стороны линии Уоллеса — разные звери.`;
+          },
+        },
+      },
+    ],
+  },
+  {
+    id: 'panama',
+    icon: '🌉',
+    title: 'Опыт «Панама»',
+    teaser: 'Соединим перешейком две давно разделённые фауны и посмотрим, кто кого.',
+    minutes: 7,
+    cards: ['geo.geo_gabi', 'geo.geo_wallace', 'geo.geo_landbridge'],
+    readout: (c) => panamaReadout(c),
+    steps: [
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'На юге острова — пролив Уоллеса: такой глубокий, что пешком его не перейти никогда. Дадим двум фаунам пожить врозь три года острова.',
+        action: { label: '🌋 Новый мир: живая планета', run: (c) => startEco(c, {}, 'Опыт «Панама»', true, PANAMA_SEED) },
+        watch: {
+          hint: (c) => `Фауны живут врозь… ${Math.min(ticks(c), 3 * YEAR)}/${3 * YEAR}`,
+          test: (c) => ticks(c) >= 3 * YEAR && !!wallaceFaunas(c.world),
+          giveUp: { ticks: 6 * YEAR, text: 'Мир без живой планеты — нажмите «↻ Ещё раз».' },
+          done: (c) => {
+            const f = wallaceFaunas(c.world)!;
+            return `К северу от пролива — ${f.north} видов суши, к югу — ${f.south}, общих — ${f.shared}.`;
+          },
+        },
+      },
+      {
+        text: 'Сейчас мы соединим север и юг перешейком.',
+        quiz: {
+          q: 'Кто выиграет, когда фауны встретятся?',
+          options: ['Поровну: сколько уйдёт на юг, столько придёт на север', 'Чаще — звери большой, северной части: их больше, и они закалены конкуренцией', 'Всегда южане — они у себя дома'],
+          correct: 1,
+          explain: 'Обмен редко бывает честным. Когда сомкнулся Панамский перешеек, северяне заселили Южную Америку намного успешнее, чем южане — Северную. Но остров — не Америка: посмотрим, что выйдет здесь.',
+        },
+      },
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Насыплем перешеек через пролив Уоллеса (то же можно сделать самому: «🛠 Стихии → Земля → 🌉 Перешеек»).',
+        action: {
+          label: '🌉 Соединить перешейком',
+          run: (c) => {
+            c.show('eco');
+            const pts = panamaLine(c.world);
+            if (pts) c.surface.act({ k: 'isthmus', pts });
+            c.mem.t0 = c.world.tick;
+          },
+        },
+        watch: {
+          hint: () => 'Перешеек поднимается из моря…',
+          test: (c) => !!panamaNow(c.world)?.open,
+          giveUp: { ticks: 3000, text: 'Перешеек не соединил берега — попробуйте нарисовать свой: «🛠 Стихии → Земля → 🌉 Перешеек».' },
+          done: () => '🌉 Перешеек лёг: север и юг соединились. Теперь звери могут перейти пешком.',
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Смотрим два года: кто переходит, кто приживается «за мостом», кто из местных исчезает.',
+        watch: {
+          hint: (c) => {
+            const p = panamaNow(c.world);
+            return p ? `Перешли: с севера ${p.cross[0]}, с юга ${p.cross[1]} · прижились: с севера ${p.fromN}, с юга ${p.fromS} · вымерли местных: ${p.lost}` : '';
+          },
+          test: (c) => !!panamaNow(c.world)?.reported,
+          giveUp: { ticks: 3 * YEAR },
+          done: (c) => {
+            const p = panamaNow(c.world)!;
+            const who = p.fromN > p.fromS ? 'Северяне оказались успешнее — как в настоящей Америке.' : p.fromN < p.fromS ? 'Здесь успешнее оказались южане — остров не Америка, и это честный итог опыта.' : 'Ничья — обмен вышел равным.';
+            return `🌎 Итог обмена: с севера прижились ${p.fromN} видов, с юга — ${p.fromS}; вымерли местных — ${p.lost}. ${who} Сравнить с миром без перешейка можно машиной времени: «⏪» назад до перешейка и «Что если».`;
+          },
+        },
+      },
+    ],
+  },
 ];
+
+/** 🌋 Живая строка урока «Пролив рождает виды». */
+const vicReadout = (c: LessonCtx) => {
+  const v = vicNow(c.world);
+  if (!v) return '';
+  return `🌊 разделённых видов ${v.iso}${v.best ? ` · «${v.best.name}» врозь ${v.best.ga}/${GEO.ISO_GEN}` : ''} · 🌿 новых видов ${v.splits} · 🔀 утечек ${v.leaks}`;
+};
+/** 🌋 Живая строка урока «Опыт „Панама“». */
+const panamaReadout = (c: LessonCtx) => {
+  const p = panamaNow(c.world);
+  if (!p) return '';
+  return p.age < 0 ? `🌊 пролив Уоллеса закрыт · ${iceReadout(c)}` : `🌉 мосту ${Math.floor(p.age / YEAR)} г. · ⟶ ${p.cross[0]} ⟵ ${p.cross[1]} · прижились ${p.fromN}/${p.fromS} · вымерли ${p.lost}`;
+};

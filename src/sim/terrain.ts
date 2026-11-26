@@ -105,6 +105,8 @@ export interface DeriveInput {
   plate: PlateView | null;
   lakes: boolean;
   shadow: boolean;
+  /** 🌋 Затравки озёр (клетки котловин от тающего льда): озеро — только впадина, где есть затравка. */
+  lakeSeeds?: ArrayLike<number> | null;
 }
 export interface DeriveOut {
   /** Клетки, у которых сменился биом, класс реки или влажность (буфер переиспользуется — читать сразу). */
@@ -115,6 +117,8 @@ export interface DeriveOut {
   /** [c0, r0, c1, r1] изменённых клеток (пустой — c0 > c1). */
   bbox: [number, number, number, number];
 }
+/** 🌋 Озёра от тающего льда: впадина глубже MIN (9 м) и не меньше CELLS клеток; край — глубже EDGE (3 м). */
+export const LAKE = { MIN: 0.003, CELLS: 4, EDGE: 0.001 };
 export const BASE_INPUT: DeriveInput = { seaQ: 0, elevD: null, plate: null, lakes: false, shadow: false };
 
 /** Входы на исходном уровне: рельеф — ровно тот, что дал generate(). */
@@ -132,6 +136,11 @@ export function deriveHash(inp: DeriveInput): number {
   const f = new Float64Array([inp.seaQ, inp.plate ? inp.plate.ox : NaN, inp.plate ? inp.plate.oy : NaN, inp.lakes ? 1 : 0, inp.shadow ? 1 : 0]);
   const u = new Uint32Array(f.buffer);
   for (let i = 0; i < u.length; i++) h = Math.imul(h ^ u[i], 16777619);
+  const ls = inp.lakes ? inp.lakeSeeds : null;
+  if (ls) {
+    h = Math.imul(h ^ ls.length, 16777619);
+    for (let i = 0; i < ls.length; i++) h = Math.imul(h ^ ls[i], 16777619);
+  }
   const d = inp.elevD;
   if (d) {
     for (let i = 0; i < d.length; i++) h = Math.imul(h ^ (d[i] & 0xffff), 16777619);
@@ -190,8 +199,10 @@ export class Terrain {
   mountainLevel = 0;
   /** 🌋 Отпечаток входов пересчёта (deriveHash); 0 — исходный рельеф. */
   rev = 0;
-  /** 🌋 Озёра (этап ледников; пока всегда null). */
+  /** 🌋 Озёра от тающего льда: номер озера + 1 в lakes (null — озёр нет). */
   lake: Uint8Array | null = null;
+  /** 🌋 Озёра по именам: наименьшая клетка, число клеток. */
+  lakes: { name: string; cell: number; n: number }[] = [];
   /** 🌋 Исходный рельеф — копируется лениво, при первом пересчёте (миры без живой планеты ничего не выделяют). */
   private base: TerrainBase | null = null;
   private hbuf: HydroBuf | null = null;
@@ -510,6 +521,8 @@ export class Terrain {
     const c = this.index(x, y);
     const cx = c % this.cols;
     const cy = (c / this.cols) | 0;
+    const lk = this.lake ? this.lake[c] : 0;
+    if (lk > 0 && this.lakes[lk - 1]) return this.lakes[lk - 1].name;
     let trib = -1;
     for (let dy = -2; dy <= 2; dy++) {
       for (let dx = -2; dx <= 2; dx++) {
@@ -620,7 +633,7 @@ export class Terrain {
    */
   derive(inp: DeriveInput): DeriveOut {
     if (inp.plate) throw new Error('Terrain.derive: дрейф плит — этап 3');
-    if (inp.lakes || inp.shadow) throw new Error('Terrain.derive: озёра и дождевая тень — следующие этапы');
+    if (inp.shadow) throw new Error('Terrain.derive: дождевая тень — этап 3');
     const base = this.ensureBase();
     const D = this.dbuf!;
     const n = this.cols * this.rows;
@@ -643,6 +656,7 @@ export class Terrain {
       this.springs = base.springs.slice();
       this.seaLevel = base.sea;
       this.lake = null;
+      this.lakes = [];
       this.rev = 0;
     } else {
       this.seaLevel = base.sea + inp.seaQ;
@@ -663,6 +677,10 @@ export class Terrain {
       moist.set(base.moist);
       for (let i = 0; i < n; i++) biome[i] = this.classify(elev[i], moist[i], baseTemp[i]);
       this.hydrology(true);
+      this.lakes = [];
+      this.lake = null;
+      // 🌋 озёра: впадины заливки с затравкой — мелководье; реки после этого — заново (впадают в озёра)
+      if (inp.lakes && inp.lakeSeeds && inp.lakeSeeds.length && this.fillLakes(inp.lakeSeeds)) this.hydrology(true);
       this.rev = deriveHash(inp);
     }
     // что изменилось: биом, класс реки или влажность (от них зависят статичные поля почвы)
@@ -680,6 +698,53 @@ export class Terrain {
     }
     if (landChanged && this.rev !== 0) this.relabel();
     return { changed: D.changed.subarray(0, m), prev: D.biome, landChanged, bbox: [c0, r0, c1, r1] };
+  }
+
+  /**
+   * Озёра (после hydrology: filled — уровень заливки). От каждой затравки — 4-связная впадина суши глубже LAKE.EDGE;
+   * озеро, если глубже LAKE.MIN и не меньше LAKE.CELLS клеток. Без случайностей; имя — по наименьшей клетке.
+   */
+  private fillLakes(seeds: ArrayLike<number>): boolean {
+    const { cols, elev, biome } = this;
+    const n = cols * this.rows;
+    const filled = this.hbuf!.filled;
+    const D = this.dbuf!;
+    const lab = D.label, q = D.queue;
+    lab.fill(0);
+    const lake = new Uint8Array(n);
+    let any = false;
+    const wet = (i: number) => biome[i] <= B.Shallow;
+    for (let k = 0; k < seeds.length; k++) {
+      const s = seeds[k];
+      if (s < 0 || s >= n || lab[s] || wet(s) || filled[s] - elev[s] < LAKE.EDGE) continue;
+      let qt = 0, deep = 0, minCell = s;
+      q[qt++] = s;
+      lab[s] = 1;
+      for (let qh = 0; qh < qt; qh++) {
+        const i = q[qh];
+        const dd = filled[i] - elev[i];
+        if (dd > deep) deep = dd;
+        if (i < minCell) minCell = i;
+        const x = i % cols;
+        const nb0 = x > 0 ? i - 1 : -1, nb1 = x < cols - 1 ? i + 1 : -1, nb2 = i - cols, nb3 = i + cols;
+        for (const j of [nb0, nb1, nb2, nb3]) {
+          if (j < 0 || j >= n || lab[j] || wet(j) || filled[j] - elev[j] < LAKE.EDGE) continue;
+          lab[j] = 1;
+          q[qt++] = j;
+        }
+      }
+      if (deep < LAKE.MIN || qt < LAKE.CELLS) continue;
+      const id = Math.min(255, this.lakes.length + 1);
+      for (let k2 = 0; k2 < qt; k2++) {
+        lake[q[k2]] = id;
+        biome[q[k2]] = B.Shallow;
+      }
+      any = true;
+      const r = mulberry32(this.seed ^ minCell ^ 0x1a4e);
+      this.lakes.push({ name: 'оз. ' + properName(r), cell: minCell, n: qt });
+    }
+    if (any) this.lake = lake;
+    return any;
   }
 
   /** Регионы после смены суши: исходная суша — своя метка, новая — ближайшей исходной суши (BFS без предела), вода — −1. */

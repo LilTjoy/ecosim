@@ -17,7 +17,7 @@ interface Particle {
 }
 
 /** Линзы «микромира»: что раскрашивает слой клеток. */
-export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease' | 'depth';
+export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease' | 'depth' | 'refugia';
 
 /** Что игрок уже успел увидеть на экране (для карточек фактов; читает view). */
 export interface Seen {
@@ -107,6 +107,8 @@ const SPRING_RINGS = ['#8a4a2a', '#e88a2a', '#e8d24a', '#3fb07a', '#2a7fbf'];
 const MIC_RAMP = [[20, 26, 51], [107, 63, 160], [255, 122, 217]];
 const PLANKTON_RAMP = [[11, 31, 77], [27, 143, 191], [127, 224, 122]];
 /** 🌊 Линза глубин: мелко — светло-бирюзовое, глубоко — тёмно-синее. */
+/** 🏔 Цвета рефугиумов (по порядку: крупнейший — первый). */
+const REF_COLORS: [number, number, number][] = [[90, 200, 120], [240, 180, 70], [120, 160, 240], [230, 110, 160], [170, 120, 230], [100, 210, 210], [210, 210, 90], [240, 130, 90]];
 const DEPTH_RAMP = [[150, 235, 230], [40, 120, 200], [8, 22, 70]];
 
 interface Deco {
@@ -1052,7 +1054,19 @@ export class SurfaceRenderer {
         out[o] = 170; out[o + 1] = 160; out[o + 2] = 118; out[o + 3] = 0.8 * 255;
       }
       if (H <= 0.02) return true;
-    } else if (H <= 0.02 || water) return false;
+    } else if (water) return false;
+    else if (H <= 0.02) {
+      // 🪨 морена — серые камни там, докуда доходил лёд
+      const F = w.fx8;
+      if (!F || !(F[3 * this.pixWater.length + i] & 1)) return false;
+      const t = w.terrain;
+      const h = hash2((i % t.cols) * 1.7, Math.floor(i / t.cols) * 1.7);
+      if (h < 0.35) return false;
+      out[o] = out[o + 1] = 150 + 40 * h;
+      out[o + 2] = 140 + 40 * h;
+      out[o + 3] = 0.55 * 255;
+      return true;
+    }
     const t = w.terrain;
     const k = Math.min(0.9, 3 * H);
     const n = (hash2((i % t.cols) * 0.9, Math.floor(i / t.cols) * 0.9) - 0.5) * 22 * Math.min(1, H * 2);
@@ -1138,12 +1152,45 @@ export class SurfaceRenderer {
         out[o + 3] = 0.85 * 255;
         return;
       }
+      case 'refugia': {
+        // 🏔 рефугиумы последнего пика ледниковья: свой цвет у каждого; лёд — белый, прочая суша — серая
+        if (b.water) {
+          out[o] = 10; out[o + 1] = 20; out[o + 2] = 40; out[o + 3] = 0.55 * 255;
+          return;
+        }
+        const H = w.ice ? w.ice[i] : 0;
+        if (H > 0.1) {
+          out[o] = out[o + 1] = 235; out[o + 2] = 250; out[o + 3] = 0.85 * 255;
+          return;
+        }
+        const k = this.refugiumOf(t.region[i]);
+        if (k < 0) {
+          out[o] = out[o + 1] = out[o + 2] = 70; out[o + 3] = 0.6 * 255;
+          return;
+        }
+        const c = REF_COLORS[k % REF_COLORS.length];
+        out[o] = c[0]; out[o + 1] = c[1]; out[o + 2] = c[2]; out[o + 3] = 0.6 * 255;
+        return;
+      }
       default:
         out[o] = 10;
         out[o + 1] = 12;
         out[o + 2] = 20;
         out[o + 3] = 0.5 * 255;
     }
+  }
+
+  private refCache: { key: unknown; m: Map<number, number> } | null = null;
+  /** Номер рефугиума, в который входит базовый регион (−1 — ни в один). */
+  refugiumOf(region: number): number {
+    const R = this.world.geo?.refugia ?? null;
+    if (!R || region < 0) return -1;
+    if (!this.refCache || this.refCache.key !== R) {
+      const m = new Map<number, number>();
+      R.forEach((r, k) => r.regions.forEach((x) => { if (!m.has(x)) m.set(x, k); }));
+      this.refCache = { key: R, m };
+    }
+    return this.refCache.m.get(region) ?? -1;
   }
 
   /** 🌋 Высота клетки от исходного (межледникового) уровня моря, м: −50 — мелководье, ниже −180 — глубина. */

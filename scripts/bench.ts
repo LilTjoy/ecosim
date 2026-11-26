@@ -11,6 +11,9 @@
 // 🌋 живая планета: --geo=0|1 (settings.livePlanet; с --geo=0 ключа нет — мир до бита прежний, ворота G0, scripts/geo-g0.sh);
 //   --seaStep=N — каждые N тактов море шагает на GEO.SEA_STEP (лесенка 0…−0.04 и обратно) с пересчётом рельефа (P1);
 //   строка «GEO perf:» (пересчёты, мс p50/p99/max) — только при --geo=1.
+//   Этап 1b–1c: строка «GEO 1b:» (половины видов, разделения по барьерам и такт первого, утечки генов, пришельцы,
+//   рефугиумы и медиана y зверей суши на каждом пике, морены, котловины, озёра); --ymed=N — медиана y зверей суши
+//   каждые N тактов (строка YMED, и без живой планеты — пара для G4); ручки GEO (--ISO_GEN=6 …) и --sill=0.
 import * as WM from '../src/sim/world';
 const { World, guildOf } = WM;
 import { runTm } from './tmBench';
@@ -181,7 +184,10 @@ const seaStep = Number(flags.seaStep ?? 0);
 const geoMs = GM.GEO_PERF.ms;
 // 🌋 стражи стадии 1a: размах сдвига, моря и льда; пороги (сох ли мелкий, глубок ли Уоллес); переходы пеших через порог
 const gt = { sMin: 9, sMax: -9, seaMin: 9, seaMax: -9, iceMax: 0, vMin: 9, vMax: -9, sillOpenT: 0, sillOpens: 0, wasOpen: false, wallaceDeep: true, wallaceSplit: true, side: new Map<number, number>(), cross: 0, crossers: new Set<number>(), sillY: [0, 0], lgm: [] as number[] };
-if (W.lp) { const lg0 = W.log; W.log = function (this: any, text: string, kind: string, x?: number, y?: number, fact?: string) { if (fact === 'geo_lgm') gt.lgm.push(this.tick); return lg0.call(this, text, kind, x, y, fact); }; }
+// 🌋 1b: на каждом пике — рефугиумы и медиана y зверей суши; первые разделения по барьерам; --ymed=N — медиана y каждые N тактов (и без живой планеты, для пары G4)
+const g1b = { atMax: [] as string[], first: { sill: -1, wallace: -1, player: -1 } as Record<string, number>, ymed: [] as string[] };
+const ymedOf = () => { const ys: number[] = []; for (const c of w.creatures) if (c.alive && c.g.swim <= 0.6) ys.push(c.y); ys.sort((a, b) => a - b); return ys.length ? Math.round(ys[ys.length >> 1]) : -1; };
+if (W.lp) { const lg0 = W.log; W.log = function (this: any, text: string, kind: string, x?: number, y?: number, fact?: string) { const r = lg0.call(this, text, kind, x, y, fact); if (fact === 'geo_lgm') gt.lgm.push(this.tick); if (fact === 'geo_refugia') g1b.atMax.push(`${this.tick}:ref${this.geo.refugia?.length ?? 0}:y${ymedOf()}`); return r; }; }
 if (W.lp) { const s0 = W.geo.sills.find((s: any) => s.kind === 'sill'); if (s0) gt.sillY = [s0.y0 * W.cell, s0.y1 * W.cell]; }
 const geoTrack = (t: number) => {
   const g = W.geo, sh = g.geoShift + w.climate.shift;
@@ -211,6 +217,8 @@ for (let t = 1; t <= T; t++) {
   }
   w.step();
   if (W.lp && t % 60 === 0) geoTrack(t);
+  if (flags.ymed && t % Number(flags.ymed) === 0) g1b.ymed.push(`${t}:${ymedOf()}`);
+  if (W.lp && t % 200 === 0) { const S = W.geo.stats; if (S.sSill && g1b.first.sill < 0) g1b.first.sill = t; if (S.sWall && g1b.first.wallace < 0) g1b.first.wallace = t; if (S.sPlay && g1b.first.player < 0) g1b.first.player = t; }
   if (OE) {
     oe.creSum += w.creatures.length;
     // O11: наибольшее число носителей каждого модуля за прогон (раз в 500 тактов)
@@ -389,6 +397,7 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
   (tool ? `\n toolSpecies at end: n=${tool.sp.count} extinct=${tool.sp.extinct}` : '') +
   `\n extinct(guild first hit 0): ${JSON.stringify(extinct)} zeroSamples(of ${T / 500}): ${JSON.stringify(zero)} lastZero: ${JSON.stringify(lastZero)}${rivers}\n top: ` +
   w.species.living().slice(0, 8).map(s => `${s.name}[${s.count}] sz${s.mean.size.toFixed(1)} d${s.mean.diet.toFixed(2)} sw${s.mean.swim.toFixed(1)}`).join(' | ') + oeRep +
+  (g1b.ymed.length ? `\n YMED ${g1b.ymed.join(' ')}` : '') +
   (!OE && shg.on ? `\n shallowGrass=${f2(shg.k ? shg.sum / shg.k : undefined, 3)}` : '') +
   (W.lp ? (() => {
     const a = [...geoMs].sort((x, y) => x - y), q = (p: number) => (a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))].toFixed(2) : '-');
@@ -396,5 +405,7 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
     if (flags.geoMs) console.log(geoMs.map((x) => x.toFixed(1)).join(" "));
     const C = 100 / 3;
     const geoLine = `\n GEO: glacials=${W.geo.stats.glacials} bridges=${W.geo.stats.bridges} sillOpens=${gt.sillOpens} sillOpenYears=${(gt.sillOpenT / 6000).toFixed(2)} wallaceDeep=${gt.wallaceDeep ? 1 : 0} wallaceSplit=${gt.wallaceSplit ? 1 : 0} shift=${gt.sMin.toFixed(3)}..${gt.sMax.toFixed(3)} (${(gt.sMin * C).toFixed(1)}..${(gt.sMax * C).toFixed(1)} °C) Vg=${gt.vMin.toFixed(2)}..${gt.vMax.toFixed(2)} sea=${GM.metres(gt.seaMin)}..${GM.metres(gt.seaMax)} м iceMax%=${(100 * gt.iceMax).toFixed(1)} crossers=${gt.cross} tracked=${gt.side.size} kyr=${GM.geoKyr(W.geo).toFixed(0)} lgmAt=${gt.lgm.join(',') || '-'}`;
-    return geoLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
+    const S = W.geo.stats, iso = W.geo.isolates as any[];
+    const isoLine = `\n GEO 1b: iso=${iso.length} [${iso.map((r: any) => `${r.sill}:${r.sp}:ga${r.ga}:d${r.d.toFixed(2)}:L${r.leak}:${r.parts.join('/')}`).join(' ')}] splits=${S.splits} sill=${S.sSill}@${g1b.first.sill} wallace=${S.sWall}@${g1b.first.wallace} player=${S.sPlay} leaks=${S.leaks} invaders=${S.invaders} bridgesRec=${W.geo.bridges.length} refugiaTot=${S.refugia} atMax=${g1b.atMax.join(',') || '-'} moraines=${S.moraines} kettles=${S.kettles} lakes=${S.lakes}/${t1.lakes.length} seeds=${W.geo.lakeSeeds.length} minElevD=${Math.min(...(W.elevD as Int16Array))} sp=${w.species.living().length}`;
+    return geoLine + isoLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
   })() : ''));

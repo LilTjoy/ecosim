@@ -107,9 +107,16 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   let j = 0;
   const t0 = now();
   let evac = 0;
+  // этап 1c: ещё до 3 точек «посреди выпахивания» — сразу после пачки правок ледника (очередь pend не пуста, мазка нет)
+  let scourCaps = 0, lastScour = -1e9;
   while (A.tick < T) {
     if (capAt.has(`${A.tick}:-1`)) {
       caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
+      open = null;
+    } else if (scourCaps < 3 && A.tick % GEO.SCOUR_EVERY === 0 && A.geo!.pend.length > 0 && A.tick - lastScour >= T / 10 && !ops.some((o) => o.t === A.tick)) {
+      caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
+      scourCaps++;
+      lastScour = A.tick;
       open = null;
     }
     while (j < ops.length && ops[j].t === A.tick) {
@@ -170,7 +177,7 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   const workerOk = !!done && done.digest[0] === dEnd;
   const midN = caps.filter((c) => c.pend > 0).length;
   const d1 = okN === caps.length && workerOk && cover.length === 0 && midN >= 3 && A.terrain.rev !== 0;
-  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
+  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} midScour=${scourCaps} lakes=${A.terrain.lakes.length} kettles=${A.geo!.stats.kettles} isolates=${A.geo!.isolates.length} splits=${A.geo!.stats.splits} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
   console.log(` caps: ${caps.map((c) => `${c.t}${c.j >= 0 ? `/${c.j}` : ''}(pend ${c.pend}, sea ${c.sea} м)`).join(' ')} | glacials=${A.geo!.stats.glacials} bridges=${A.geo!.stats.bridges} Vg=${A.geo!.Vg.toFixed(2)}`);
 
   // ---------------- D2 ----------------

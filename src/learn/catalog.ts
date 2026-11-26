@@ -28,7 +28,7 @@ export const ISLAND_KEYS = ['rivers', 'soils', 'permafrost', 'succession'];
 
 export const FIELD_ORDER: Field[] = ['Астрономия', 'Физика', 'Химия', 'Геология', 'Климат', 'Биология', 'Вероятность'];
 
-export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro' | 'discover' | 'time';
+export type EcoTab = 'species' | 'tree' | 'web' | 'charts' | 'log' | 'micro' | 'discover' | 'time' | 'geo';
 
 export type SimLink =
   | { view: 'planet'; params?: Partial<PlanetParams>; event?: string; match?: string; t?: number; label?: string }
@@ -53,7 +53,11 @@ const GENES = ['size', 'speed', 'sense', 'diet', 'tempPref', 'swim', 'social', '
 
 function surfaceLink(key: string, source: CardSource): SimLink | undefined {
   // 🌋 карточки живой планеты — к уроку о ледниках
-  if (source === 'geo') return { view: 'lesson', id: 'ice', label: '❄️ Урок «Ледниковый период»' };
+  if (source === 'geo') {
+    if (['geo_vicariance', 'geo_subspecies', 'geo_hybrid', 'geo_wallace', 'geo_flyers'].includes(key)) return { view: 'lesson', id: 'vic', label: '🌊 Урок «Пролив рождает виды»' };
+    if (key === 'geo_gabi') return { view: 'lesson', id: 'panama', label: '🌉 Урок «Опыт „Панама“»' };
+    return { view: 'lesson', id: 'ice', label: '❄️ Урок «Ледниковый период»' };
+  }
   if (source !== 'surface') {
     if (key === 'o2decay') return { view: 'eco', env: { o2: 0.08 }, envName: 'Мир с O₂ 8%', tab: 'micro', label: '▶ Новый мир: O₂ 8%' };
     if (key === 'stromatolites') return { view: 'eco', env: { landLife: false }, envName: 'Мир до выхода на сушу', tab: 'micro', label: '▶ Новый мир: до выхода на сушу' };

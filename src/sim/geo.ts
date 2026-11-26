@@ -8,6 +8,7 @@ import { clamp, mulberry32 } from '../lib/random';
 import { BASE_INPUT, BIOMES, B, deriveHash, properName, type DeriveInput } from './terrain';
 import type { Creature, World } from './world';
 import type { Genome } from './genome';
+import { bridgeClosed, bridgeOpened, meltOnMax, rangeOnGlacial, rangeOnInterglacial, refugiaAtMax, updateHomes } from './geoTrack';
 
 /** Такты года (= world.YEAR; свой — чтобы не было цикла импорта при вычислении таблицы). */
 const YEAR = 6000;
@@ -41,6 +42,16 @@ export const GEO = {
   ICE_FOOD: 1.25,
   /** «❄️ Ледниковье сейчас» / «💧 Конец ледниковья»: постоянный сдвиг вместо орбиты (единицы температуры). */
   PIN_COLD: -0.13, PIN_WARM: 0.03,
+  /** Выпахивание: раз в SCOUR_EVERY тактов (пачкой, а не каждый проход) — SCOUR×(проходов)×скорость под льдом H > 0.5. */
+  SCOUR_EVERY: 600,
+  /** Затравок озёр (котловин) не больше. */
+  LAKE_SEEDS: 2000,
+  /** Сколько пеших особей вида на каждой стороне нужно, чтобы следить за половинами; ниже — запись забыта. */
+  ISO_KEEP: 4,
+  /** Перешеек игрока: суша на +0,035 (≈ +105 м) над исходным морем; пролив игрока — до −0,13 (как Уоллес) или мелкий (порог). */
+  ISTHMUS_H: 0.035,
+  /** Полуширина пролива или перешейка игрока, клеток. */
+  LINE_HW: 1.6,
 } as const;
 
 /** Пролив, который режет остров: мелкий порог (сохнет в ледниковье), пролив Уоллеса (глубокий всегда) или игрока. */
@@ -56,19 +67,40 @@ export interface SillRec {
   /** Ряды полосы [y0, y1). */
   y0: number;
   y1: number;
+  /** Ось пролива (px, от x0,y0 к x1,y1) и его полуширина: стороны моста — по знаку векторного произведения. */
+  p: [number, number, number, number];
+  hw: number;
 }
 
+/** Сухопутный мост через порог: кто прошёл, кто прижился за ним, кто из местных вымер. Стороны — 0 (север/запад), 1. */
 export interface BridgeRec {
-  sill: number; open: number; close: number | null; a: number; b: number; cross: [number, number]; seen: number[];
-  invaders: { sp: number; from: 0 | 1; t: number; since: number }[]; lost: number[]; reported: boolean;
+  sill: number; open: number; close: number | null;
+  /** Видов «родом» с каждой стороны при открытии. */
+  a: number; b: number;
+  /** Переходов (по одному на особь) со стороны 0 и со стороны 1; летуны — отдельно. */
+  cross: [number, number]; fly: number;
+  /** Особи, уже посчитанные в cross (не больше 2000). */
+  seen: Set<number>;
+  /** Вид → его сторона (где было больше особей, когда его впервые увидели у моста). */
+  nat: Map<number, 0 | 1>;
+  /** Пришельцы: t — когда прижились (≥ INVADE_N особей ≥ INVADE_T тактов), −1 — пока нет. */
+  invaders: { sp: number; from: 0 | 1; t: number; since: number }[];
+  /** Местные виды, вымершие при прижившихся пришельцах. */
+  lost: number[]; reported: boolean;
 }
+/** Половины вида по разные стороны барьера: метки сторон, поколения врозь, расхождение генов, утечки генов. */
 export interface IsoRec {
-  sp: number; t: number; parts: number[]; gen0: number[]; ga: number; d: number; half: boolean;
+  sp: number; t: number; sill: number;
+  /** Особей на сторонах (последний обход). */
+  parts: number[]; gen0: number[]; ga: number; d: number; half: boolean;
   /** id особи → сторона барьера. */
   tag: Map<number, 0 | 1>;
-  leak: number;
+  /** Утечек генов (переход или скрещивание через барьер); dirty — счёт поколений сбросить на обходе. */
+  leak: number; dirty: boolean; mixLogged: boolean;
+  /** Основатели за проливом Уоллеса (летопись разделений — сводкой). */
+  founder: boolean;
 }
-export interface RefRec { region: number; lm: number; species: number[]; n: number }
+export interface RefRec { region: number; lm: number; species: number[]; n: number; /** базовые регионы рефугиума */ regions: number[] }
 
 /** Состояние живой планеты. Все ключи есть всегда (null, а не «нет»): loadWorld заменяет его целиком. */
 export interface GeoState {
@@ -87,11 +119,19 @@ export interface GeoState {
   fire: number[]; sills: SillRec[];
   lands: { n: number; anchors: number[]; sizes: number[] };
   bridges: BridgeRec[]; isolates: IsoRec[]; refugia: RefRec[] | null;
-  /** [вид, северная граница y] */ rangeRef: [number, number][];
-  /** виды, широко распространённые при пересечении 20 % */ wide: number[];
+  /** Такт последних рефугиумов (линза 🏔 — два года). */
+  refT: number;
+  /** [вид, северная граница y] в начале ледниковья */ rangeRef: [number, number][];
+  /** виды, чей ареал отступил на юг в этом цикле */ wide: number[];
+  /** Разделения основателей за проливом Уоллеса, ещё не записанные в летопись (сводка), и такт последней сводки. */
+  wsplit: string[]; wLogT: number;
+  /** Затравки озёр — клетки котловин (вход пересчёта рельефа). */
+  lakeSeeds: number[];
   extRing: number[]; lastMass: number; lastCause: number;
   plate: { rift: number; ox: number; oy: number; vx: number; vy: number; next: number; collided: boolean } | null;
-  stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number };
+  stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number;
+    leaks: number; invaders: number; moraines: number; kettles: number; lakes: number; refugia: number;
+    /** Разделения по барьерам: мелкий порог, Уоллес, пролив игрока. */ sSill: number; sWall: number; sPlay: number };
 }
 
 export function newGeo(seed: number): GeoState {
@@ -116,9 +156,9 @@ export function newGeo(seed: number): GeoState {
     pend: [], kettleQ: [], shadow: false, lakes: false,
     aer: 0, dark: 0, geoShift: 0, isolatedUntil: 0, lastLogT: -1e9,
     fire: [], sills: [], lands: { n: 0, anchors: [], sizes: [] },
-    bridges: [], isolates: [], refugia: null, rangeRef: [], wide: [],
+    bridges: [], isolates: [], refugia: null, refT: -1e9, rangeRef: [], wide: [], wsplit: [], wLogT: -1e9, lakeSeeds: [],
     extRing: [], lastMass: -1e9, lastCause: -1e9, plate: null,
-    stats: { glacials: 0, bridges: 0, splits: 0, vicariance: 0, impacts: 0, eruptions: 0, fires: 0, massExt: 0, derives: 0 },
+    stats: { glacials: 0, bridges: 0, splits: 0, vicariance: 0, impacts: 0, eruptions: 0, fires: 0, massExt: 0, derives: 0, leaks: 0, invaders: 0, moraines: 0, kettles: 0, lakes: 0, refugia: 0, sSill: 0, sWall: 0, sPlay: 0 },
   };
 }
 
@@ -136,7 +176,7 @@ type GeoWorld = { [K in keyof World]: World[K] } & {
 export function deriveInput(w: World): DeriveInput {
   const g = w.geo;
   if (!w.lp || !g) return BASE_INPUT;
-  return { seaQ: g.seaQ, elevD: w.elevD, plate: g.plate ? { ox: g.plate.ox, oy: g.plate.oy } : null, lakes: g.lakes, shadow: g.shadow };
+  return { seaQ: g.seaQ, elevD: w.elevD, plate: g.plate ? { ox: g.plate.ox, oy: g.plate.oy } : null, lakes: g.lakes, shadow: g.shadow, lakeSeeds: g.lakes ? g.lakeSeeds : null };
 }
 
 /** Тот же отпечаток, что Terrain.rev после пересчёта из текущих (применённых) входов. */
@@ -206,7 +246,16 @@ function deriveTerrain0(w: World, live: boolean): void {
   const g = w.lp ? w.geo : null;
   if (live && g && w.elevD) {
     const E = w.elevD;
-    for (const i of g.kettleQ) g.pend.push(i, -GEO.KETTLE_D);
+    // котловины: середина −KETTLE_D, четыре соседа — вполовину (чтобы впадина была шире клетки)
+    const cols = w.terrain.cols, n = E.length;
+    for (const i of g.kettleQ) {
+      g.pend.push(i, -GEO.KETTLE_D);
+      const x = i % cols, h = GEO.KETTLE_D >> 1;
+      if (x > 0) g.pend.push(i - 1, -h);
+      if (x < cols - 1) g.pend.push(i + 1, -h);
+      if (i >= cols) g.pend.push(i - cols, -h);
+      if (i + cols < n) g.pend.push(i + cols, -h);
+    }
     g.kettleQ = [];
     const P = g.pend;
     for (let k = 0; k + 1 < P.length; k += 2) {
@@ -216,6 +265,7 @@ function deriveTerrain0(w: World, live: boolean): void {
     g.pend = [];
   }
   const t = w.terrain;
+  const lakes0 = live && g ? new Set(t.lakes.map((l) => l.name)) : null;
   const out = t.derive(deriveInput(w));
   const ch = out.changed;
   W.deriveStatics(ch);
@@ -244,6 +294,14 @@ function deriveTerrain0(w: World, live: boolean): void {
       g.stats.derives++;
       g.lastDerive = w.tick;
       updateSills(w);
+      updateHomes(w);
+      // 🏞 новые озёра — в летопись (одной строкой)
+      const fresh = t.lakes.filter((l) => !lakes0!.has(l.name));
+      if (fresh.length) {
+        g.stats.lakes += fresh.length;
+        const l0 = fresh[0], x = ((l0.cell % t.cols) + 0.5) * w.cell, y = (Math.floor(l0.cell / t.cols) + 0.5) * w.cell;
+        w.log(fresh.length === 1 ? `🏞 Новое озеро «${l0.name}» — подарок тающего льда` : `🏞 Новые озёра — подарок тающего льда: ${fresh.slice(0, 4).map((l) => `«${l.name}»`).join(', ')}${fresh.length > 4 ? ` и ещё ${fresh.length - 4}` : ''}`, 'info', x, y, 'geo_kettle');
+      }
     }
   }
 }
@@ -378,9 +436,70 @@ export function geoPass(w: World): void {
   cycleLog(w);
   // море: глобальный лёд (−SEA_V·Vg) плюс закреплённое игроком; рельеф — когда отстал на шаг
   g.seaOff = -GEO.SEA_V * g.Vg + g.seaPin / GEO.M_PER_E;
-  if (w.tick - g.lastDerive >= GEO.REBUILD_MIN && Math.abs(g.seaOff - g.seaQ) >= GEO.SEA_STEP) {
-    g.seaQ = Math.round(g.seaOff / GEO.SEA_STEP) * GEO.SEA_STEP;
+  if (g.phase === 2) kettles(w);
+  const seaDue = Math.abs(g.seaOff - g.seaQ) >= GEO.SEA_STEP;
+  if (w.tick - g.lastDerive >= GEO.REBUILD_MIN && (seaDue || g.kettleQ.length)) {
+    if (seaDue) g.seaQ = Math.round(g.seaOff / GEO.SEA_STEP) * GEO.SEA_STEP;
     deriveTerrain(w, true);
+  }
+  // выпахивание — пачкой и после пересчёта: правки ждут в очереди до начала следующего шага (как мазок кисти)
+  if (w.tick % GEO.SCOUR_EVERY === 0) scour(w);
+}
+
+/** Детерминированное «случайное» 0..1 по клетке и номеру цикла (котловины — без потока костей). */
+export function hash01(i: number, k: number): number {
+  let h = Math.imul(i ^ Math.imul(k + 1, 0x9e3779b1), 0x85ebca6b);
+  h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+
+/** Клетки, где лёд толще MOR_HI сошёл (бит 1 плоскости морен — уже разыграна): с вероятностью KETTLE_P — котловина. */
+function kettles(w: World): void {
+  const g = w.geo!, H = w.ice!, M = w.iceMax!, F = w.fx8!, bi = w.terrain.biome;
+  const n = H.length, hi = Math.round(255 * GEO.MOR_HI), o = 3 * n;
+  const sill = sillMask(w);
+  for (let i = 0; i < n; i++) {
+    if (M[i] < hi || H[i] >= 0.02 || F[o + i] & 2) continue;
+    F[o + i] |= 2;
+    if (bi[i] <= B.Shallow || sill[i]) continue;
+    if (hash01(i, g.cycleN) >= GEO.KETTLE_P) continue;
+    g.kettleQ.push(i);
+    g.stats.kettles++;
+    if (g.lakeSeeds.length < GEO.LAKE_SEEDS) {
+      g.lakeSeeds.push(i);
+      g.lakes = true;
+    }
+  }
+}
+
+/** Клетки проливов и порогов (производное от sills; кэш по массиву). */
+const sillMasks = new WeakMap<SillRec[], { n: number; m: Uint8Array }>();
+function sillMask(w: World): Uint8Array {
+  const S = w.geo!.sills;
+  let c = sillMasks.get(S);
+  if (!c || c.n !== S.length) {
+    const m = new Uint8Array(w.terrain.cols * w.terrain.rows);
+    for (const s of S) for (const i of s.cells) m[i] = 1;
+    sillMasks.set(S, (c = { n: S.length, m }));
+  }
+  return c.m;
+}
+
+/** Выпахивание: под толстым льдом (H > 0.5) суша опускается — до −SCOUR_MAX всего (правки — через очередь). */
+function scour(w: World): void {
+  const g = w.geo!, H = w.ice!, E = w.elevD!, bi = w.terrain.biome;
+  const L = w.iceList;
+  if (!L || !L.length) return;
+  const step = GEO.SCOUR * (GEO.SCOUR_EVERY / GEO.EVERY) * g.speed;
+  const sums = pendSum(g);
+  for (let k = 0; k < L.length; k++) {
+    const i = L[k];
+    if (H[i] <= 0.5 || bi[i] <= B.Shallow) continue;
+    const cur = E[i] + (sums.get(i) ?? 0);
+    if (cur <= -GEO.SCOUR_MAX) continue;
+    g.pend.push(i, Math.max(-step, -GEO.SCOUR_MAX - cur));
   }
 }
 
@@ -457,6 +576,7 @@ function cycleLog(w: World): void {
       g.phase = 1;
       g.vPeak = V;
       w.log('❄️ Наступает ледниковье: на севере растут ледники, море начинает отступать', 'info', undefined, undefined, 'geo_iceage');
+      rangeOnGlacial(w);
     }
   } else if (g.phase === 1) {
     if (V > g.vPeak) {
@@ -471,13 +591,19 @@ function cycleLog(w: World): void {
       g.stats.glacials++;
       g.lastMaxTick = w.tick;
       w.log(`🧊 Пик ледниковья позади: море опускалось на ${-metres(g.peakSea)} м, льдом было покрыто ${Math.round(100 * g.peakIce)}% суши`, 'milestone', undefined, undefined, 'geo_lgm');
+      refugiaAtMax(w);
+      meltOnMax(w);
       w.log('💧 Ледники тают: море поднимается и затапливает низины', 'info', undefined, undefined, 'geo_termination');
     } else if (V < 0.15) g.phase = 0; // похолодание не дошло до ледниковья
   } else if (V < 0.1) {
+    rangeOnInterglacial(w);
     g.phase = 0;
     g.vPeak = g.peakIce = g.peakSea = 0;
     g.iceMaxLand = 0;
     w.iceMax!.fill(0);
+    // «котловина уже разыграна в этом цикле» — бит 1 плоскости морен
+    const F = w.fx8!, n = w.iceMax!.length;
+    for (let i = 3 * n; i < 4 * n; i++) F[i] &= 1;
   }
 }
 
@@ -555,7 +681,8 @@ export function carveSills(w: World): void {
         E[i] = Math.max(-32767, Math.round((want - t.elev[i]) * 1e4));
         cells.push(i);
       }
-    return { kind, cells, name: properName(r), open: false, a: anchor(w, y0 - 25, y0), b: anchor(w, y0 + W, y0 + W + 25), y0, y1: y0 + W };
+    const yc = (y0 + W / 2) * w.cell;
+    return { kind, cells, name: properName(r), open: false, a: anchor(w, y0 - 25, y0), b: anchor(w, y0 + W, y0 + W + 25), y0, y1: y0 + W, p: [0, yc, cols * w.cell, yc], hw: (W / 2) * w.cell };
   };
   // мелкий порог: глубже всего посередине суши полосы — мост открывается от берегов и смыкается в середине
   const ys = thinBand(w, Math.floor(0.38 * rows), Math.ceil(0.62 * rows), GEO.SILL_W);
@@ -579,23 +706,47 @@ export function carveSills(w: World): void {
 /** Состояние порогов после пересчёта рельефа (живой): мост есть, если якоря берегов на одном материке; летопись. */
 function updateSills(w: World): void {
   const g = w.geo!, lm = w.lm!;
-  for (const s of g.sills) {
+  g.sills.forEach((s, si) => {
     const open = s.a >= 0 && s.b >= 0 && lm[s.a] >= 0 && lm[s.a] === lm[s.b];
-    if (open === s.open) continue;
+    if (open === s.open) return;
     s.open = open;
-    if (s.kind === 'wallace') continue;
     const t = w.terrain, i = s.cells[s.cells.length >> 1] ?? s.a;
     const x = ((i % t.cols) + 0.5) * w.cell, y = (Math.floor(i / t.cols) + 0.5) * w.cell;
+    const [a, b] = sideWords(s);
     if (open) {
       g.stats.bridges++;
-      w.log(`🌉 Море отступило на ${-metres(g.seaQ)} м — пролив ${s.name} стал перешейком: север и юг соединились`, 'milestone', x, y, 'geo_landbridge');
-    } else w.log(`🌊 Перешеек ${s.name} ушёл под воду — север и юг снова разделены`, 'info', x, y, 'geo_sealevel');
-  }
+      if (s.kind === 'sill') w.log(`🌉 Море отступило на ${-metres(g.seaQ)} м — пролив ${s.name} стал перешейком: ${a} и ${b} соединились`, 'milestone', x, y, 'geo_landbridge');
+      else w.log(`🌉 Через пролив ${s.name} лёг перешеек: ${a} и ${b} соединились`, 'milestone', x, y, 'geo_landbridge');
+      bridgeOpened(w, si);
+    } else {
+      w.log(`🌊 Перешеек ${s.name} ушёл под воду — ${a} и ${b} снова разделены`, 'info', x, y, 'geo_sealevel');
+      bridgeClosed(w, si);
+    }
+  });
+}
+
+/** Стороны пролива словами: «север» и «юг» у широтного, «запад» и «восток» у меридионального. */
+export function sideWords(s: SillRec, gen = false): [string, string] {
+  const [x0, y0, x1, y1] = s.p;
+  const ew = Math.abs(x1 - x0) >= Math.abs(y1 - y0);
+  return gen ? (ew ? ['севера', 'юга'] : ['запада', 'востока']) : ew ? ['север', 'юг'] : ['запад', 'восток'];
+}
+
+/** Сторона пролива для точки (px): 0, 1 или −1 — в самом проливе. */
+export function sillSide(s: SillRec, x: number, y: number): -1 | 0 | 1 {
+  const [x0, y0, x1, y1] = s.p;
+  const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1;
+  const d = (dx * (y - y0) - dy * (x - x0)) / L;
+  // ось с запада на восток: отрицательное — север; с севера на юг — положительное у запада (сторона 0)
+  const v = Math.abs(dx) >= Math.abs(dy) ? d * Math.sign(dx || 1) : -d * Math.sign(dy || 1);
+  return Math.abs(d) < s.hw ? -1 : v < 0 ? 0 : 1;
 }
 
 // ---------------- действия игрока (вкладка «Климат») ----------------
 
 export type GeoAction =
+  | { k: 'strait'; pts: number[]; deep: boolean }
+  | { k: 'isthmus'; pts: number[] }
   | { k: 'co2'; ppm: number | null }
   | { k: 'iceAge'; mode: 'cycle' | 'now' | 'end' | 'off' }
   | { k: 'sea'; dm: number }
@@ -606,6 +757,10 @@ export function geoAction(w: World, a: GeoAction): void {
   const g = w.geo;
   if (!w.lp || !g) return;
   switch (a.k) {
+    case 'strait':
+    case 'isthmus':
+      lineTool(w, a.pts, a.k === 'strait' ? (a.deep ? 'deep' : 'shallow') : 'raise');
+      break;
     case 'co2': {
       g.co2Pin = a.ppm === null ? null : clamp(Math.round(a.ppm), 100, 3000);
       if (g.co2Pin === null) w.log('🏭 CO₂ снова «как у природы»: следует за ледниками', 'player', undefined, undefined, 'geo_co2');
@@ -638,6 +793,130 @@ export function geoAction(w: World, a: GeoAction): void {
       w.log(g.speed === 4 ? '⏩ Геология ×4: орбита и ледники идут вчетверо быстрее, эволюция — нет' : '⏩ Геология ×1: ледниковый цикл — около 8 лет острова', 'player', undefined, undefined, 'geo_timescale');
       break;
   }
+}
+
+/** Клетки не дальше hw клеток от ломаной pts (px). */
+function lineCells(w: World, pts: number[], hw: number): number[] {
+  const t = w.terrain, cell = w.cell, R = hw * cell;
+  const out = new Set<number>();
+  for (let k = 0; k + 3 < pts.length || (k === 0 && pts.length >= 2); k += 2) {
+    const ax = pts[k], ay = pts[k + 1], bx = pts[k + 2] ?? ax, by = pts[k + 3] ?? ay;
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    const c0 = Math.max(0, Math.floor((Math.min(ax, bx) - R) / cell)), c1 = Math.min(t.cols - 1, Math.floor((Math.max(ax, bx) + R) / cell));
+    const r0 = Math.max(0, Math.floor((Math.min(ay, by) - R) / cell)), r1 = Math.min(t.rows - 1, Math.floor((Math.max(ay, by) + R) / cell));
+    for (let cy = r0; cy <= r1; cy++)
+      for (let cx = c0; cx <= c1; cx++) {
+        const px = (cx + 0.5) * cell, py = (cy + 0.5) * cell;
+        const u = L2 > 0 ? clamp(((px - ax) * dx + (py - ay) * dy) / L2, 0, 1) : 0;
+        if (Math.hypot(px - (ax + u * dx), py - (ay + u * dy)) <= R) out.add(cy * t.cols + cx);
+      }
+    if (pts.length < 4) break;
+  }
+  return [...out].sort((a, b) => a - b);
+}
+
+/** Ближайшая клетка суши к точке (px) в радиусе 12 клеток (−1 — нет). */
+function landNear(w: World, x: number, y: number): number {
+  const t = w.terrain, cx = Math.floor(x / w.cell), cy = Math.floor(y / w.cell);
+  let best = -1, bd = Infinity;
+  for (let dy = -12; dy <= 12; dy++)
+    for (let dx = -12; dx <= 12; dx++) {
+      const xx = cx + dx, yy = cy + dy;
+      if (xx < 0 || yy < 0 || xx >= t.cols || yy >= t.rows) continue;
+      const i = yy * t.cols + xx;
+      const d = dx * dx + dy * dy;
+      if (t.biome[i] > B.Shallow && d < bd) {
+        bd = d;
+        best = i;
+      }
+    }
+  return best;
+}
+
+/**
+ * ✂️ Пролив (глубокий — как Уоллес, или мелкий — порог, что сохнет в ледниковье) и 🌉 перешеек вдоль линии игрока —
+ * правками в очередь (рельеф пересчитается в начале следующего шага). Пролив становится порогом игрока: якоря — суша
+ * по обе стороны от середины линии.
+ */
+function lineTool(w: World, pts: number[], mode: 'deep' | 'shallow' | 'raise'): void {
+  const g = w.geo!, t = w.terrain, E = w.elevD!;
+  if (pts.length < 2) return;
+  const sea0 = t.seaLevel - g.seaQ;
+  const cells = lineCells(w, pts, GEO.LINE_HW);
+  const sums = pendSum(g);
+  const target = mode === 'raise' ? sea0 + GEO.ISTHMUS_H : sea0 - (mode === 'deep' ? GEO.WALLACE : GEO.SILL);
+  const carved: number[] = [];
+  for (const i of cells) {
+    const p = sums.get(i) ?? 0;
+    const cur = t.elev[i] + p * 1e-4;
+    if (mode === 'raise' ? cur >= target : cur <= target) continue;
+    const dz = clamp(Math.round((target - cur) * 1e4), -32767 - E[i] - p, 32767 - E[i] - p);
+    if (dz === 0) continue;
+    g.pend.push(i, dz);
+    carved.push(i);
+  }
+  const x0 = pts[0], y0 = pts[1], x1 = pts[pts.length - 2], y1 = pts[pts.length - 1];
+  const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+  const L = Math.hypot(x1 - x0, y1 - y0) || 1, nx = -(y1 - y0) / L, ny = (x1 - x0) / L;
+  const where = t.regionAt(mx, my)?.name;
+  if (mode === 'raise') {
+    w.log(`🌉 Вы насыпали перешеек${where ? ` у «${where}»` : ''}: ${carved.length} клеток стали сушей`, 'player', mx, my, 'geo_gabi');
+    return;
+  }
+  const off = (GEO.LINE_HW + 4) * w.cell;
+  const r = mulberry32(w.seed ^ (carved[0] ?? 0) ^ 0x57a17);
+  const name = properName(r);
+  const ys = cells.map((i) => Math.floor(i / t.cols));
+  const s: SillRec = {
+    kind: 'player', cells: carved, name, open: true,
+    a: landNear(w, mx + nx * off, my + ny * off),
+    b: landNear(w, mx - nx * off, my - ny * off),
+    y0: ys.length ? Math.min(...ys) : 0, y1: ys.length ? Math.max(...ys) + 1 : 0,
+    p: [x0, y0, x1, y1], hw: GEO.LINE_HW * w.cell,
+  };
+  if (Math.abs(x1 - x0) >= 0.9 * t.cols * w.cell) {
+    // во всю ширину (как «Берингия»): якоря — высочайшая суша в 25 рядах по обе стороны, как у порогов reset
+    s.a = anchor(w, s.y0 - 25, s.y0);
+    s.b = anchor(w, s.y1, s.y1 + 25);
+  }
+  // сторона 0 — север/запад: якорь a должен лежать на ней
+  if (s.a >= 0 && sillSide(s, ((s.a % t.cols) + 0.5) * w.cell, (Math.floor(s.a / t.cols) + 0.5) * w.cell) === 1) [s.a, s.b] = [s.b, s.a];
+  g.sills = [...g.sills, s];
+  w.log(`✂️ Вы прорезали ${mode === 'deep' ? 'глубокий пролив' : 'мелкий пролив (в ледниковье осохнет)'} ${name}${where ? ` у «${where}»` : ''}`, 'player', mx, my, mode === 'deep' ? 'geo_wallace' : 'geo_landbridge');
+}
+
+/** 🗺 «Берингия»: самая узкая полоса суши на севере (y 0,15…0,35) — линия мелкого пролива во всю ширину (px). */
+export function beringiaLine(w: World): number[] {
+  const t = w.terrain;
+  const y = thinBand(w, Math.floor(0.15 * t.rows), Math.ceil(0.35 * t.rows), 3) + 1.5;
+  return [0, y * w.cell, t.cols * w.cell, y * w.cell];
+}
+
+/** 🌉 «Панама»: линия перешейка через пролив Уоллеса там, где суша по обе стороны ближе всего к середине острова (null — нет). */
+export function panamaLine(w: World): number[] | null {
+  const g = w.geo;
+  const s = g?.sills.find((q) => q.kind === 'wallace');
+  if (!g || !s || s.open) return null;
+  const t = w.terrain, cols = t.cols;
+  // суша материков якорей (иначе перешеек соединит не те берега и мост не откроется)
+  const lm = w.lm;
+  const la = lm && s.a >= 0 ? lm[s.a] : -1, lb = lm && s.b >= 0 ? lm[s.b] : -1;
+  const landOf = (x: number, y: number, L: number) => y >= 0 && y < t.rows && t.biome[y * cols + x] > B.Shallow && (L < 0 || !lm || lm[y * cols + x] === L);
+  let best = -1, bd = Infinity;
+  for (let x = 2; x < cols - 2; x++) {
+    let n = -1, so = -1;
+    for (let k = 1; k <= 4 && n < 0; k++) if (landOf(x, s.y0 - k, la)) n = k;
+    for (let k = 0; k < 4 && so < 0; k++) if (landOf(x, s.y1 + k, lb)) so = k;
+    if (n < 0 || so < 0) continue;
+    const d = Math.abs(x - cols / 2) + 8 * (n + so);
+    if (d < bd) {
+      bd = d;
+      best = x;
+    }
+  }
+  if (best < 0) return null;
+  const x = (best + 0.5) * w.cell;
+  return [x, (s.y0 - 4) * w.cell, x, (s.y1 + 4) * w.cell];
 }
 
 /** Выделить клеточные поля живой планеты (только при lp). */
