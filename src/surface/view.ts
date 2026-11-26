@@ -61,9 +61,9 @@ const STATE_NAMES: Record<Creature['state'], string> = {
 };
 
 /** Линзы 🔬 по кругу и их легенды. Цвета — как в renderer.lensColor. */
-const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease', 'depth', 'refugia'];
-/** Линзы этого мира: «🌊 Глубины» и «🏔 Рефугиумы» — только у живой планеты. */
-const lensesOf = (w: World): Lens[] => (w.lp ? LENS_ORDER : LENS_ORDER.filter((l) => l !== 'depth' && l !== 'refugia'));
+const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease', 'depth', 'refugia', 'rain'];
+/** Линзы этого мира: «🌊 Глубины», «🏔 Рефугиумы» и «💧 Влажность» — только у живой планеты. */
+const lensesOf = (w: World): Lens[] => (w.lp ? LENS_ORDER : LENS_ORDER.filter((l) => l !== 'depth' && l !== 'refugia' && l !== 'rain'));
 const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; caption: string; grad?: string; lo?: string; hi?: string }> = {
   fert: {
     title: '🟫 Плодородие', fact: 'liebig',
@@ -85,6 +85,11 @@ const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; cap
     title: '🌊 Глубины', fact: 'geo_bathymetry',
     caption: 'Глубина моря от нынешнего берега. <b class="yel">—</b> 50 м: осушится, когда море уйдёт на 50 м (мост через пролив); <b>—</b> 120 м: берег ледникового максимума',
     grad: 'linear-gradient(90deg,rgb(150,235,230),rgb(40,120,200) 50%,rgb(8,22,70))', lo: 'мелко', hi: '400 м и глубже',
+  },
+  rain: {
+    title: '💧 Влажность', fact: 'geo_rainshadow',
+    caption: 'Влажность суши: ветер дует с запада и теряет пар на подъёмах. <b class="red">Красным</b> — дождевая тень: суше, чем было, из-за нового хребта',
+    grad: 'linear-gradient(90deg,rgb(214,170,96),rgb(120,170,80) 50%,rgb(40,110,190))', lo: 'сухо', hi: 'влажно',
   },
   refugia: {
     title: '🏔 Рефугиумы', fact: 'geo_refugia',
@@ -784,7 +789,7 @@ export class SurfaceView {
       if (this.tool === 'grass') this.act({ k: 'grass', pts: this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), r: 50 });
       // 🌋 кисть рельефа — как трава; пролив и перешеек — линией от нажатия до отпускания
       if (this.tool === 'terraUp' || this.tool === 'terraDown') this.act({ k: 'terra', pts: this.cam.toWorld(x, y, c.clientWidth, c.clientHeight), r: 60, dz: this.tool === 'terraUp' ? 100 : -100 });
-      if (this.tool === 'strait' || this.tool === 'straitS' || this.tool === 'isthmus') this.lineStart = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
+      if (this.tool === 'strait' || this.tool === 'straitS' || this.tool === 'isthmus' || this.tool === 'ridge') this.lineStart = this.cam.toWorld(x, y, c.clientWidth, c.clientHeight);
     });
     c.addEventListener('pointermove', (e) => {
       const [x, y] = local(e);
@@ -835,11 +840,11 @@ export class SurfaceView {
         const [sx, sy] = this.lineStart;
         this.lineStart = null;
         if (Math.hypot(ex - sx, ey - sy) < 30) {
-          this.toast(this.tool === 'isthmus' ? '🌉 Проведите линию поперёк пролива — от берега до берега' : '✂️ Проведите линию поперёк суши — где резать пролив');
+          this.toast(this.tool === 'isthmus' ? '🌉 Проведите линию поперёк пролива — от берега до берега' : this.tool === 'ridge' ? '⛰ Проведите линию — там поднимется хребет' : '✂️ Проведите линию поперёк суши — где резать пролив');
           return;
         }
         const pts = [Math.round(sx), Math.round(sy), Math.round(ex), Math.round(ey)];
-        this.act(this.tool === 'isthmus' ? { k: 'isthmus', pts } : { k: 'strait', pts, deep: this.tool === 'strait' });
+        this.act(this.tool === 'isthmus' ? { k: 'isthmus', pts } : this.tool === 'ridge' ? { k: 'ridge', pts } : { k: 'strait', pts, deep: this.tool === 'strait' });
         return;
       }
       if (moved || pointers.size) return;
@@ -1001,7 +1006,7 @@ export class SurfaceView {
     this.setLens(L[(i + 1) % L.length]);
   }
 
-  private setLens(l: Lens): void {
+  setLens(l: Lens): void {
     this.renderer.setLens(l);
     const btn = $(this.root, '[data-act=lens]');
     btn.classList.toggle('active', l !== 'off');
@@ -1048,6 +1053,10 @@ export class SurfaceView {
       const R = w.geo?.refugia ?? null;
       const k = this.renderer.refugiumOf(w.terrain.region[i]);
       txt = !R ? 'Рефугиумы появятся на пике ледниковья' : k >= 0 && R[k] ? `Рефугиум «${w.terrain.regions[R[k].region]?.name ?? '?'}»: ${R[k].n} зверей, ${R[k].species.length} ${plural(R[k].species.length, 'вид', 'вида', 'видов')} на пике` : 'Не рефугиум';
+    } else if (l === 'rain') {
+      const K = w.terrain.moistK;
+      const k = K ? K[i] : 1;
+      txt = b.water ? 'Море: отсюда ветер берёт пар' : `Влажность ${pct(w.terrain.moist[i])}${k < 0.97 ? ` · дождевая тень: −${Math.round(100 * (1 - k))}% от прежней` : k > 1.03 ? ` · влажнее прежнего на ${Math.round(100 * (k - 1))}%` : ''}`;
     } else if (l === 'depth') {
       const m = this.renderer.depthAt(i);
       txt = m < 0 ? `Глубина ${-m} м${m >= -50 ? ' — осушится первой' : m >= -120 ? ' — суша в пик ледниковья' : m < -180 ? ' — глубоко: не осохнет' : ''}` : `Суша: ${m} м над нынешним морем`;
@@ -1458,7 +1467,7 @@ export class SurfaceView {
         if (this.tab === 'geo') $<HTMLButtonElement>(this.root, '.s-tabs [data-tab=species]').click();
         if (this.tool !== 'inspect' && this.tool !== 'grass' && this.tool !== 'meteor' && this.tool !== 'spawn' && this.tool !== 'mutagen') $<HTMLButtonElement>(this.root, '[data-tool=inspect]').click();
         this.geoSheet.close();
-        if (this.renderer.lens === 'depth' || this.renderer.lens === 'refugia') this.setLens('off');
+        if (this.renderer.lens === 'depth' || this.renderer.lens === 'refugia' || this.renderer.lens === 'rain') this.setLens('off');
       }
     }
     this.geoSheet.update();

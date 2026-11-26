@@ -46,6 +46,9 @@ export type Action = { t: number } & (
   /** 🌋 «Земля»: ✂️ пролив вдоль линии (deep — как Уоллес, иначе мелкий порог) и 🌉 перешеек (px, точки подряд). */
   | { k: 'strait'; pts: number[]; deep: boolean }
   | { k: 'isthmus'; pts: number[] }
+  /** 🌋 «Земля»: ⛰ хребет вдоль линии (px) и 🧭 дрейф южной плиты (клеток за шаг; 0, 0 — стоп). */
+  | { k: 'ridge'; pts: number[] }
+  | { k: 'drift'; vx: -1 | 0 | 1; vy: -1 | 0 | 1 }
   /** 🌋 «Небо»: извержение (VEI 6/7/8), удар (1 ≡ метеорит, 2, 3 — K–Pg), цунами, пожар (px). */
   | { k: 'volcano'; x: number; y: number; vei: 6 | 7 | 8 }
   | { k: 'impact'; x: number; y: number; size: 1 | 2 | 3 }
@@ -59,7 +62,7 @@ type DistOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never
 export type ActionInput = DistOmit<Action, 't'>;
 
 /** Действия, которые можно отменить тостом «↶ Отменить». */
-export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue', 'mutagen', 'terra', 'strait', 'isthmus', 'volcano', 'impact', 'tsunami', 'fire']);
+export const UNDOABLE: ReadonlySet<Action['k']> = new Set(['meteor', 'drought', 'epidemic', 'spawn', 'remove', 'rescue', 'mutagen', 'terra', 'strait', 'isthmus', 'ridge', 'volcano', 'impact', 'tsunami', 'fire']);
 /** Разница, записанная машиной времени, а не поступок игрока. */
 export const isDiff = (a: Action): boolean => a.k === 'settings' || (a.k === 'experiment' && !!a.quiet);
 
@@ -233,7 +236,7 @@ const EMOJI = /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2})️?(?:�
 export const iconOf = (text: string): string => EMOJI.exec(text)?.[0] ?? '•';
 
 /** 🌋 Крупные события живой планеты (по карточке): перешеек открылся, пик ледниковья, разделение вида, сводка обмена. */
-export const GEO_MAJOR: ReadonlySet<string> = new Set(['geo_landbridge', 'geo_lgm', 'geo_vicariance', 'geo_gabi', 'geo_bigfive']);
+export const GEO_MAJOR: ReadonlySet<string> = new Set(['geo_landbridge', 'geo_lgm', 'geo_vicariance', 'geo_gabi', 'geo_bigfive', 'geo_orogeny']);
 
 /** Отметка шкалы по записи летописи. Крупные: стихии, поступки игрока, вымирание вида с пиком ≥ 30, крупное у живой планеты. */
 export function eventMark(e: WorldEvent, act?: number): Mark {
@@ -329,6 +332,8 @@ export function actionText(a: Action): string {
     case 'geoSpeed': return `⏩ геология ×${a.v}`;
     case 'strait': return a.deep ? '✂️ глубокий пролив' : '✂️ мелкий пролив';
     case 'isthmus': return '🌉 перешеек';
+    case 'ridge': return '⛰ хребет';
+    case 'drift': return a.vx === 0 && a.vy === 0 ? '🧭 плиты стоп' : `🧭 плита ${a.vy < 0 ? '↑' : a.vy > 0 ? '↓' : ''}${a.vx < 0 ? '←' : a.vx > 0 ? '→' : ''}`;
     case 'volcano': return `🌋 вулкан VEI ${a.vei}`;
     case 'impact': return a.size === 3 ? '☄️ астероид K–Pg' : a.size === 2 ? '☄️ большой астероид' : '☄️ метеорит';
     case 'tsunami': return '🌊 цунами';

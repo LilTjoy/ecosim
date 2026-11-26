@@ -2434,6 +2434,8 @@ export class World {
         break;
       case 'strait':
       case 'isthmus':
+      case 'ridge':
+      case 'drift':
       case 'co2':
       case 'iceAge':
       case 'sea':

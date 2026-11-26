@@ -128,8 +128,25 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
     cats.push({ k: 'fire', t: Math.round(T * 0.58) + 1, x: fx, y: fy });
     cats.push({ k: 'impact', t: Math.round(T * 0.78), x: kx, y: ky, size: 3 });
   }
+  // этап 3 (--drift=1): ⛰ хребет на западе, плита на север (надвиг, до упора), на восток, на юг (разлом), стоп, на запад, стоп;
+  // до 3 точек «посреди дрейфа» (такт шага плиты, до шага) и одна — сразу после хребта (очередь pend не пуста)
+  if (flags.drift === '1') {
+    const W0 = A.width, H0 = A.height;
+    cats.push({ k: 'ridge', t: Math.round(T * 0.15), pts: [0.3 * W0, 0.12 * H0, 0.3 * W0, 0.34 * H0] });
+    const dr = (f: number, vx: -1 | 0 | 1, vy: -1 | 0 | 1) => cats.push({ k: 'drift', t: Math.round(T * f), vx, vy });
+    dr(0.2, 0, -1); dr(0.3, 1, 0); dr(0.4, 0, 1); dr(0.5, 0, 0); dr(0.6, -1, 0); dr(0.7, 0, 0);
+    cats.sort((a, b) => a.t - b.t);
+  }
+  let driftCaps = 0, lastDrift = -1e9, ridgeCap = 0;
   let fireCaps = 0, lastFire = -1e9, ci = 0;
   while (A.tick < T) {
+    const pl = A.geo!.plate;
+    if (driftCaps < 3 && pl && (pl.vx || pl.vy) && (A.tick + 1) % GEO.EVERY === 0 && A.tick + 1 >= pl.next && A.tick - lastDrift >= T / 20 && !ops.some((o) => o.t === A.tick) && !cats.some((c) => c.t === A.tick)) {
+      caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
+      driftCaps++;
+      lastDrift = A.tick;
+      open = null;
+    }
     if (fireCaps < 3 && A.geo!.fire.length > 0 && A.tick % 10 === 5 && A.tick - lastFire >= 400 && !ops.some((o) => o.t === A.tick)) {
       caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
       fireCaps++;
@@ -141,6 +158,10 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
       A.apply(a);
       merged.push(structuredClone(a));
       open = null;
+      if (a.k === 'ridge' && !ops.some((o) => o.t === A.tick)) {
+        caps.push({ t: A.tick, j: ops.filter((o) => o.t <= A.tick).length + 1000, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
+        ridgeCap++;
+      }
     }
     if (capAt.has(`${A.tick}:-1`)) {
       caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
@@ -209,7 +230,7 @@ export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   const workerOk = !!done && done.digest[0] === dEnd;
   const midN = caps.filter((c) => c.pend > 0).length;
   const d1 = okN === caps.length && workerOk && cover.length === 0 && midN >= 3 && A.terrain.rev !== 0;
-  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} midScour=${scourCaps} midFire=${fireCaps} cat=${A.geo!.stats.eruptions}/${A.geo!.stats.impacts}/${A.geo!.stats.fires}/${A.geo!.stats.massExt} lakes=${A.terrain.lakes.length} kettles=${A.geo!.stats.kettles} isolates=${A.geo!.isolates.length} splits=${A.geo!.stats.splits} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
+  console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} midScour=${scourCaps} midFire=${fireCaps} midDrift=${driftCaps} ridgeCap=${ridgeCap} plate=${A.geo!.plate ? `${A.geo!.plate.ox},${A.geo!.plate.oy}/${A.geo!.plate.steps}` : '-'} shadow=${A.geo!.shadow} cat=${A.geo!.stats.eruptions}/${A.geo!.stats.impacts}/${A.geo!.stats.fires}/${A.geo!.stats.massExt} lakes=${A.terrain.lakes.length} kettles=${A.geo!.stats.kettles} isolates=${A.geo!.isolates.length} splits=${A.geo!.stats.splits} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
   console.log(` caps: ${caps.map((c) => `${c.t}${c.j >= 0 ? `/${c.j}` : ''}(pend ${c.pend}, sea ${c.sea} м)`).join(' ')} | glacials=${A.geo!.stats.glacials} bridges=${A.geo!.stats.bridges} Vg=${A.geo!.Vg.toFixed(2)}`);
 
   // ---------------- D2 ----------------

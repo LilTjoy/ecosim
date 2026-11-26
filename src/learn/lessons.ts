@@ -6,7 +6,7 @@ import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
 import {
   CAP8, decomposerSwitch, iceBridgeOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
-  startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot,
+  startLessonEpidemic, vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot, SHADOW_SEED, shadowLine, shadowNow,
 } from './scenarios';
 import { GEO, panamaLine } from '../sim/geo';
 
@@ -1215,6 +1215,89 @@ export const LESSONS: Lesson[] = [
       },
     ],
   },
+  {
+    id: 'shadow',
+    icon: '🏜',
+    title: 'Дождевая тень',
+    teaser: 'Поднимем на острове горы — сами и столкновением плит — и посмотрим, как за хребтом лес сменяется степью.',
+    minutes: 6,
+    cards: ['geo.geo_rainshadow', 'geo.geo_orogeny', 'geo.geo_plates'],
+    readout: (c) => shadowReadout(c),
+    steps: [
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Остров на живой планете. Ветер здесь всегда дует с запада, с моря, и несёт пар. Дадим миру год устояться.',
+        action: { label: '🌋 Новый мир: живая планета', run: (c) => startEco(c, {}, 'Дождевая тень', true, SHADOW_SEED) },
+        watch: {
+          hint: (c) => `Мир устраивается… ${Math.min(ticks(c), YEAR)}/${YEAR}`,
+          test: (c) => ticks(c) >= YEAR && c.world.lp,
+          giveUp: { ticks: 3 * YEAR, text: 'Мир без живой планеты — нажмите «↻ Ещё раз».' },
+          done: () => 'Остров готов. Включим линзу «💧 Влажность»: синее — влажно, бурое — сухо.',
+        },
+      },
+      {
+        text: 'Сейчас на западе острова с севера на юг поднимется хребет.',
+        quiz: {
+          q: 'Где станет суше?',
+          options: ['К западу от хребта — со стороны моря', 'К востоку — за хребтом', 'Нигде: горы влажность не меняют'],
+          correct: 1,
+          explain: 'Влажный ветер упирается в горы, поднимается, остывает — и пар выпадает дождём на наветренном, западном склоне. За хребет переваливает уже сухой воздух.',
+        },
+      },
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Хребет поднят. Красным на линзе — дождевая тень: там суше, чем было. Подождём полгода — увидим, сменится ли лес.',
+        action: {
+          label: '⛰ Поднять хребет',
+          run: (c) => {
+            c.show('eco');
+            const L = shadowLine(c.world);
+            c.mem.x = L.x;
+            c.mem.y0 = L.y0;
+            c.mem.y1 = L.y1;
+            c.surface.act({ k: 'ridge', pts: L.pts });
+            c.surface.setLens('rain');
+            c.mem.t0 = c.world.tick;
+          },
+        },
+        watch: {
+          hint: (c) => `Ветер перестраивается… ${Math.min(ticks(c), YEAR / 2)}/${YEAR / 2}`,
+          test: (c) => ticks(c) >= YEAR / 2 && (shadowNow(c.world, num(c, 'x'), num(c, 'y0'), num(c, 'y1'))?.lee ?? 0) > 0.05,
+          giveUp: { ticks: 2 * YEAR, text: 'Тень вышла слабой: здесь и так сухо. Попробуйте «⛰ Хребет» сами — «🛠 Стихии → Земля».' },
+          done: (c) => `🏜 За хребтом влажность упала в среднем на ${Math.round(100 * (shadowNow(c.world, num(c, 'x'), num(c, 'y0'), num(c, 'y1'))?.lee ?? 0))}% — так за Андами лежат сухие степи Патагонии.`,
+        },
+      },
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Горы растут и сами: когда плиты сталкиваются. Двинем южную плиту (всё южнее пролива Уоллеса) на север — геология ×4.',
+        action: {
+          label: '🧭 Южная плита — на север',
+          run: (c) => {
+            c.show('eco');
+            c.surface.act({ k: 'geoSpeed', v: 4 });
+            c.surface.act({ k: 'drift', vx: 0, vy: -1 });
+            c.mem.t1 = c.world.tick;
+          },
+        },
+        watch: {
+          hint: (c) => {
+            const s = shadowNow(c.world, num(c, 'x'), num(c, 'y0'), num(c, 'y1'));
+            return s?.plate ? `Плита сдвинулась на ${-s.plate.oy * 16} км${s.plate.collided ? ' · плиты столкнулись' : ''}${s.wallOpen ? ' · пролив закрылся' : ''}` : 'Плиты ещё стоят';
+          },
+          test: (c) => {
+            const s = shadowNow(c.world, num(c, 'x'), num(c, 'y0'), num(c, 'y1'));
+            return !!s?.plate?.mtn && s.wallOpen;
+          },
+          giveUp: { ticks: 3 * YEAR, text: 'Хребет растёт медленнее, чем мы ждали, — посмотрите на шов плит (оранжевый пунктир) сами.' },
+          done: () => '⛰ На шве плит поднялись горы, а пролив Уоллеса закрылся: две разные фауны встретились. Так Индия, врезавшись в Азию, подняла Гималаи.',
+        },
+      },
+    ],
+    onExit: (c) => c.surface.setLens('off'),
+  },
 ];
 
 /** ☄️ Живая строка урока «После астероида». */
@@ -1222,6 +1305,13 @@ const kpgReadout = (c: LessonCtx) => {
   const k = kpgNow(c.world, num(c, 't0'));
   if (!k) return '';
   return `${k.dark > 0.02 ? `🌑 света ${Math.round(100 * (1 - k.dark))}% · ` : ''}${k.aer > 0.02 ? `🌫 дымка ${Math.round(100 * k.aer)}% · ` : ''}зверей ${c.world.creatures.length} · видов ${c.world.species.living().length}`;
+};
+
+/** 🏜 Живая строка урока «Дождевая тень». */
+const shadowReadout = (c: LessonCtx) => {
+  const s = c.mem.y1 === undefined ? null : shadowNow(c.world, num(c, 'x'), num(c, 'y0'), num(c, 'y1'));
+  if (!s) return '';
+  return `💧 за хребтом ${s.lee > 0.005 ? `суше на ${Math.round(100 * s.lee)}%` : 'как было'} · 🌲 леса там ${s.forest} клеток${s.plate ? ` · 🧭 плита ${-s.plate.oy * 16} км на север${s.wallOpen ? ' · 🌉 пролив закрыт' : ''}` : ''}`;
 };
 
 /** 🌋 Живая строка урока «Пролив рождает виды». */

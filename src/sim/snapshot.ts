@@ -9,7 +9,7 @@ import { WEIGHTS } from './brain';
 import { mix32 } from '../lib/random';
 import type { SpeciesSave } from './species';
 import type { Terrain } from './terrain';
-import { allocGeoCells, deriveTerrain, geoInputsHash, labelLands, rebuildIceList } from './geo';
+import { allocGeoCells, deriveTerrain, geoInputsHash, labelLands, rebuildIceList, type PLATE_CELLS } from './geo';
 
 export const SNAP_VERSION = 1;
 
@@ -78,6 +78,8 @@ export const ANC_F = 7;
 export const _ancCheck: [Exclude<keyof Ancestor, 'id' | 'mother' | 'sp' | 'g' | 'generation' | 'born' | 'died'>] extends [never] ? true : never = true;
 
 export const SNAP_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic', 'fix', 'myc', 'act', 'nut'] as const;
+/** 🧭 Поля, что едут с плитой, — ровно клеточные поля снимка. */
+export const _plateCheck: [Exclude<(typeof SNAP_CELLS)[number], (typeof PLATE_CELLS)[number]> | Exclude<(typeof PLATE_CELLS)[number], (typeof SNAP_CELLS)[number]>] extends [never] ? true : never = true;
 export const SNAP_CLONE = ['tick', 'drought', 'seed', 'salt', 'rng', 'nextId', 'shiftNow', 'birch', 'corpseRef', 'nutRef', 'nutAcc', 'nutGrow',
   'flux', 'fluxEma', 'micro', 'boneMarks', 'playerStats', 'settings', 'brainMode', 'input', 'web', 'deaths', 'crowdRisk', 'events',
   'pathogens', 'outbreaks', 'sickRisk', 'healthyRisk', 'meanV2', 'boost', 'nextPath', 'fizzleLogged', 'bloomMin', 'bloomYear',
@@ -500,6 +502,7 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
   if (w.lp) {
     labelLands(w as unknown as World);
     rebuildIceList(w as unknown as World);
+    w.moistK = w.terrain.moistK;
   } else w.lm = w.iceList = w.moistK = null;
   // 9. временное
   w.history = history.slice();

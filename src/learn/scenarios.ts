@@ -5,7 +5,7 @@
 import { EARTH, luminosity0, PRESETS, simulate, type PlanetParams, type SimResult } from '../planet/model';
 import type { Pathogen } from '../sim/microbes';
 import type { World } from '../sim/world';
-import { BIOMES } from '../sim/terrain';
+import { B, BIOMES } from '../sim/terrain';
 import { sillSide } from '../sim/geo';
 
 /** Орбита, на которой планета у звезды массы m получает `flux` земного тепла. */
@@ -320,4 +320,42 @@ export function kpgNow(w: World, t0: number): { dark: number; aer: number; sum: 
   const ev = w.events.filter((e) => e.tick >= t0);
   const s = g.lastSum && g.lastSum.t > t0 ? g.lastSum : null;
   return { dark: g.dark, aer: g.aer, sum: s, rad: ev.some((e) => e.text.startsWith('🌳 Адаптивная радиация')), mass: ev.some((e) => e.text.startsWith('💀 Массовое вымирание')) };
+}
+
+/** 🏜 Урок «Дождевая тень»: зерно и линия хребта — столбец на западе (22–38 % ширины) севернее мелкого порога, где суши больше и с запада, и с востока. */
+export const SHADOW_SEED = 42;
+export function shadowLine(w: World): { x: number; y0: number; y1: number; pts: number[] } {
+  const t = w.terrain, cols = t.cols, rows = t.rows;
+  const land = (i: number) => !BIOMES[t.biome[i]].water;
+  const sill = w.geo?.sills.find((s) => s.kind === 'sill');
+  const y0 = Math.round(0.12 * rows), y1 = Math.max(y0 + 12, (sill ? sill.y0 : Math.round(0.38 * rows)) - 3);
+  let bx = Math.round(0.3 * cols), bs = -1;
+  for (let x = Math.round(0.22 * cols); x <= Math.round(0.38 * cols); x++) {
+    let a = 0, b = 0, c = 0;
+    for (let y = y0; y < y1; y++) {
+      if (land(y * cols + x)) c++;
+      for (let k = 4; k <= 16; k++) { if (land(y * cols + x + k)) b++; if (land(y * cols + x - k)) a++; }
+    }
+    const sc = Math.min(a, b) * c;
+    if (sc > bs) { bs = sc; bx = x; }
+  }
+  const X = (bx + 0.5) * w.cell;
+  return { x: bx, y0, y1, pts: [X, y0 * w.cell, X, y1 * w.cell] };
+}
+/** Дождевая тень сейчас: средняя потеря влажности суши за хребтом (4–16 клеток восточнее), леса там, плиты. */
+export function shadowNow(w: World, x: number, y0: number, y1: number): { lee: number; forest: number; n: number; plate: { oy: number; mtn: boolean; collided: boolean } | null; wallOpen: boolean } | null {
+  const g = w.geo;
+  if (!w.lp || !g) return null;
+  const t = w.terrain, cols = t.cols, K = t.moistK;
+  let s = 0, n = 0, f = 0;
+  for (let y = y0; y < y1; y++)
+    for (let d = 4; d <= 16; d++) {
+      const i = y * cols + x + d;
+      if (x + d >= cols || BIOMES[t.biome[i]].water) continue;
+      n++;
+      s += K ? 1 - K[i] : 0;
+      if (t.biome[i] === B.Forest || t.biome[i] === B.Swamp) f++;
+    }
+  const p = g.plate;
+  return { lee: n ? s / n : 0, forest: f, n, plate: p ? { oy: p.oy, mtn: p.mtn, collided: p.collided } : null, wallOpen: !!g.sills.find((q) => q.kind === 'wallace')?.open };
 }

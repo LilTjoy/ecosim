@@ -34,7 +34,13 @@ export const GEO = {
   EXT_SHARE: 0.5, EXT_MIN: 4, ISOLATE: 2 * YEAR, LOG_GAP: 300,
   /** После катастрофы радиацию (🌳) считаем через RAD_WAIT тактов. */
   RAD_WAIT: 4 * YEAR,
-  DRIFT_T: 1500, UPLIFT: 300, UPLIFT_W: 4, OCEAN_FLOOR: -0.13,
+  DRIFT_T: 1500, UPLIFT: 700, UPLIFT_W: 4, OCEAN_FLOOR: -0.13,
+  /** Плиты: на сколько клеток плита B может уехать вбок, на север (надвиг) и на юг (разлом). */
+  PLATE_MAXX: 20, PLATE_MAXN: 10, PLATE_MAXS: 8,
+  /** Поднятие при столкновении — не выше гор + UPLIFT_TOP; хребет игрока — горы + RIDGE_H посередине, полуширина RIDGE_HW клеток. */
+  UPLIFT_TOP: 0.08, RIDGE_H: 0.05, RIDGE_HW: 2.2,
+  /** Поднимается только кора не глубже исходного моря + UPLIFT_MIN (−0,15 ≈ −450 м: суша, шельф, дно пролива Уоллеса). */
+  UPLIFT_MIN: -0.15,
   /** Кисть «🏔 Рельеф»: предел правки высоты кистью, 1e-4 единицы (±0,3 ≈ ±900 м). */
   TERRA_MAX: 3000,
   /** Радиус поиска суши для зверей, которых застала вода. */
@@ -103,6 +109,12 @@ export interface IsoRec {
   /** Основатели за проливом Уоллеса (летопись разделений — сводкой). */
   founder: boolean;
 }
+/** Южная плита: ряды от rift исходного рельефа, сдвиг ox, oy; vx, vy ∈ {−1, 0, 1} — шаг раз в DRIFT_T/скорость тактов. */
+export interface PlateRec {
+  rift: number; ox: number; oy: number; vx: number; vy: number; next: number;
+  /** Было ли столкновение (летопись — один раз), имя хребта, объявлены ли горы, расходились ли, шагов всего. */
+  collided: boolean; name: string; mtn: boolean; rifted: boolean; steps: number;
+}
 export interface RefRec { region: number; lm: number; species: number[]; n: number; /** базовые регионы рефугиума */ regions: number[] }
 
 /** Состояние живой планеты. Все ключи есть всегда (null, а не «нет»): loadWorld заменяет его целиком. */
@@ -118,6 +130,8 @@ export interface GeoState {
   /** Правки рельефа, ждущие следующего пересчёта: подряд [клетка, dz (1e-4 единицы)]. */
   pend: number[];
   kettleQ: number[]; shadow: boolean; lakes: boolean;
+  /** ⛰ Хребет игрока ждёт пересчёта: тогда включится дождевая тень. Сколько клеток суши в тени было в последней записи летописи. */
+  shadowQ: boolean; shadowN: number;
   aer: number; dark: number; geoShift: number; isolatedUntil: number; lastLogT: number;
   fire: number[]; sills: SillRec[];
   lands: { n: number; anchors: number[]; sizes: number[] };
@@ -140,7 +154,8 @@ export interface GeoState {
   fireEp: { n: number; x: number; y: number; mega: boolean; t: number } | null;
   /** Есть ли на клетках пепел, гарь или соль (иначе их проходы пропускаются). */
   fxOn: boolean;
-  plate: { rift: number; ox: number; oy: number; vx: number; vy: number; next: number; collided: boolean } | null;
+  /** Плита B (юг, от середины пролива Уоллеса): сдвиг (клеток), скорость (клеток за шаг), такт следующего шага. */
+  plate: PlateRec | null;
   stats: { glacials: number; bridges: number; splits: number; vicariance: number; impacts: number; eruptions: number; fires: number; massExt: number; derives: number;
     leaks: number; invaders: number; moraines: number; kettles: number; lakes: number; refugia: number;
     /** Разделения по барьерам: мелкий порог, Уоллес, пролив игрока. */ sSill: number; sWall: number; sPlay: number };
@@ -165,7 +180,7 @@ export function newGeo(seed: number): GeoState {
     dGsign: 0, cycleN: 0, lastMaxTick: -1,
     phase: 0, vPeak: 0, peakSea: 0, peakIce: 0, fPin: null,
     co2: 280, co2Pin: null, seaPin: 0, seaOff: 0, seaQ: 0, lastDerive: -1e9,
-    pend: [], kettleQ: [], shadow: false, lakes: false,
+    pend: [], kettleQ: [], shadow: false, lakes: false, shadowQ: false, shadowN: 0,
     aer: 0, dark: 0, geoShift: 0, isolatedUntil: 0, lastLogT: -1e9,
     fire: [], sills: [], lands: { n: 0, anchors: [], sizes: [] },
     bridges: [], isolates: [], refugia: null, refT: -1e9, rangeRef: [], wide: [], wsplit: [], wLogT: -1e9, lakeSeeds: [],
@@ -182,13 +197,15 @@ type GeoWorld = { [K in keyof World]: World[K] } & {
   soil: Float32Array;
   litter: Float32Array;
   s0: Float32Array;
+  claim: Float32Array;
+  claimTick: Int32Array;
 };
 
 /** Входы пересчёта рельефа из состояния мира (без живой планеты — исходный рельеф). */
 export function deriveInput(w: World): DeriveInput {
   const g = w.geo;
   if (!w.lp || !g) return BASE_INPUT;
-  return { seaQ: g.seaQ, elevD: w.elevD, plate: g.plate ? { ox: g.plate.ox, oy: g.plate.oy } : null, lakes: g.lakes, shadow: g.shadow, lakeSeeds: g.lakes ? g.lakeSeeds : null };
+  return { seaQ: g.seaQ, elevD: w.elevD, plate: g.plate ? { ox: g.plate.ox, oy: g.plate.oy, rift: g.plate.rift } : null, lakes: g.lakes, shadow: g.shadow, lakeSeeds: g.lakes ? g.lakeSeeds : null };
 }
 
 /** Тот же отпечаток, что Terrain.rev после пересчёта из текущих (применённых) входов. */
@@ -251,7 +268,7 @@ export function deriveTerrain(w: World, live: boolean): void {
 }
 
 /** Стенд: время каждого пересчёта рельефа (мс), только при on (на мир не влияет). */
-export const GEO_PERF = { on: false, ms: [] as number[] };
+export const GEO_PERF = { on: false, ms: [] as number[], drift: [] as number[], riders: 0 };
 
 function deriveTerrain0(w: World, live: boolean): void {
   const W = w as unknown as GeoWorld;
@@ -269,6 +286,10 @@ function deriveTerrain0(w: World, live: boolean): void {
       if (i + cols < n) g.pend.push(i + cols, -h);
     }
     g.kettleQ = [];
+    if (g.shadowQ) {
+      g.shadow = true;
+      g.shadowQ = false;
+    }
     const P = g.pend;
     for (let k = 0; k + 1 < P.length; k += 2) {
       const v = E[P[k]] + P[k + 1];
@@ -279,6 +300,7 @@ function deriveTerrain0(w: World, live: boolean): void {
   const t = w.terrain;
   const lakes0 = live && g ? new Set(t.lakes.map((l) => l.name)) : null;
   const out = t.derive(deriveInput(w));
+  w.moistK = t.moistK;
   const ch = out.changed;
   W.deriveStatics(ch);
   if (live) {
@@ -307,6 +329,8 @@ function deriveTerrain0(w: World, live: boolean): void {
       g.lastDerive = w.tick;
       updateSills(w);
       updateHomes(w);
+      if (t.moistK) shadowLog(w);
+      if (g.plate) plateLog(w);
       // 🏞 новые озёра — в летопись (одной строкой)
       const fresh = t.lakes.filter((l) => !lakes0!.has(l.name));
       if (fresh.length) {
@@ -457,9 +481,13 @@ export function geoPass(w: World): void {
   g.seaOff = -GEO.SEA_V * g.Vg + g.seaPin / GEO.M_PER_E;
   if (g.phase === 2) kettles(w);
   const seaDue = Math.abs(g.seaOff - g.seaQ) >= GEO.SEA_STEP;
-  if (w.tick - g.lastDerive >= GEO.REBUILD_MIN && (seaDue || g.kettleQ.length)) {
+  // 🧭 шаг плиты (этап 3): сдвиг клеток и зверей, поднятие у шва — и пересчёт сразу (в том же шаге, до чтения рельефа)
+  const pt0 = GEO_PERF.on ? performance.now() : 0;
+  const drift = g.plate !== null && (g.plate.vx !== 0 || g.plate.vy !== 0) && w.tick >= g.plate.next && driftStep(w);
+  if (drift || (w.tick - g.lastDerive >= GEO.REBUILD_MIN && (seaDue || g.kettleQ.length))) {
     if (seaDue) g.seaQ = Math.round(g.seaOff / GEO.SEA_STEP) * GEO.SEA_STEP;
     deriveTerrain(w, true);
+    if (drift && GEO_PERF.on) GEO_PERF.drift.push(performance.now() - pt0);
   }
   // выпахивание — пачкой и после пересчёта: правки ждут в очереди до начала следующего шага (как мазок кисти)
   if (w.tick % GEO.SCOUR_EVERY === 0) scour(w);
@@ -727,6 +755,12 @@ export function carveSills(w: World): void {
 function updateSills(w: World): void {
   const g = w.geo!, lm = w.lm!;
   g.sills.forEach((s, si) => {
+    // 🧭 якорь накрыла плита — новый: высочайшая суша своей стороны (до шва плит)
+    if (s.a < 0 || s.b < 0) {
+      const suture = g.plate ? g.plate.rift + g.plate.oy : w.terrain.rows;
+      if (s.a < 0) s.a = anchor(w, s.y0 - 25, Math.min(s.y0, suture - 3));
+      if (s.b < 0) s.b = anchor(w, Math.max(s.y1, suture + 3), s.y1 + 25);
+    }
     const open = s.a >= 0 && s.b >= 0 && lm[s.a] >= 0 && lm[s.a] === lm[s.b];
     if (open === s.open) return;
     s.open = open;
@@ -762,6 +796,203 @@ export function sillSide(s: SillRec, x: number, y: number): -1 | 0 | 1 {
   return Math.abs(d) < s.hw ? -1 : v < 0 ? 0 : 1;
 }
 
+// ---------------- 🧭 дрейф плит и дождевая тень (этап 3) ----------------
+
+/** Клеточные поля, которые едут вместе с плитой (= SNAP_CELLS снимка; проверка — в snapshot.ts). */
+export const PLATE_CELLS = ['grass', 'browse', 'forage', 'soil', 'litter', 'mic', 'fix', 'myc', 'act', 'nut'] as const satisfies readonly (keyof World)[];
+
+/** Граница плит по умолчанию: середина пролива Уоллеса (или 0,775 высоты без него). */
+export function plateRift(w: World): number {
+  const s = w.geo?.sills.find((q) => q.kind === 'wallace');
+  return s ? s.y0 + ((s.y1 - s.y0) >> 1) : Math.round(0.775 * w.terrain.rows);
+}
+
+/**
+ * Шаг плиты B на (vx, vy) клеток: клеточные поля плиты (корм, почва, микробы, лёд, правки высоты, следы), звери, туши,
+ * кости и все клеточные номера живой планеты (очередь правок, котловины, озёра, пожар, якоря проливов) — вместе с ней;
+ * на освободившемся месте — дно разлома, у шва при надвиге — поднятие (в очередь). Пересчёт рельефа — сразу после.
+ * Без случайностей. false — плита упёрлась (скорость сброшена, шага нет).
+ */
+function driftStep(w: World): boolean {
+  const W = w as unknown as GeoWorld;
+  const g = w.geo!, p = g.plate!, t = w.terrain;
+  const { cols, rows } = t, n = cols * rows, cell = w.cell;
+  let dx = p.vx, dy = p.vy;
+  p.next = w.tick + Math.round(GEO.DRIFT_T / g.speed);
+  if (Math.abs(p.ox + dx) > GEO.PLATE_MAXX) dx = p.vx = 0;
+  if (p.oy + dy < -GEO.PLATE_MAXN || p.oy + dy > GEO.PLATE_MAXS) dy = p.vy = 0;
+  if (dx === 0 && dy === 0) {
+    w.log('🧭 Плита упёрлась: дальше она не сдвинется', 'info', undefined, undefined, 'geo_plates');
+    return false;
+  }
+  // плита B сейчас — прямоугольник рядов [r0, r1) × столбцов [c0, c1); после шага — он же, сдвинутый и обрезанный краем
+  const onB = (cx: number, cy: number, ox: number, oy: number) => {
+    const sy = cy - oy, sx = cx - ox;
+    return sy >= p.rift && sy < rows && sx >= 0 && sx < cols;
+  };
+  const d = dx + dy * cols;
+  const inNew = new Uint8Array(n), inOld = new Uint8Array(n);
+  for (let cy = 0; cy < rows; cy++)
+    for (let cx = 0; cx < cols; cx++) {
+      const i = cy * cols + cx;
+      if (onB(cx, cy, p.ox, p.oy)) inOld[i] = 1;
+      if (onB(cx, cy, p.ox + dx, p.oy + dy)) inNew[i] = 1;
+    }
+  // плита — прямоугольник: ряд за рядом copyWithin (порядок рядов — чтобы источник читался до перезаписи)
+  const ny0 = Math.max(0, p.rift + p.oy + dy), ny1 = Math.min(rows, rows + p.oy + dy);
+  const nx0 = Math.max(0, p.ox + dx), nx1 = Math.min(cols, cols + p.ox + dx);
+  const segs: number[] = []; // [куда, откуда, длина]
+  if (nx1 > nx0)
+    for (let k = 0; k < ny1 - ny0; k++) {
+      const y = dy > 0 ? ny1 - 1 - k : ny0 + k;
+      segs.push(y * cols + nx0, y * cols + nx0 - d, nx1 - nx0);
+    }
+  const gaps: number[] = []; // [начало, длина] клеток, откуда плита ушла
+  for (let i = 0; i < n; ) {
+    if (inOld[i] && !inNew[i]) {
+      let j = i;
+      while (j < n && inOld[j] && !inNew[j]) j++;
+      gaps.push(i, j - i);
+      i = j;
+    } else i++;
+  }
+  type TA = Float32Array | Int32Array | Uint8Array | Int16Array;
+  const move = (a: TA, o: number, gap: number | null) => {
+    for (let k = 0; k < segs.length; k += 3) a.copyWithin(o + segs[k], o + segs[k + 1], o + segs[k + 1] + segs[k + 2]);
+    if (gap !== null) for (let k = 0; k < gaps.length; k += 2) a.fill(gap, o + gaps[k], o + gaps[k] + gaps[k + 1]);
+  };
+  for (const k of PLATE_CELLS) move(w[k] as Float32Array, 0, null);
+  move(W.claim, 0, 0);
+  move(W.claimTick, 0, -10);
+  move(w.ice!, 0, 0);
+  move(w.iceMax!, 0, 0);
+  move(w.elevD!, 0, 0);
+  for (let pl = 0; pl < 4; pl++) move(w.fx8!, pl * n, 0);
+  // клеточные номера: клетка плиты — со сдвигом; накрытая плитой клетка A — пропала (−1)
+  const mv = (i: number) => (i < 0 || i >= n ? i : inOld[i] ? i + d : inNew[i] ? -1 : i);
+  const pairs = (a: number[]) => {
+    const out: number[] = [];
+    for (let k = 0; k + 1 < a.length; k += 2) {
+      const j = mv(a[k]);
+      if (j >= 0) out.push(j, a[k + 1]);
+    }
+    return out;
+  };
+  g.pend = pairs(g.pend);
+  g.fire = pairs(g.fire);
+  g.kettleQ = g.kettleQ.map(mv).filter((i) => i >= 0);
+  g.lakeSeeds = g.lakeSeeds.map(mv).filter((i) => i >= 0);
+  g.sills = g.sills.map((s) => ({ ...s, cells: s.cells.map(mv).filter((i) => i >= 0), a: mv(s.a), b: mv(s.b) }));
+  // звери, туши и кости на плите едут с ней
+  const ix = (x: number, y: number) => clamp(Math.floor(y / cell), 0, rows - 1) * cols + clamp(Math.floor(x / cell), 0, cols - 1);
+  const X = dx * cell, Y = dy * cell, wd = w.width - 0.5, ht = w.height - 0.5;
+  let riders = 0;
+  for (const c of w.creatures) {
+    if (!c.alive || !inOld[ix(c.x, c.y)]) continue;
+    c.x = clamp(c.x + X, 0.5, wd);
+    c.y = clamp(c.y + Y, 0.5, ht);
+    c.gx += X;
+    c.gy += Y;
+    c.cell = ix(c.x, c.y);
+    riders++;
+  }
+  for (const k of w.corpses) {
+    if (!inOld[k.idx]) continue;
+    k.x = clamp(k.x + X, 0.5, wd);
+    k.y = clamp(k.y + Y, 0.5, ht);
+    k.idx = ix(k.x, k.y);
+  }
+  for (const b of w.boneMarks) {
+    if (!inOld[ix(b.x, b.y)]) continue;
+    b.x += X;
+    b.y += Y;
+  }
+  p.ox += dx;
+  p.oy += dy;
+  p.steps++;
+  rebuildIceList(w); // список клеток со льдом — производное: после сдвига льда (как при восстановлении снимка)
+  g.shadow = true;
+  // надвиг: поднятие у шва (первый ряд плиты B — s), в очередь, не выше гор + UPLIFT_TOP
+  if (dy < 0) {
+    const s = p.rift + p.oy;
+    const sums = pendSum(g);
+    const top = t.mountainLevel + GEO.UPLIFT_TOP, sea0 = t.seaLevel - g.seaQ;
+    const ph0 = hash01(w.seed, 0x0c09) * 2 * Math.PI, ph1 = hash01(w.seed, 0x0c0a) * 2 * Math.PI;
+    const prof: [number, number][] = [[-2, 0.5], [-1, 1], [0, 1], [1, 1], [2, 0.5]];
+    for (const [ry, k] of prof) {
+      const y = s + ry;
+      if (y < 0 || y >= rows) continue;
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        // высота клетки на новом месте: у плиты B — та, что приехала, у A — своя
+        const e = (inNew[i] ? t.elev[i - d] : t.elev[i]) + (sums.get(i) ?? 0) * 1e-4;
+        // мнётся только материковая кора (суша, шельф, дно пролива); глубокий океан уходит под плиту без гор
+        if (e < sea0 + GEO.UPLIFT_MIN) continue;
+        // хребет неровный: пики и перевалы вдоль шва (гладкий «шум» по столбцу, фазы — от зерна)
+        const f = 0.8 + 0.3 * Math.sin(x * 0.23 + ph0) + 0.15 * Math.sin(x * 0.61 + ph1);
+        const v = Math.min(Math.round(GEO.UPLIFT * k * f), Math.round((top - e) * 1e4), 32767 - w.elevD![i] - (sums.get(i) ?? 0));
+        if (v <= 0) continue;
+        g.pend.push(i, v);
+        sums.set(i, (sums.get(i) ?? 0) + v);
+      }
+    }
+    pendSums.get(g.pend)!.n = g.pend.length;
+  }
+  const yc = (p.rift + p.oy) * cell, xc = w.width / 2;
+  if (dy < 0 && !p.collided) {
+    p.collided = true;
+    w.log(`⛰ Плиты столкнулись: на шве растёт хребет ${p.name}`, 'milestone', xc, yc, 'geo_orogeny');
+  } else if (dy > 0 && !p.rifted) {
+    p.rifted = true;
+    w.log('🌊 Плиты расходятся: между ними раскрывается разлом — новое океанское дно', 'info', xc, yc, 'geo_plates');
+  }
+  if (GEO_PERF.on) GEO_PERF.riders += riders;
+  return true;
+}
+
+/** Летопись плит после пересчёта: хребет поднялся (горы на шве). */
+function plateLog(w: World): void {
+  const g = w.geo!, p = g.plate!, t = w.terrain;
+  if (!p.collided || p.mtn) return;
+  const s = p.rift + p.oy, cols = t.cols;
+  let k = 0;
+  for (let y = Math.max(0, s - 2); y <= Math.min(t.rows - 1, s + 2); y++)
+    for (let x = 0; x < cols; x++) {
+      const i = y * cols + x, b = t.biome[i];
+      // горы, которых не было: поднятие не меньше шага и без него клетка ниже гор
+      if ((b === B.Mountain || b === B.Snow) && w.elevD![i] >= GEO.UPLIFT && t.elev[i] - w.elevD![i] * 1e-4 <= t.mountainLevel) k++;
+    }
+  if (k < 20) return;
+  p.mtn = true;
+  w.log(`⛰ Хребет ${p.name} поднялся: ${k} клеток гор там, где сходятся плиты`, 'milestone', w.width / 2, s * w.cell, 'geo_orogeny');
+}
+
+/** 🏜 Летопись дождевой тени: стало заметно больше суши, где влажность ниже исходной на 15 % и больше. */
+function shadowLog(w: World): void {
+  const g = w.geo!, t = w.terrain, K = t.moistK!;
+  const n = K.length, reg = new Map<number, number>();
+  let k = 0, sum = 0;
+  for (let i = 0; i < n; i++) {
+    if (K[i] >= 0.85 || t.biome[i] <= B.Shallow) continue;
+    k++;
+    sum += 1 - K[i];
+    const r = t.region[i];
+    if (r >= 0) reg.set(r, (reg.get(r) ?? 0) + 1);
+  }
+  if (k < 40 || k < 1.5 * g.shadowN + 40) {
+    if (k < g.shadowN / 2) g.shadowN = k;
+    return;
+  }
+  g.shadowN = k;
+  let best = -1, bn = 0;
+  for (const [r, c] of reg) if (c > bn || (c === bn && r < best)) { bn = c; best = r; }
+  const R = best >= 0 ? t.regions[best] : null;
+  w.log(`🏜 За хребтом стало сухо${R ? `: «${R.name}»` : ''} — влажность ниже на ${Math.round((100 * sum) / k)}% (${k} клеток)`, 'info', R?.cx, R?.cy, 'geo_rainshadow');
+}
+
+/** Шаг плиты сейчас (стенд и урок): то же, что в проходе, без ожидания DRIFT_T. */
+export const _driftStep = driftStep;
+
 // ---------------- действия игрока (вкладка «Климат») ----------------
 
 export type GeoAction =
@@ -770,7 +1001,9 @@ export type GeoAction =
   | { k: 'co2'; ppm: number | null }
   | { k: 'iceAge'; mode: 'cycle' | 'now' | 'end' | 'off' }
   | { k: 'sea'; dm: number }
-  | { k: 'geoSpeed'; v: 1 | 4 };
+  | { k: 'geoSpeed'; v: 1 | 4 }
+  | { k: 'ridge'; pts: number[] }
+  | { k: 'drift'; vx: -1 | 0 | 1; vy: -1 | 0 | 1 };
 
 /** Действия «Климата» живой планеты (без неё — ничего). */
 export function geoAction(w: World, a: GeoAction): void {
@@ -806,6 +1039,20 @@ export function geoAction(w: World, a: GeoAction): void {
     case 'sea': {
       g.seaPin = clamp(Math.round(a.dm), -150, 80);
       w.log(g.seaPin === 0 ? '🌊 Море снова «как у природы»: за ним следит лёд' : `🌊 Море закреплено: ${g.seaPin > 0 ? '+' : '−'}${Math.abs(g.seaPin)} м к ледникам`, 'player', undefined, undefined, 'geo_sealevel');
+      break;
+    }
+    case 'ridge':
+      ridgeTool(w, a.pts);
+      break;
+    case 'drift': {
+      const vx = clamp(Math.round(a.vx), -1, 1), vy = clamp(Math.round(a.vy), -1, 1);
+      const p = (g.plate ??= { rift: plateRift(w), ox: 0, oy: 0, vx: 0, vy: 0, next: 0, collided: false, name: properName(mulberry32(w.seed ^ 0x0c09e)), mtn: false, rifted: false, steps: 0 });
+      const was = p.vx !== 0 || p.vy !== 0;
+      p.vx = vx;
+      p.vy = vy;
+      if (!was) p.next = w.tick + Math.round(GEO.DRIFT_T / g.speed);
+      const dir = vy < 0 ? 'на север — навстречу северной' : vy > 0 ? 'на юг — прочь от северной' : vx < 0 ? 'на запад — вдоль разлома' : vx > 0 ? 'на восток — вдоль разлома' : '';
+      w.log(dir ? `🧭 Южная плита поехала ${dir}${vx && vy ? (vx < 0 ? ' и на запад' : ' и на восток') : ''}: клетка за ${(GEO.DRIFT_T / g.speed / 6000).toFixed(2).replace('.', ',')} года` : '🧭 Плиты остановились', 'player', undefined, undefined, vy < 0 ? 'geo_orogeny' : 'geo_plates');
       break;
     }
     case 'geoSpeed':
@@ -903,6 +1150,50 @@ function lineTool(w: World, pts: number[], mode: 'deep' | 'shallow' | 'raise'): 
   if (s.a >= 0 && sillSide(s, ((s.a % t.cols) + 0.5) * w.cell, (Math.floor(s.a / t.cols) + 0.5) * w.cell) === 1) [s.a, s.b] = [s.b, s.a];
   g.sills = [...g.sills, s];
   w.log(`✂️ Вы прорезали ${mode === 'deep' ? 'глубокий пролив' : 'мелкий пролив (в ледниковье осохнет)'} ${name}${where ? ` у «${where}»` : ''}`, 'player', mx, my, mode === 'deep' ? 'geo_wallace' : 'geo_landbridge');
+}
+
+/**
+ * ⛰ Хребет вдоль линии игрока: суша поднимается до гор + RIDGE_H посередине (к краям — ниже) — правками в очередь;
+ * со следующим пересчётом включается дождевая тень (западный ветер теряет пар на хребте, за ним — сухо).
+ */
+function ridgeTool(w: World, pts: number[]): void {
+  const g = w.geo!, t = w.terrain, E = w.elevD!;
+  if (pts.length < 2) return;
+  const cells = lineCells(w, pts, GEO.RIDGE_HW);
+  const sums = pendSum(g);
+  const R = GEO.RIDGE_HW * w.cell;
+  let k = 0;
+  for (const i of cells) {
+    const px = ((i % t.cols) + 0.5) * w.cell, py = (Math.floor(i / t.cols) + 0.5) * w.cell;
+    const dd = segDist(pts, px, py) / R;
+    const target = t.mountainLevel + GEO.RIDGE_H * (1 - 0.6 * dd * dd);
+    const pv = sums.get(i) ?? 0;
+    const cur = t.elev[i] + pv * 1e-4;
+    if (cur >= target) continue;
+    const dz = Math.min(Math.round((target - cur) * 1e4), 32767 - E[i] - pv);
+    if (dz <= 0) continue;
+    g.pend.push(i, dz);
+    sums.set(i, pv + dz);
+    k++;
+  }
+  pendSums.get(g.pend)!.n = g.pend.length;
+  g.shadowQ = true;
+  const mx = (pts[0] + pts[pts.length - 2]) / 2, my = (pts[1] + pts[pts.length - 1]) / 2;
+  const where = t.regionAt(mx, my)?.name;
+  w.log(`⛰ Вы подняли хребет${where ? ` у «${where}»` : ''}: ${k} клеток стали горами — ветер дует с запада, посмотрим, что станет за ним`, 'player', mx, my, 'geo_rainshadow');
+}
+
+/** Расстояние от точки до ломаной (px). */
+function segDist(pts: number[], x: number, y: number): number {
+  let best = Infinity;
+  for (let k = 0; k + 1 < pts.length; k += 2) {
+    const ax = pts[k], ay = pts[k + 1], bx = pts[k + 2] ?? ax, by = pts[k + 3] ?? ay;
+    const dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    const u = L2 > 0 ? clamp(((x - ax) * dx + (y - ay) * dy) / L2, 0, 1) : 0;
+    best = Math.min(best, Math.hypot(x - (ax + u * dx), y - (ay + u * dy)));
+    if (pts.length < 4) break;
+  }
+  return best;
 }
 
 /** 🗺 «Берингия»: самая узкая полоса суши на севере (y 0,15…0,35) — линия мелкого пролива во всю ширину (px). */

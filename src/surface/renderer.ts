@@ -17,7 +17,7 @@ interface Particle {
 }
 
 /** Линзы «микромира»: что раскрашивает слой клеток. */
-export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease' | 'depth' | 'refugia';
+export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease' | 'depth' | 'refugia' | 'rain';
 
 /** Что игрок уже успел увидеть на экране (для карточек фактов; читает view). */
 export interface Seen {
@@ -110,6 +110,7 @@ const PLANKTON_RAMP = [[11, 31, 77], [27, 143, 191], [127, 224, 122]];
 /** 🏔 Цвета рефугиумов (по порядку: крупнейший — первый). */
 const REF_COLORS: [number, number, number][] = [[90, 200, 120], [240, 180, 70], [120, 160, 240], [230, 110, 160], [170, 120, 230], [100, 210, 210], [210, 210, 90], [240, 130, 90]];
 const DEPTH_RAMP = [[150, 235, 230], [40, 120, 200], [8, 22, 70]];
+const RAIN_RAMP = [[214, 170, 96], [120, 170, 80], [40, 110, 190]];
 
 interface Deco {
   kind: 'tree' | 'acacia' | 'bush' | 'reed' | 'cactus' | 'rock' | 'snowrock' | 'flower' | 'pebble' | 'spring' | 'stromatolite' | 'mat';
@@ -1189,6 +1190,21 @@ export class SurfaceRenderer {
         out[o + 3] = 0.85 * 255;
         return;
       }
+      case 'rain': {
+        // 💧 влажность суши; дождевая тень (влажность ниже исходной) — красным поверх
+        if (b.water) {
+          out[o] = 10; out[o + 1] = 20; out[o + 2] = 40; out[o + 3] = 0.5 * 255;
+          return;
+        }
+        ramp(RAIN_RAMP, clamp(t.moist[i] / 0.8, 0, 1), out, o);
+        const K = t.moistK ? t.moistK[i] : 1;
+        if (K < 0.97) {
+          const a = clamp((1 - K) * 2.2, 0, 0.85);
+          out[o] = out[o] * (1 - a) + 230 * a; out[o + 1] = out[o + 1] * (1 - a) + 50 * a; out[o + 2] = out[o + 2] * (1 - a) + 40 * a;
+        }
+        out[o + 3] = 0.85 * 255;
+        return;
+      }
       case 'refugia': {
         // 🏔 рефугиумы последнего пика ледниковья: свой цвет у каждого; лёд — белый, прочая суша — серая
         if (b.water) {
@@ -1996,8 +2012,35 @@ export class SurfaceRenderer {
 
     this.drawParticles();
 
-    // ☄️🌋 ударная зима — бурая тьма, вулканическая — желтоватая дымка
+    // 🧭 шов плит: пунктир через всю карту, стрелка — куда едет южная плита
     const geo = world.lp ? world.geo : null;
+    const pl = geo?.plate;
+    if (pl) {
+      const y = (pl.rift + pl.oy) * world.cell;
+      ctx.save();
+      ctx.strokeStyle = pl.vx || pl.vy ? 'rgba(255,120,70,0.85)' : 'rgba(255,170,120,0.55)';
+      ctx.lineWidth = 2.5 / z;
+      ctx.setLineDash([14 / z, 9 / z]);
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(world.width, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      if (pl.vx || pl.vy) {
+        const ax = cam.x, ay = y + 40 / z, L = 26 / z;
+        ctx.fillStyle = ctx.strokeStyle;
+        ctx.beginPath();
+        const ang = Math.atan2(pl.vy, pl.vx);
+        ctx.moveTo(ax + Math.cos(ang) * L, ay + Math.sin(ang) * L);
+        ctx.lineTo(ax + Math.cos(ang + 2.5) * L * 0.6, ay + Math.sin(ang + 2.5) * L * 0.6);
+        ctx.lineTo(ax + Math.cos(ang - 2.5) * L * 0.6, ay + Math.sin(ang - 2.5) * L * 0.6);
+        ctx.closePath();
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+
+    // ☄️🌋 ударная зима — бурая тьма, вулканическая — желтоватая дымка
     if (geo && (geo.dark > 0.02 || geo.aer > 0.03)) {
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
       if (geo.aer > 0.03) {

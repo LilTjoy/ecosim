@@ -1,12 +1,12 @@
 // 🌋 «🛠 Стихии» живой планеты: на компьютере — всплывающая панель у инструментов, на телефоне — шторка снизу.
 // Этап 1a — вкладка «Климат»: CO₂, ледниковья, уровень моря, скорость геологии. Всё — действиями мира (их пишет
 // машина времени), сама панель мир не меняет и ссылку на w.geo не держит (loadWorld заменяет его целиком).
-import { beringiaLine, co2Shift, geoKyr, metres, panamaLine } from '../sim/geo';
+import { beringiaLine, co2Shift, GEO, geoKyr, metres, panamaLine } from '../sim/geo';
 import type { ActionInput } from '../sim/timeline';
 import { CLIMATE_C, type World } from '../sim/world';
 
 /** Инструменты «Земли»: кисть ⬆/⬇, ✂️ глубокий и мелкий пролив, 🌉 перешеек (рисуются на карте). */
-export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus' | 'volcano' | 'impact' | 'tsunami' | 'fire';
+export type GeoTool = 'terraUp' | 'terraDown' | 'strait' | 'straitS' | 'isthmus' | 'ridge' | 'volcano' | 'impact' | 'tsunami' | 'fire';
 
 export interface GeoSheetHost {
   world: World;
@@ -24,6 +24,7 @@ const TOOL_HINT: Record<GeoTool, string> = {
   strait: '✂️ Проведите линию поперёк суши — глубокий пролив, как у Уоллеса: пешком не перейти никогда',
   straitS: '✂️ Проведите линию поперёк суши — мелкий пролив: в ледниковье он осохнет и станет мостом',
   isthmus: '🌉 Проведите линию поперёк пролива — от берега до берега',
+  ridge: '⛰ Проведите линию — там поднимется хребет; ветер дует с запада, за хребтом станет сухо',
   volcano: '🌋 Нажмите на карту — проснётся ближайший вулкан (горы или горячий источник)',
   impact: '☄️ Нажмите на карту — туда упадёт астероид',
   tsunami: '🌊 Нажмите на море у берега — оттуда придёт волна',
@@ -115,6 +116,8 @@ export class GeoSheet {
     const head = `<div class="gs-head"><nav class="gs-tabs"><button class="${this.tab === 'land' ? 'active' : ''}" data-gt="land">⛰ Земля</button><button class="${this.tab === 'sky' ? 'active' : ''}" data-gt="sky">🌋 Небо</button><button class="${this.tab === 'climate' ? 'active' : ''}" data-gt="climate">🌡 Климат</button></nav><button class="x" data-g="close" title="Закрыть">✕</button></div>`;
     if (this.tab === 'land') {
       const tb = (t: GeoTool, label: string) => `<button data-gtool="${t}" class="${this.host.tool() === t ? 'active' : ''}" title="${TOOL_HINT[t]}">${label}</button>`;
+      const pl = g.plate;
+      const drb = (vx: number, vy: number, label: string, tip: string) => `<button data-g="drift" data-v="${vx},${vy}" class="${(pl?.vx ?? 0) === vx && (pl?.vy ?? 0) === vy && (vx || vy || pl) ? 'active' : ''}" title="${tip}">${label}</button>`;
       const sills = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
       this.el.innerHTML = `${head}<div class="gs-body">
         <div class="gs-row"><b>🏔 Рельеф</b> <a data-fact="geo_bathymetry">?</a></div>
@@ -124,6 +127,10 @@ export class GeoSheet {
         <div class="gs-btns"><button data-g="beringia" title="Мелкий пролив во всю ширину на севере острова: в межледниковье — море, в ледниковье — мост, как Берингия">🗺 Берингия</button><button data-g="panama" title="Перешеек через пролив Уоллеса — две давно разделённые фауны встретятся, как в Панаме">🌉 Опыт «Панама»</button> <a data-fact="geo_gabi">?</a></div>
         <div class="gs-tip muted small">${TOOL_HINT[(this.host.tool() as GeoTool)] ?? 'Выберите инструмент и нарисуйте на карте. Рельеф меняется с началом следующего шага; всё можно отменить.'}</div>
         <ul class="gs-sills">${sills}</ul>
+        <div class="gs-row"><b>⛰ Горы и 🧭 плиты</b> <a data-fact="geo_rainshadow">?</a> <a data-fact="geo_orogeny">?</a> <a data-fact="geo_plates">?</a></div>
+        <div class="gs-btns">${tb('ridge', '⛰ Хребет')}</div>
+        <div class="gs-btns gs-drift" title="Южная плита — всё южнее пролива Уоллеса">${drb(0, -1, '⬆ На север', 'Навстречу северной: столкновение, растёт хребет, пролив закроется')}${drb(-1, 0, '⬅', 'Вдоль разлома на запад')}${drb(0, 0, '⏹', 'Остановить плиты')}${drb(1, 0, '➡', 'Вдоль разлома на восток')}${drb(0, 1, '⬇ На юг', 'Прочь от северной: раскроется разлом — новое океанское дно')}</div>
+        <div class="gs-plate muted small">${plateText(w)}</div>
       </div>`;
       return;
     }
@@ -182,6 +189,14 @@ export class GeoSheet {
       const ul = this.el.querySelector<HTMLElement>('.gs-sills');
       const html = g.sills.map((s) => `<li>${s.open ? '🌉' : '🌊'} <b>${s.name}</b> <span class="muted small">${s.kind === 'sill' ? 'мелкий порог' : s.kind === 'wallace' ? 'пролив Уоллеса' : 'пролив игрока'} — ${s.open ? 'сейчас перешеек' : 'сейчас пролив'}</span></li>`).join('');
       if (ul && ul.innerHTML !== html) ul.innerHTML = html;
+      const pe = this.el.querySelector<HTMLElement>('.gs-plate');
+      const ph = plateText(w);
+      if (pe && pe.innerHTML !== ph) pe.innerHTML = ph;
+      const pl = g.plate;
+      this.el.querySelectorAll<HTMLElement>('button[data-g=drift]').forEach((x) => {
+        const [vx, vy] = x.dataset.v!.split(',').map(Number);
+        x.classList.toggle('active', !!pl && pl.vx === vx && pl.vy === vy);
+      });
       return;
     }
     const q = <T extends HTMLElement>(s: string) => this.el.querySelector<T>(s);
@@ -240,6 +255,13 @@ export class GeoSheet {
       if (narrow()) return this.close();
       return this.render();
     }
+    if (k === 'drift') {
+      const [vx, vy] = v.split(',').map(Number) as [-1 | 0 | 1, -1 | 0 | 1];
+      const pl = this.host.world.geo?.plate;
+      if (!pl && !vx && !vy) return;
+      this.host.act({ k: 'drift', vx, vy });
+      return this.render();
+    }
     if (k === 'beringia') {
       this.host.act({ k: 'strait', pts: beringiaLine(this.host.world), deep: false });
       return this.render();
@@ -276,6 +298,16 @@ export class GeoSheet {
     if (r.dataset.g === 'sea' && v !== g.seaPin) this.host.act({ k: 'sea', dm: v });
     this.render();
   }
+}
+
+/** Плиты словами: где южная плита и куда едет (1 клетка ≈ 16 км). */
+export function plateText(w: World): string {
+  const p = w.geo?.plate;
+  if (!p) return 'Плиты стоят. Южная плита — всё, что южнее пролива Уоллеса; шаг — клетка (≈ 16 км) за ' + (GEO.DRIFT_T / (w.geo?.speed ?? 1) / 6000).toFixed(2).replace('.', ',') + ' года.';
+  const km = (c: number) => `${Math.abs(c) * 16} км`;
+  const where = [p.oy < 0 ? `${km(p.oy)} на север` : p.oy > 0 ? `${km(p.oy)} на юг` : '', p.ox < 0 ? `${km(p.ox)} на запад` : p.ox > 0 ? `${km(p.ox)} на восток` : ''].filter(Boolean).join(' и ');
+  const go = p.vy < 0 ? 'едет на север' : p.vy > 0 ? 'едет на юг' : p.vx < 0 ? 'едет на запад' : p.vx > 0 ? 'едет на восток' : 'стоит';
+  return `Южная плита ${where ? `сдвинулась на ${where}` : 'на месте'} и ${go}${p.collided ? ` · хребет ${p.name}${p.mtn ? ' поднялся' : ' растёт'}` : ''}${p.rifted && p.oy > 0 ? ' · разлом раскрыт' : ''}${w.geo!.shadow ? ' · дождевая тень есть' : ''}`;
 }
 
 /** Строка «сейчас» вкладки «Небо»: дымка, темнота, огонь, закрытый остров. */

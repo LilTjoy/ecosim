@@ -7,7 +7,7 @@ import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
   outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, icePeakOk,
-  vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot,
+  vicNow, wallaceFaunas, panamaNow, VIC_SEED, PANAMA_SEED, KPG_SEED, kpgNow, kpgSpot, SHADOW_SEED, shadowLine, shadowNow,
 } from '../src/learn/scenarios';
 import { GEO, panamaLine } from '../src/sim/geo';
 import { LESSONS } from '../src/learn/lessons';
@@ -310,6 +310,29 @@ if (!args.includes('--planet')) {
     const k = kpgNow(w, t0);
     ok(!!s && s.k * 2 >= s.N, `После астероида, зерно ${KPG_SEED}: итог через ${tk} тактов — исчезло ${s?.k}/${s?.N} видов, медиана травоядных ${s?.m0.toFixed(2)} → ${s?.m1.toFixed(2)}; массовое вымирание ${k?.mass ? 'да' : 'нет'}; радиация ${k?.rad ? `через ${tr}` : 'нет'} (не обязательна: шаг урока с giveUp)`);
     lap('после астероида', t);
+  }
+  // «🏜 Дождевая тень»: год → хребет на западе → за ним суше (≥ 30 %) → плита на север (×4) → горы на шве и мост через Уоллеса
+  {
+    const t = Date.now();
+    const L = LESSONS.find((x) => x.id === 'shadow');
+    const ids = new Set(allCards().map((c) => c.id));
+    ok(!!L && L.cards.every((id) => ids.has(id)), `Дождевая тень: урок есть, карточки на месте`);
+    Math.random = mulberry32(SHADOW_SEED * 7919 + 3);
+    const w = new World(3200, 2000);
+    w.settings.livePlanet = true;
+    w.reset('rules', SHADOW_SEED, { ...EARTH_ENV });
+    steps(w, YEAR);
+    const R = shadowLine(w);
+    w.apply({ t: w.tick, k: 'ridge', pts: R.pts });
+    steps(w, YEAR / 2);
+    const s1 = shadowNow(w, R.x, R.y0, R.y1)!;
+    w.apply({ t: w.tick, k: 'geoSpeed', v: 4 });
+    w.apply({ t: w.tick, k: 'drift', vx: 0, vy: -1 });
+    let tk = 0;
+    while (tk < 3 * YEAR && !(shadowNow(w, R.x, R.y0, R.y1)?.plate?.mtn && shadowNow(w, R.x, R.y0, R.y1)?.wallOpen)) { steps(w, 200); tk += 200; }
+    const s2 = shadowNow(w, R.x, R.y0, R.y1)!;
+    ok(s1.lee >= 0.3 && !!s2.plate?.mtn && s2.wallOpen, `Дождевая тень, зерно ${SHADOW_SEED}: хребет x=${R.x}, за ним суше на ${Math.round(100 * s1.lee)}% (${s1.n} клеток, леса ${s1.forest}); плита на север: горы ${s2.plate?.mtn ? 'да' : 'нет'}, пролив Уоллеса закрыт ${s2.wallOpen ? 'да' : 'нет'} через ${tk} тактов (сдвиг ${s2.plate?.oy})`);
+    lap('дождевая тень', t);
   }
 }
 console.log(`\n${failed ? `✗ Провалено проверок: ${failed}` : '✓ Все проверки пройдены'} · ${((Date.now() - t0) / 1000).toFixed(0)} с`);

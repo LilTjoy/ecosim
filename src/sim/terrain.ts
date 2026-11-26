@@ -94,9 +94,19 @@ export interface Region {
 
 /** 🌋 Входы производного рельефа (живая планета): всё, от чего зависит рельеф сверх seed и env. */
 export interface PlateView {
+  /** Сдвиг южной плиты B от исходного места, клеток. */
   ox: number;
   oy: number;
+  /** Первый ряд плиты B в исходном рельефе (граница плит — посередине пролива Уоллеса). */
+  rift: number;
 }
+/** 🌋 Дно разлома между разошедшимися плитами — от исходного моря (−0,13 ≈ −390 м: глубоко при любом море). */
+export const OCEAN_FLOOR = -0.13;
+/**
+ * 🌋 Дождевая тень: западный ветер приносит с моря пар (1) и теряет его, поднимаясь выше, чем поднимался с берега
+ * (V = exp(−UP·(подъём над исходным морем) − BASE·клеток суши)); влажность ×(K0 + V)/(K0 + V исходного рельефа).
+ */
+export const SHADOW = { BASE: 0.006, UP: 3, K0: 0.05, KMIN: 0.35, KMAX: 1.5 };
 export interface DeriveInput {
   /** Сдвиг уровня моря от исходного (единицы высоты). */
   seaQ: number;
@@ -145,6 +155,7 @@ export function deriveHash(inp: DeriveInput): number {
   if (d) {
     for (let i = 0; i < d.length; i++) h = Math.imul(h ^ (d[i] & 0xffff), 16777619);
   }
+  if (inp.plate) h = Math.imul(h ^ (inp.plate.rift + 0x7e), 16777619);
   h >>>= 0;
   return h === 0 ? 1 : h;
 }
@@ -207,6 +218,14 @@ export class Terrain {
   private base: TerrainBase | null = null;
   private hbuf: HydroBuf | null = null;
   private dbuf: { biome: Uint8Array; river: Uint8Array; moist: Float32Array; changed: Int32Array; label: Int16Array; queue: Int32Array; stem: Int32Array } | null = null;
+  /** 🌋 Плиты: откуда (исходная клетка) пришла каждая клетка; −1 — дно разлома (null — плиты не двигались). */
+  src: Int32Array | null = null;
+  /** 🌋 Плиты последнего пересчёта (null — нет). */
+  plate: PlateView | null = null;
+  /** 🌋 Дождевая тень: множитель влажности относительно исходного рельефа (null — тени нет). */
+  moistK: Float32Array | null = null;
+  /** f(пар) исходного рельефа (лениво). */
+  private v0: Float32Array | null = null;
 
   constructor(
     readonly width: number,
@@ -453,7 +472,8 @@ export class Terrain {
         for (let q = 0; q < len; q++) {
           const c = stem![q];
           if (c < minCell) minCell = c;
-          const v = base.rivId[c];
+          const sc = this.src ? this.src[c] : c;
+          const v = sc >= 0 ? base.rivId[sc] : -1;
           if (v >= 0) votes![v]++;
         }
         let bestV = -1;
@@ -477,7 +497,7 @@ export class Terrain {
     }
     if (derive) {
       // источники — исходные, только на суше
-      this.springs = base!.springs.filter((c) => !wet(c));
+      this.springs = (this.src ? base!.springs.map((c) => this.fwd(c)) : base!.springs).filter((c) => c >= 0 && !wet(c));
       return;
     }
 
@@ -632,8 +652,6 @@ export class Terrain {
    * ближайшей исходной суши, затонувшая — −1; список regions не меняется.
    */
   derive(inp: DeriveInput): DeriveOut {
-    if (inp.plate) throw new Error('Terrain.derive: дрейф плит — этап 3');
-    if (inp.shadow) throw new Error('Terrain.derive: дождевая тень — этап 3');
     const base = this.ensureBase();
     const D = this.dbuf!;
     const n = this.cols * this.rows;
@@ -657,24 +675,46 @@ export class Terrain {
       this.seaLevel = base.sea;
       this.lake = null;
       this.lakes = [];
+      this.src = null;
+      this.plate = null;
+      this.moistK = null;
       this.rev = 0;
     } else {
       this.seaLevel = base.sea + inp.seaQ;
       const d = inp.elevD;
       const span = this.mountainLevel - base.sea;
+      // плиты: исходная клетка каждой клетки (плита B — ряды от rift, сдвинута на ox, oy; разлом — дно океана)
+      const src = inp.plate ? this.plateSrc(inp.plate) : null;
+      this.src = src;
+      this.plate = inp.plate ? { ...inp.plate } : null;
+      const floor = base.sea + OCEAN_FLOOR;
       for (let i = 0; i < n; i++) {
         const dz = d ? d[i] : 0;
-        if (dz === 0) {
+        const si = src ? src[i] : i;
+        if (dz === 0 && si === i) {
           elev[i] = base.elev[i];
           baseTemp[i] = base.temp[i];
+          moist[i] = base.moist[i];
         } else {
-          const e = (elev[i] = base.elev[i] + dz * 1e-4);
-          // высота охлаждает (как в generate, от исходного моря): и подъём, и опускание
+          const e = (elev[i] = (si >= 0 ? base.elev[si] : floor) + dz * 1e-4);
+          // высота охлаждает (как в generate, от исходного моря): и подъём, и опускание; широта — по месту клетки
           const h = Math.max(0, (e - base.sea) / span);
           baseTemp[i] = clamp(base.tpre[i] - h * h * 0.3, 0, 1);
+          moist[i] = base.moist[si >= 0 ? si : i];
         }
       }
-      moist.set(base.moist);
+      // дождевая тень: пар западного ветра теряется на подъёмах — влажность ×f(пар)/f(пар исходного рельефа)
+      if (inp.shadow) {
+        const K = (this.moistK ??= new Float32Array(n));
+        const v0 = this.baseVapour();
+        this.vapour(elev, this.seaLevel, K);
+        for (let i = 0; i < n; i++) {
+          const si = src ? src[i] : i;
+          const k = si >= 0 ? clamp((SHADOW.K0 + K[i]) / (SHADOW.K0 + v0[si]), SHADOW.KMIN, SHADOW.KMAX) : 1;
+          K[i] = k;
+          if (k !== 1) moist[i] = Math.min(1, moist[i] * k);
+        }
+      } else this.moistK = null;
       for (let i = 0; i < n; i++) biome[i] = this.classify(elev[i], moist[i], baseTemp[i]);
       this.hydrology(true);
       this.lakes = [];
@@ -696,8 +736,68 @@ export class Terrain {
       if (y < r0) r0 = y;
       if (y > r1) r1 = y;
     }
-    if (landChanged && this.rev !== 0) this.relabel();
+    if ((landChanged || this.src) && this.rev !== 0) this.relabel();
     return { changed: D.changed.subarray(0, m), prev: D.biome, landChanged, bbox: [c0, r0, c1, r1] };
+  }
+
+  /** Плиты: исходная клетка каждой клетки (плита B — ряды ≥ rift исходного рельефа, сдвинутые на ox, oy; −1 — разлом). */
+  private plateSrc(p: PlateView): Int32Array {
+    const { cols, rows } = this;
+    const S = (this.src && this.src.length === cols * rows ? this.src : new Int32Array(cols * rows));
+    for (let cy = 0; cy < rows; cy++) {
+      const sy = cy - p.oy;
+      const onB = sy >= p.rift && sy < rows;
+      for (let cx = 0; cx < cols; cx++) {
+        const i = cy * cols + cx;
+        if (onB) {
+          const sx = cx - p.ox;
+          S[i] = sx >= 0 && sx < cols ? sy * cols + sx : -1;
+        } else S[i] = cy >= p.rift ? -1 : i;
+      }
+    }
+    return S;
+  }
+
+  /** Пар западного ветра по рядам (с запада на восток): над водой — полный, над сушей теряется на новой высоте и с расстоянием. */
+  private vapour(elev: Float32Array, sea: number, out: Float32Array): void {
+    const { cols, rows } = this;
+    const ref = this.base!.sea;
+    for (let y = 0; y < rows; y++) {
+      let hm = ref, L = 0;
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        const e = elev[i];
+        if (e < sea) {
+          hm = ref;
+          L = 0;
+          out[i] = 1;
+        } else {
+          if (e > hm) hm = e;
+          L++;
+          out[i] = Math.exp(-SHADOW.UP * (hm - ref) - SHADOW.BASE * L);
+        }
+      }
+    }
+  }
+  private baseVapour(): Float32Array {
+    if (this.v0) return this.v0;
+    const b = this.base!;
+    this.v0 = new Float32Array(this.cols * this.rows);
+    this.vapour(b.elev, b.sea, this.v0);
+    return this.v0;
+  }
+
+  /** Куда переехала исходная клетка (−1 — ушла за край или под другую плиту). */
+  fwd(s: number): number {
+    const src = this.src, p = this.plate;
+    if (!src || !p) return s;
+    const { cols, rows } = this;
+    const sx = s % cols, sy = (s / cols) | 0;
+    if (sy < p.rift) return src[s] === s ? s : -1;
+    const x = sx + p.ox, y = sy + p.oy;
+    if (x < 0 || y < 0 || x >= cols || y >= rows) return -1;
+    const j = y * cols + x;
+    return src[j] === s ? j : -1;
   }
 
   /**
@@ -755,8 +855,10 @@ export class Terrain {
     const n = cols * rows;
     const lab = D.label, q = D.queue;
     let qt = 0;
+    const src = this.src;
     for (let i = 0; i < n; i++) {
-      lab[i] = base.region[i];
+      const si = src ? src[i] : i;
+      lab[i] = si >= 0 ? base.region[si] : -1;
       if (lab[i] >= 0) q[qt++] = i;
     }
     for (let qh = 0; qh < qt; qh++) {

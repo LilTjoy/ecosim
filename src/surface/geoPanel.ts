@@ -3,6 +3,7 @@
 // Только чтение мира: ссылку на w.geo не держит (loadWorld заменяет его целиком).
 import { GEO, geoKyr, metres, sideWords } from '../sim/geo';
 import type { World } from '../sim/world';
+import { plateText } from './geoSheet';
 
 const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
 const plural = (n: number, a: string, b: string, c: string) => {
@@ -88,6 +89,13 @@ export function geoPanelHtml(w: World): string {
     const sum = ls ? `<p class="small">Год после катастрофы: исчезло ${ls.k} из ${ls.N} ${plural(ls.N, 'вида', 'видов', 'видов')}${ls.m0 > 0 ? ` · медиана размера травоядных ${ls.m0.toFixed(1).replace('.', ',')} → ${ls.m1 > 0 ? ls.m1.toFixed(1).replace('.', ',') : 'нет травоядных'}` : ''} · зверей ${ls.n0} → ${ls.n1} <a data-fact="lilliput">?</a></p>` : '';
     if (g.cats.length || now.length)
       out.push(`<h4>Катастрофы <a data-fact="geo_bigfive">?</a></h4>${now.length ? `<p class="small">${now.join(' · ')}</p>` : ''}<ul class="gp-list">${[...g.cats].reverse().slice(0, 6).map((c) => `<li class="small">${esc(c.text)} <span class="muted">(год ${Math.floor(c.t / 6000) + 1})</span></li>`).join('')}</ul>${sum}<p class="muted small">Извержений: ${S.eruptions} · ударов: ${S.impacts} · пожаров: ${S.fires} · массовых вымираний: ${S.massExt}</p>`);
+  }
+  // 🧭 плиты и дождевая тень
+  if (g.plate || g.shadow) {
+    let dry = 0, land = 0;
+    const K = t.moistK;
+    if (K) for (let i = 0; i < K.length; i++) if (t.biome[i] > 1) { land++; if (K[i] < 0.85) dry++; }
+    out.push(`<h4>Плиты и горы <a data-fact="geo_plates">?</a> <a data-fact="geo_orogeny">?</a> <a data-fact="geo_rainshadow">?</a></h4><p class="small">${plateText(w)}${K && land ? ` · суши в дождевой тени (влажность −15% и больше): ${Math.round((100 * dry) / land)}%` : ''}</p>`);
   }
   // следы льда
   const lakes = t.lakes;
