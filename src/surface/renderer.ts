@@ -1348,14 +1348,23 @@ export class SurfaceRenderer {
     return [Math.max(0, Math.floor(x0 / cell)), Math.min(t.cols - 1, Math.floor(x1 / cell)), Math.max(0, Math.floor(y0 / cell)), Math.min(t.rows - 1, Math.floor(y1 / cell))];
   }
 
-  /** Свечение планктона в клетке воды ночью (0..1). */
+  /**
+   * Свечение планктона в клетке воды ночью (0..1). Цветение пятнами (плавный шум ~6 клеток, медленно плывёт), над
+   * глубиной слабее, чем на мелководье: иначе узкий тёплый пролив, где планктона до потолка, светится сплошной линией.
+   */
   private glowAt(i: number, night: number): number {
     const w = this.world;
     const t = w.terrain;
     const T = t.baseTemp[i] + w.tempShift;
     if (T <= 0.35) return 0;
     const nu = (w.nut[i] - 0.9) / 0.4 + 0.3;
-    return night * Math.min(1, w.grass[i] / BIOMES[t.biome[i]].fert) * Math.min(1, (T - 0.35) * 3) * (nu < 0 ? 0 : nu > 1 ? 1 : nu);
+    const cols = t.cols, fx = (i % cols) / 6 + this.frame * 2e-4, fy = Math.floor(i / cols) / 6;
+    const x0 = Math.floor(fx), y0 = Math.floor(fy), ux = fx - x0, uy = fy - y0;
+    const h = (a: number, b: number) => hashI(a * 7919 + b * 104729);
+    const v0 = h(x0, y0) + (h(x0 + 1, y0) - h(x0, y0)) * ux, v1 = h(x0, y0 + 1) + (h(x0 + 1, y0 + 1) - h(x0, y0 + 1)) * ux;
+    const patch = clamp(((v0 + (v1 - v0) * uy) - 0.3) * 2, 0, 1);
+    const deep = t.biome[i] === B.Deep ? 0.6 : 1;
+    return night * patch * deep * Math.min(1, w.grass[i] / BIOMES[t.biome[i]].fert) * Math.min(1, (T - 0.35) * 3) * (nu < 0 ? 0 : nu > 1 ? 1 : nu);
   }
 
   /** Грибы на лесной подстилке и «ведьмины кольца» на лугах (при сильном приближении). */

@@ -226,6 +226,11 @@ export class Terrain {
   moistK: Float32Array | null = null;
   /** f(пар) исходного рельефа (лениво). */
   private v0: Float32Array | null = null;
+  /**
+   * 🌋 Открытое мелководье (1): клетка мелководья, у которой ни одной клетки суши среди 8 соседей, — дальше ~16 км от
+   * берега. Пересчитанный рельеф (живая планета) его считает, исходный — нет (null: мелководье везде «у берега»).
+   */
+  offshore: Uint8Array | null = null;
 
   constructor(
     readonly width: number,
@@ -689,6 +694,7 @@ export class Terrain {
       this.src = null;
       this.plate = null;
       this.moistK = null;
+      this.offshore = null;
       this.rev = 0;
     } else {
       this.seaLevel = base.sea + inp.seaQ;
@@ -733,6 +739,7 @@ export class Terrain {
       // 🌋 озёра: впадины заливки с затравкой — мелководье; реки после этого — заново (впадают в озёра)
       if (inp.lakes && inp.lakeSeeds && inp.lakeSeeds.length && this.fillLakes(inp.lakeSeeds)) this.hydrology(true);
       this.rev = deriveHash(inp);
+      this.markOffshore();
     }
     // что изменилось: биом, класс реки или влажность (от них зависят статичные поля почвы)
     let m = 0, landChanged = false;
@@ -749,6 +756,31 @@ export class Terrain {
     }
     if ((landChanged || this.src) && this.rev !== 0) this.relabel();
     return { changed: D.changed.subarray(0, m), prev: D.biome, landChanged, bbox: [c0, r0, c1, r1] };
+  }
+
+  /** Открытое мелководье — мелководье без суши среди 8 соседей (после озёр: озеро — тоже мелководье). */
+  private markOffshore(): void {
+    const { cols, rows, biome } = this;
+    const n = cols * rows;
+    const O = this.offshore && this.offshore.length === n ? this.offshore : (this.offshore = new Uint8Array(n));
+    for (let y = 0; y < rows; y++)
+      for (let x = 0; x < cols; x++) {
+        const i = y * cols + x;
+        let v = biome[i] === B.Shallow ? 1 : 0;
+        for (let dy = -1; dy <= 1 && v; dy++) {
+          const yy = y + dy;
+          if (yy < 0 || yy >= rows) continue;
+          for (let dx = -1; dx <= 1; dx++) {
+            const xx = x + dx;
+            if (xx < 0 || xx >= cols) continue;
+            if (biome[yy * cols + xx] > B.Shallow) {
+              v = 0;
+              break;
+            }
+          }
+        }
+        O[i] = v;
+      }
   }
 
   /** Плиты: исходная клетка каждой клетки (плита B — ряды ≥ rift исходного рельефа, сдвинутые на ox, oy; −1 — разлом). */
@@ -824,10 +856,9 @@ export class Terrain {
     lab.fill(0);
     const lake = new Uint8Array(n);
     let any = false;
-    const wet = (i: number) => biome[i] <= B.Shallow;
     for (let k = 0; k < seeds.length; k++) {
       const s = seeds[k];
-      if (s < 0 || s >= n || lab[s] || wet(s) || filled[s] - elev[s] < LAKE.EDGE) continue;
+      if (s < 0 || s >= n || lab[s] || biome[s] <= B.Shallow || filled[s] - elev[s] < LAKE.EDGE) continue;
       let qt = 0, deep = 0, minCell = s;
       q[qt++] = s;
       lab[s] = 1;
@@ -837,9 +868,10 @@ export class Terrain {
         if (dd > deep) deep = dd;
         if (i < minCell) minCell = i;
         const x = i % cols;
-        const nb0 = x > 0 ? i - 1 : -1, nb1 = x < cols - 1 ? i + 1 : -1, nb2 = i - cols, nb3 = i + cols;
-        for (const j of [nb0, nb1, nb2, nb3]) {
-          if (j < 0 || j >= n || lab[j] || wet(j) || filled[j] - elev[j] < LAKE.EDGE) continue;
+        // соседи по порядку: запад, восток, север, юг (без массива на каждую клетку — пересчёт без мусора)
+        for (let k3 = 0; k3 < 4; k3++) {
+          const j = k3 === 0 ? (x > 0 ? i - 1 : -1) : k3 === 1 ? (x < cols - 1 ? i + 1 : -1) : k3 === 2 ? i - cols : i + cols;
+          if (j < 0 || j >= n || lab[j] || biome[j] <= B.Shallow || filled[j] - elev[j] < LAKE.EDGE) continue;
           lab[j] = 1;
           q[qt++] = j;
         }

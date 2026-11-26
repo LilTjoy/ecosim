@@ -224,6 +224,14 @@ for (let t = 1; t <= T; t++) {
   w.step();
   if (W.lp && t % 60 === 0) geoTrack(t);
   if (flags.ymed && t % Number(flags.ymed) === 0) g1b.ymed.push(`${t}:${ymedOf()}`);
+  // --spy=N — каждые N тактов медиана y зверей суши (swim ≤ 0.6) по видам с ≥ 20 особями: строка SPY t вид:особей:y … (G4, сдвиг ареалов по видам)
+  if (flags.spy && t % Number(flags.spy) === 0) {
+    const by = new Map<number, number[]>();
+    for (const c of w.creatures) if (c.alive && c.g.swim <= 0.6) { const l = by.get(c.sp); if (l) l.push(c.y); else by.set(c.sp, [c.y]); }
+    console.log(`SPY ${t} ${[...by].filter(([, l]) => l.length >= 20).sort((a, b) => a[0] - b[0]).map(([sp, l]) => { l.sort((a, b) => a - b); return `${sp}:${l.length}:${Math.round(l[l.length >> 1])}`; }).join(' ')}`);
+  }
+  // --isoTrace=N — каждые N тактов: море, открыты ли барьеры, записи половин (барьер:вид:поколения врозь:расхождение:утечки:особи)
+  if (flags.isoTrace && W.lp && t % Number(flags.isoTrace) === 0) console.log(`ISO t=${t} sea=${GM.metres(W.geo.seaQ)} open=${W.geo.sills.map((s: any) => s.kind[0] + (s.open ? 1 : 0)).join('')} ${W.geo.isolates.map((r: any) => `${W.geo.sills[r.sill]?.kind[0]}:${r.sp}:ga${r.ga}:d${r.d.toFixed(2)}:L${r.leak}:${r.parts.join('/')}`).join(' ')}`);
   if (W.lp && t % 200 === 0) { const S = W.geo.stats; if (S.sSill && g1b.first.sill < 0) g1b.first.sill = t; if (S.sWall && g1b.first.wallace < 0) g1b.first.wallace = t; if (S.sPlay && g1b.first.player < 0) g1b.first.player = t; }
   if (OE) {
     oe.creSum += w.creatures.length;
@@ -414,5 +422,10 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
     const S = W.geo.stats, iso = W.geo.isolates as any[];
     const isoLine = `\n GEO 1b: iso=${iso.length} [${iso.map((r: any) => `${r.sill}:${r.sp}:ga${r.ga}:d${r.d.toFixed(2)}:L${r.leak}:${r.parts.join('/')}`).join(' ')}] splits=${S.splits} sill=${S.sSill}@${g1b.first.sill} wallace=${S.sWall}@${g1b.first.wallace} player=${S.sPlay} leaks=${S.leaks} invaders=${S.invaders} bridgesRec=${W.geo.bridges.length} refugiaTot=${S.refugia} atMax=${g1b.atMax.join(',') || '-'} moraines=${S.moraines} kettles=${S.kettles} lakes=${S.lakes}/${t1.lakes.length} seeds=${W.geo.lakeSeeds.length} minElevD=${Math.min(...(W.elevD as Int16Array))} sp=${w.species.living().length}`;
     const envLine = penv || S.eruptions ? `\n GEO env: iceAge=${W.geo.iceAge} co2Base=${W.geo.co2Base} vBias=${W.geo.vBias} volc=${W.geo.volc} amps=${W.geo.amps.map((x: number) => x.toFixed(2)).join('/')} orbit=${W.geo.orbit ? 1 : 0} eruptions=${S.eruptions} co2=${W.geo.co2.toFixed(0)}` : '';
-    return geoLine + isoLine + envLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
+    // G5b по родословной: живые виды, у которых в предках (или сам) — половина, отделённая барьером («… (северный)» и т. п.)
+    const SPL = / \((северный|южный|западный|восточный)\)$/;
+    const living = w.species.living();
+    const fromSplit = living.filter((sp: any) => { let s: any = sp; for (let k = 0; k < 5000 && s; k++) { if (SPL.test(s.name)) return true; s = s.parent !== null ? w.species.all.get(s.parent) : null; } return false; }).length;
+    const g5bLine = `\n GEO 5b: living=${living.length} fromSplit=${fromSplit} share=${(fromSplit / Math.max(1, living.length)).toFixed(2)}`;
+    return geoLine + isoLine + envLine + g5bLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
   })() : ''));

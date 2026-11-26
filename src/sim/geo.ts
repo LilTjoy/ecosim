@@ -27,6 +27,11 @@ export const GEO = {
   T_ICE: 0.01, ACC: 1.5, ABL: 1.2, FLOW: 0.12, HMAX: 1, SELF_COOL: 0.01, ICE_COOL: 0.05, ICE_MOVE: 0.3, DT: 0.05,
   M_PER_E: 3000, SEA_STEP: 0.004, REBUILD_MIN: 120,
   SILL: 0.017 /* −51 м */, SILL_W: 4, WALLACE: 0.13 /* −390 м: глубоко даже при море −150 м */, WALLACE_W: 4,
+  /**
+   * Форма проливов reset: размах извилин середины русла (рядов) у порога и у Уоллеса, ширина склонов (клеток); южнее
+   * пролива Уоллеса — не меньше WALLACE_SOUTH суши острова (иначе «самая узкая полоса» — всегда жаркий мыс на юге).
+   */
+  SILL_A: 3, WALLACE_A: 2, SILL_SLOPE: 1.6, WALLACE_SOUTH: 0.18,
   MOR_HI: 0.5, MOR_LO: 0.2, KETTLE_P: 0.03, KETTLE_D: 120, SCOUR: 2, SCOUR_MAX: 200, LAKE_MIN: 0.003, LAKE_CELLS: 4,
   ISO_GEN: 10, ISO_D: 0.2, ISO_MIN: 12, ISO_LEAK: 0, LM_MIN: 800, INVADE_N: 15, INVADE_T: 1000,
   AER_K: 0.12,
@@ -89,6 +94,11 @@ export interface SillRec {
   /** Ось пролива (px, от x0,y0 к x1,y1) и его полуширина: стороны моста — по знаку векторного произведения. */
   p: [number, number, number, number];
   hw: number;
+  /**
+   * Извилистый пролив reset: середина русла по столбцам (px). Есть — сторона по ней (sillSide), нет — по прямой оси p
+   * (проливы игрока и снимки до извилистых проливов).
+   */
+  cy?: number[];
   /** Только что прорезан игроком: первый пересчёт молча ставит open (моста не было — нечему «уходить под воду»). */
   cut?: true;
 }
@@ -743,7 +753,7 @@ function cycleLog(w: World): void {
     w.iceMax!.fill(0);
     // «котловина уже разыграна в этом цикле» — бит 1 плоскости морен
     const F = w.fx8!, n = w.iceMax!.length;
-    for (let i = 3 * n; i < 4 * n; i++) F[i] &= 1;
+    for (let i = 3 * n; i < 4 * n; i++) F[i] &= ~2; // биты морен (0) и тефры (2…7) остаются
   }
 }
 
@@ -772,18 +782,27 @@ export function geoHabitat(w: World): void {
 // ---------------- пороги и пролив (при reset) ----------------
 
 /** Полоса из W рядов в [lo, hi) с наименьшим числом клеток суши. */
-function thinBand(w: World, lo: number, hi: number, W: number): number {
+function thinBand(w: World, lo: number, hi: number, W: number, minBelow = 0): number {
   const t = w.terrain, cols = t.cols, bi = t.biome;
-  let best = lo, bestN = Infinity;
+  // суша по рядам; minBelow — доля суши, которая должна остаться южнее полосы (пролив делит остров на две провинции, а не отрезает мыс)
+  const row = new Array<number>(t.rows).fill(0);
+  let tot = 0;
+  for (let y = 0; y < t.rows; y++) {
+    for (let x = 0; x < cols; x++) if (bi[y * cols + x] > B.Shallow) row[y]++;
+    tot += row[y];
+  }
+  let best = -1, bestN = Infinity;
   for (let y0 = lo; y0 + W <= hi; y0++) {
-    let m = 0;
-    for (let y = y0; y < y0 + W; y++) for (let x = 0; x < cols; x++) if (bi[y * cols + x] > B.Shallow) m++;
+    let m = 0, below = 0;
+    for (let y = y0; y < y0 + W; y++) m += row[y];
+    for (let y = y0 + W; y < t.rows; y++) below += row[y];
+    if (below < minBelow * tot) continue;
     if (m < bestN) {
       bestN = m;
       best = y0;
     }
   }
-  return best;
+  return best >= 0 ? best : lo;
 }
 
 /** Высочайшая клетка суши в рядах [y0, y1) — якорь берега (суша при любом море). */
@@ -801,29 +820,86 @@ function anchor(w: World, y0: number, y1: number): number {
   return best;
 }
 
+/** Плавный шум по столбцам (−1…1): октавы [длина волны, вес] — узлы из потока r, косинусная интерполяция. */
+function noise1(r: () => number, n: number, oct: [number, number][]): Float32Array {
+  const out = new Float32Array(n);
+  let wsum = 0;
+  for (const [L, a] of oct) {
+    wsum += a;
+    const k = Math.ceil(n / L) + 2, v = Array.from({ length: k }, () => 2 * r() - 1), o = r() * L;
+    for (let x = 0; x < n; x++) {
+      const u = (x + o) / L, j = Math.floor(u), f = (1 - Math.cos((u - j) * Math.PI)) / 2;
+      out[x] += a * (v[j] + (v[j + 1] - v[j]) * f);
+    }
+  }
+  for (let x = 0; x < n; x++) out[x] /= wsum;
+  return out;
+}
+
 /**
  * Пороги при reset (поток mulberry32(seed ^ 0x51115), до цикла травы): мелкий порог поперёк острова в его «талии»
  * (y 0,38…0,62; дно −31…−51 м — сохнет, когда море опустится на 51 м) и пролив Уоллеса на юге (y 0,70…0,85; −390 м —
- * глубоко при любом море). Обе полосы — во всю ширину, так что каждая делит остров надвое.
+ * глубоко при любом море; южнее него — не меньше WALLACE_SOUTH суши острова). Русло извилистое (середина и ширина —
+ * плавный шум по столбцам), с пологими склонами, переходящими в исходный рельеф; прорезается по всей ширине, где
+ * дно мельче нужного, — и через шельф до глубины, так что делит остров надвое при любом море. Ядро русла — сплошное
+ * (соседние столбцы перекрываются), в cells только ядро.
  */
 export function carveSills(w: World): void {
   const g = w.geo, E = w.elevD;
   if (!g || !E || !GEO.SILL_ON) return;
   const t = w.terrain, { cols, rows } = t;
-  const sea0 = t.seaLevel;
+  const sea0 = t.seaLevel, cell = w.cell;
   const r = mulberry32(w.seed ^ 0x51115);
-  const cut = (kind: 'sill' | 'wallace', y0: number, W: number, depth: (x: number) => number): SillRec => {
+  /** Русло: середина yc(x) = середина полосы + A·шум, полуширина ядра hw(x); склон — ещё SLOPE клеток. */
+  const cut = (kind: 'sill' | 'wallace', y0: number, W: number, A: number, depth: (x: number) => number): SillRec => {
+    const name = properName(r);
+    const n1 = noise1(r, cols, [[26, 1], [9, 0.35]]), n2 = noise1(r, cols, [[14, 1], [5, 0.3]]), n3 = noise1(r, cols, [[11, 1]]);
+    const mid = y0 + W / 2;
+    const top = new Int32Array(cols), bot = new Int32Array(cols), yc = new Float32Array(cols), hw = new Float32Array(cols);
+    for (let x = 0; x < cols; x++) {
+      yc[x] = mid + A * n1[x];
+      hw[x] = Math.max(1.5, (W / 2) * (0.95 + 0.3 * n2[x])); // ядро — не уже трёх рядов: посередине — открытое мелководье
+      // Уоллес: ядро всегда накрывает ряд шва плит (середину полосы) — там, где русло отошло, оно шире
+      if (kind === 'wallace') hw[x] = Math.max(hw[x], Math.abs(yc[x] - mid) + 0.8);
+      top[x] = Math.round(yc[x] - hw[x]);
+      bot[x] = Math.round(yc[x] + hw[x]) - 1;
+    }
+    // ядро сплошное: ряды соседних столбцов перекрываются (суша не проскочит ни прямо, ни наискосок)
+    for (let x = 1; x < cols; x++) {
+      if (top[x] > bot[x - 1]) top[x] = bot[x - 1];
+      if (bot[x] < top[x - 1]) bot[x] = top[x - 1];
+    }
     const cells: number[] = [];
-    for (let y = y0; y < y0 + W; y++)
-      for (let x = 0; x < cols; x++) {
-        const i = y * cols + x;
-        const want = sea0 - depth(x);
-        if (t.elev[i] <= want) continue;
-        E[i] = Math.max(-32767, Math.round((want - t.elev[i]) * 1e4));
-        cells.push(i);
+    let ymin = rows, ymax = -1;
+    for (let x = 0; x < cols; x++) {
+      const core = sea0 - depth(x);
+      const slope = GEO.SILL_SLOPE * (0.75 + 0.5 * (n3[x] * 0.5 + 0.5));
+      for (let y = Math.max(0, top[x] - Math.ceil(slope)); y <= Math.min(rows - 1, bot[x] + Math.ceil(slope)); y++) {
+        const i = y * cols + x, e = t.elev[i];
+        const inCore = y >= top[x] && y <= bot[x];
+        let want = core;
+        if (!inCore) {
+          // склон: от дна русла к исходному рельефу (только вниз), сглаженная ступень
+          const u = (y < top[x] ? top[x] - y : y - bot[x]) / (slope + 1);
+          const f = u * u * (3 - 2 * u);
+          want = core + (e - core) * f;
+        }
+        if (e <= want) continue;
+        E[i] = Math.max(-32767, Math.round((want - e) * 1e4));
+        if (inCore) {
+          cells.push(i);
+          if (y < ymin) ymin = y;
+          if (y > ymax) ymax = y;
+        }
       }
-    const yc = (y0 + W / 2) * w.cell;
-    return { kind, cells, name: properName(r), open: false, a: anchor(w, y0 - 25, y0), b: anchor(w, y0 + W, y0 + W + 25), y0, y1: y0 + W, p: [0, yc, cols * w.cell, yc], hw: (W / 2) * w.cell };
+    }
+    if (ymax < 0) ymin = ymax = Math.round(mid);
+    const cy = Array.from(yc, (v) => v * cell);
+    const yC = mid * cell;
+    return {
+      kind, cells, name, open: false, a: anchor(w, ymin - 25, ymin), b: anchor(w, ymax + 1, ymax + 26), y0: ymin, y1: ymax + 1,
+      p: [0, yC, cols * cell, yC], hw: (W / 2) * 0.95 * cell, cy,
+    };
   };
   // мелкий порог: глубже всего посередине суши полосы — мост открывается от берегов и смыкается в середине
   const ys = thinBand(w, Math.floor(0.38 * rows), Math.ceil(0.62 * rows), GEO.SILL_W);
@@ -836,12 +912,31 @@ export function carveSills(w: World): void {
       }
   const xc = (x0 + x1) / 2, half = Math.max(1, (x1 - x0) / 2);
   const ph = r() * 2 * Math.PI;
-  g.sills.push(cut('sill', ys, GEO.SILL_W, (x) => {
+  g.sills.push(cut('sill', ys, GEO.SILL_W, GEO.SILL_A, (x) => {
     const s = clamp(Math.abs(x - xc) / half + 0.08 * Math.sin(ph + x * 0.3), 0, 1);
     return GEO.SILL * (1 - 0.4 * s);
   }));
-  const yw = thinBand(w, Math.floor(0.7 * rows), Math.ceil(0.85 * rows), GEO.WALLACE_W);
-  g.sills.push(cut('wallace', yw, GEO.WALLACE_W, () => GEO.WALLACE));
+  // пролив Уоллеса — между двумя провинциями: южнее него остаётся не меньше WALLACE_SOUTH суши; русло прямее (шов плит
+  // проходит по его середине — ядро всегда накрывает этот ряд)
+  const yw = thinBand(w, Math.floor(0.7 * rows), Math.ceil(0.85 * rows), GEO.WALLACE_W, GEO.WALLACE_SOUTH);
+  g.sills.push(cut('wallace', yw, GEO.WALLACE_W, GEO.WALLACE_A, () => GEO.WALLACE));
+  // якоря — не дальше соседнего пролива (иначе якорь порога окажется за Уоллесом и мост никогда не «откроется»)
+  for (const q of g.sills) {
+    const [lo, hi] = anchorRows(g.sills, q);
+    q.a = anchor(w, lo, q.y0);
+    q.b = anchor(w, q.y1, hi);
+  }
+}
+
+/** Ряды поиска якорей пролива reset: 25 рядов по обе стороны, но не за соседним проливом reset. */
+function anchorRows(S: SillRec[], s: SillRec): [number, number] {
+  let lo = s.y0 - 25, hi = s.y1 + 25;
+  for (const q of S) {
+    if (q === s || q.kind === 'player') continue;
+    if (q.y1 <= s.y0) lo = Math.max(lo, q.y1);
+    else if (q.y0 >= s.y1) hi = Math.min(hi, q.y0);
+  }
+  return [lo, hi];
 }
 
 /** Состояние порогов после пересчёта рельефа (живой): мост есть, если якоря берегов на одном материке; летопись. */
@@ -851,8 +946,9 @@ function updateSills(w: World): void {
     // 🧭 якорь накрыла плита — новый: высочайшая суша своей стороны (до шва плит)
     if (s.a < 0 || s.b < 0) {
       const suture = g.plate ? g.plate.rift + g.plate.oy : w.terrain.rows;
-      if (s.a < 0) s.a = anchor(w, s.y0 - 25, Math.min(s.y0, suture - 3));
-      if (s.b < 0) s.b = anchor(w, Math.max(s.y1, suture + 3), s.y1 + 25);
+      const [lo, hi] = s.kind === 'player' ? [s.y0 - 25, s.y1 + 25] : anchorRows(g.sills, s);
+      if (s.a < 0) s.a = anchor(w, lo, Math.min(s.y0, suture - 3));
+      if (s.b < 0) s.b = anchor(w, Math.max(s.y1, suture + 3), hi);
     }
     const open = s.a >= 0 && s.b >= 0 && lm[s.a] >= 0 && lm[s.a] === lm[s.b];
     if (s.cut) {
@@ -886,6 +982,12 @@ export function sideWords(s: SillRec, gen = false): [string, string] {
 
 /** Сторона пролива для точки (px): 0, 1 или −1 — в самом проливе. */
 export function sillSide(s: SillRec, x: number, y: number): -1 | 0 | 1 {
+  if (s.cy) {
+    // извилистый пролив reset (широтный): выше середины русла — север
+    const c = s.cy[Math.max(0, Math.min(s.cy.length - 1, Math.floor(x / (s.p[2] / s.cy.length))))];
+    const d = y - c;
+    return Math.abs(d) < s.hw ? -1 : d < 0 ? 0 : 1;
+  }
   const [x0, y0, x1, y1] = s.p;
   const dx = x1 - x0, dy = y1 - y0, L = Math.hypot(dx, dy) || 1;
   const d = (dx * (y - y0) - dy * (x - x0)) / L;
@@ -1312,20 +1414,28 @@ export function panamaLine(w: World): number[] | null {
   const la = lm && s.a >= 0 ? lm[s.a] : -1, lb = lm && s.b >= 0 ? lm[s.b] : -1;
   const landOf = (x: number, y: number, L: number) => y >= 0 && y < t.rows && t.biome[y * cols + x] > B.Shallow && (L < 0 || !lm || lm[y * cols + x] === L);
   let best = -1, bd = Infinity;
+  // ряды русла в столбце: у извилистого пролива — вокруг его середины, иначе — полоса [y0, y1)
+  const band = (x: number): [number, number] => (s.cy ? [Math.round((s.cy[x] - s.hw) / w.cell), Math.round((s.cy[x] + s.hw) / w.cell)] : [s.y0, s.y1]);
+  let bt = 0, bb = 0;
   for (let x = 2; x < cols - 2; x++) {
+    const [y0, y1] = band(x);
     let n = -1, so = -1;
-    for (let k = 1; k <= 4 && n < 0; k++) if (landOf(x, s.y0 - k, la)) n = k;
-    for (let k = 0; k < 4 && so < 0; k++) if (landOf(x, s.y1 + k, lb)) so = k;
+    for (let k = 1; k <= 4 && n < 0; k++) if (landOf(x, y0 - k, la)) n = k;
+    for (let k = 0; k < 4 && so < 0; k++) if (landOf(x, y1 + k, lb)) so = k;
     if (n < 0 || so < 0) continue;
-    const d = Math.abs(x - cols / 2) + 8 * (n + so);
+    // перешеек — по низине: берег в горах или снегах (там, где пролив режет хребет) — далеко не лучший выбор
+    const hi = (y: number) => (t.biome[y * cols + x] >= B.Mountain ? 40 : 0);
+    const d = Math.abs(x - cols / 2) + 8 * (n + so) + hi(y0 - n) + hi(y1 + so);
     if (d < bd) {
       bd = d;
       best = x;
+      bt = y0;
+      bb = y1;
     }
   }
   if (best < 0) return null;
   const x = (best + 0.5) * w.cell;
-  return [x, (s.y0 - 4) * w.cell, x, (s.y1 + 4) * w.cell];
+  return [x, (bt - 4) * w.cell, x, (bb + 4) * w.cell];
 }
 
 /** Выделить клеточные поля живой планеты (только при lp). */

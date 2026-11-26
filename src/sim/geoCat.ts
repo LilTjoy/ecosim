@@ -17,6 +17,8 @@ export const CAT = {
   ASH_DEC: 2, SALT_DEC: 2, BURN_DEC: 3,
   /** Пепел: потолок травы, листвы и ягод ×(1 − ASH_GROW·ash/255); за каждую убывшую единицу — почве +ASH_SOIL/255. */
   ASH_GROW: 0.9, ASH_SOIL: 2,
+  /** Тефра (андосоли): почве +TEPH_SOIL·(тефра/63) за проход; слой тоньшает на единицу раз в TEPH_EVERY проходов. */
+  TEPH_SOIL: 0.006, TEPH_EVERY: 10,
   /** Эллипс пепла: длина VEI.ash (px) к востоку, полуширина — доля длины. */
   ASH_W: 0.18,
   /** Темнота и дымка: рост травы ×(1 − DARK_GROW·dark)(1 − AER_GROW·min(1, aer)); е-время темноты, дымки (тактов). */
@@ -197,6 +199,9 @@ function volcano(w: World, x0: number, y0: number, vei: 6 | 7 | 8): void {
       const i = cy * t.cols + cx;
       const q = Math.round(255 * (1 - d));
       if (q > F[i]) F[i] = q;
+      // 🪨 тефра — слой под пеплом, биты 2…7 плоскости морен (0…63): выветривается годами (андосоли)
+      const tp = q >> 2, o3 = 3 * (F.length >> 2) + i;
+      if (tp > F[o3] >> 2) F[o3] = (tp << 2) | (F[o3] & 3);
     }
   g.fxOn = true;
   g.aer = Math.min(CAT.AER_MAX, g.aer + v.aer);
@@ -521,13 +526,30 @@ export function catPass(w: World): void {
   massSweep(w);
 }
 
-/** Пепел, гарь и соль убывают; уходящий пепел удобряет почву (андосоли). fxOn гаснет, когда следов нет. */
+/**
+ * Пепел, гарь и соль убывают; уходящий пепел удобряет почву сразу (растворимые соли с пепла). Тефра под ним (биты
+ * 2…7 плоскости морен) выветривается годами и всё это время подкармливает почву (андосоли вулканических равнин):
+ * +TEPH_SOIL·(тефра/63) за проход, слой тоньшает на единицу раз в TEPH_EVERY проходов (63 → 0 за ≈ 6 лет).
+ * Избыток почвы над s0 уходит за год (как и прежде) — поэтому без тефры зона пепла через два года снова как была.
+ * fxOn гаснет, когда следов нет.
+ */
 function fxDecay(w: World): void {
   const W = X(w);
   const F = w.fx8!, n = F.length >> 2, S = W.soil, soilOn = w.settings.soil;
-  const { ASH_DEC, SALT_DEC, BURN_DEC, ASH_SOIL } = CAT;
+  const { ASH_DEC, SALT_DEC, BURN_DEC, ASH_SOIL, TEPH_SOIL, TEPH_EVERY } = CAT;
   let any = w.geo!.fire.length > 0;
+  const pass = Math.floor(w.tick / GEO.EVERY);
   for (let i = 0; i < n; i++) {
+    const tb = F[3 * n + i];
+    if (tb > 3) {
+      if (soilOn && w.terrain.biome[i] > B.Shallow) {
+        const v = S[i] + (TEPH_SOIL * (tb >> 2)) / 63;
+        S[i] = v > 2.5 ? 2.5 : v;
+      }
+      // тоньшает по очереди клеток (без костей): клетка i — в свой проход из TEPH_EVERY
+      if ((pass + i) % TEPH_EVERY === 0) F[3 * n + i] = tb - 4;
+      any = true;
+    }
     const a = F[i];
     if (a) {
       const d = a < ASH_DEC ? a : ASH_DEC;

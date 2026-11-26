@@ -889,15 +889,18 @@ export class World {
   }
 
   passable(g: Genome, idx: number): boolean {
-    const b = this.terrain.biome[idx];
+    const t = this.terrain, b = t.biome[idx];
+    // 🌋 живая планета: открытое мелководье вдали от берега (пролив шире двух клеток) — только для пловцов (swim > 0.5);
+    // без пересчитанного рельефа offshore нет — мелководье везде «у берега», как и было
+    const sh = b === B.Shallow && (g.swim > 0.5 || (g.swim > 0.15 && !(t.offshore && t.offshore[idx])));
     if (!this.oe) {
       if (b === B.Deep) return g.swim > 0.5;
-      if (b === B.Shallow) return g.swim > 0.15;
+      if (b === B.Shallow) return sh;
       return true;
     }
     // летуны перелетают воду; донные (с панцирем и ногами) ходят по мелководью
     if (b === B.Deep) return g.swim > 0.5 || g.ph[P.FLY] >= 1;
-    if (b === B.Shallow) return g.swim > 0.15 || g.ph[P.FLY] >= 1 || (EVO.BENTHIC && g.ph[P.BENTH] > 0);
+    if (b === B.Shallow) return sh || g.ph[P.FLY] >= 1 || (EVO.BENTHIC && g.ph[P.BENTH] > 0);
     return true;
   }
 
