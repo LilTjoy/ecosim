@@ -8,6 +8,7 @@ import type { Species } from '../sim/species';
 import { B, BIOMES, soilName } from '../sim/terrain';
 import { CLIMATE_C, DAY, DIS, EARTH_ENV, YEAR, World, type BrainMode, type Creature, type SurfaceEnv } from '../sim/world';
 import { SNAP_DEV, SNAP_VERSION, recycleSnap, sameWorld } from '../sim/snapshot';
+import { GeoSheet, geoChip } from './geoSheet';
 import { TM, Timeline, UNDOABLE, actionText, type Action, type ActionInput, type Branch, type Mark } from '../sim/timeline';
 import { TimelineBar } from './timelineBar';
 import { TmPanel } from './tmPanel';
@@ -59,7 +60,9 @@ const STATE_NAMES: Record<Creature['state'], string> = {
 };
 
 /** Линзы 🔬 по кругу и их легенды. Цвета — как в renderer.lensColor. */
-const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease'];
+const LENS_ORDER: Lens[] = ['off', 'fert', 'microbes', 'plankton', 'disease', 'depth'];
+/** Линзы этого мира: «🌊 Глубины» — только у живой планеты. */
+const lensesOf = (w: World): Lens[] => (w.lp ? LENS_ORDER : LENS_ORDER.filter((l) => l !== 'depth'));
 const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; caption: string; grad?: string; lo?: string; hi?: string }> = {
   fert: {
     title: '🟫 Плодородие', fact: 'liebig',
@@ -77,6 +80,11 @@ const LENS_INFO: Record<Exclude<Lens, 'off'>, { title: string; fact: string; cap
     grad: 'linear-gradient(90deg,#0b1f4d,#1b8fbf 55%,#7fe07a)', lo: 'пусто', hi: 'цветёт',
   },
   disease: { title: '☣️ Болезни', fact: 'sir', caption: '<b class="red">●</b> болеют · <b class="blue">●</b> защищены (переболели или иммунитет от матери) · остальные здоровы' },
+  depth: {
+    title: '🌊 Глубины', fact: 'geo_bathymetry',
+    caption: 'Глубина моря от нынешнего берега. <b class="yel">—</b> 50 м: осушится, когда море уйдёт на 50 м (мост через пролив); <b>—</b> 120 м: берег ледникового максимума',
+    grad: 'linear-gradient(90deg,rgb(150,235,230),rgb(40,120,200) 50%,rgb(8,22,70))', lo: 'мелко', hi: '400 м и глубже',
+  },
 };
 
 /** Сколько процентов фоновой работы ветки сделано. */
@@ -137,11 +145,13 @@ const TEMPLATE = /* html */ `
       <button data-act="drought" title="Засуха">🔥</button>
       <button data-act="epidemic" title="Новая болезнь у самого многочисленного вида">🦠</button>
       <button data-act="lens" title="Микроскоп: невидимая жизнь (M)">🔬</button>
+      <button data-act="geo" data-lp hidden title="🛠 Стихии: климат живой планеты — CO₂, ледниковья, море">🛠</button>
       <label class="s-explain" title="Научные карточки"><input type="checkbox" checked>💡</label>
     </div>
     <div class="s-seedmenu" hidden></div>
     <div class="s-spawn" hidden></div>
     <div class="s-lenslegend" hidden></div>
+    <div class="s-geosheet" hidden></div>
     <canvas class="s-mini" title="Миникарта: нажмите, чтобы перейти"></canvas>
     <div class="s-timeline"></div>
     <button class="s-tlopen" hidden title="⏪ Машина времени: показать шкалу истории">⏪</button>
@@ -269,8 +279,12 @@ export class SurfaceView {
   private collection = new Set<string>();
   /** ♾️ Открытая эволюция для новых миров: выбор игрока (меню ▾ у «↻ Новый мир», localStorage) или ?oe=1 / ?oe=0. */
   private oePref = false;
-  /** 🌋 Живая планета для новых миров (пока только адресом ?geo=1; уроки — всегда без неё). */
+  /** 🌋 Живая планета для новых миров: выбор игрока (меню ▾ у «↻ Новый мир», localStorage) или ?geo=1 / ?geo=0; уроки решают сами. */
   private geoPref = false;
+  /** 🌋 «🛠 Стихии» живой планеты. */
+  private geoSheet!: GeoSheet;
+  /** Показаны ли кнопки живой планеты — сверяется с world.lp в renderHud. */
+  private lpShown: boolean | null = null;
   /** Мир урока или справочника (newWorld): всегда классический, переключатель ♾️ в нём не действует. */
   private classicWorld = false;
   /** ♾️ Тосты «🌟 Открытие»: очередь до 3, не чаще раза в 10 с. */
@@ -297,7 +311,15 @@ export class SurfaceView {
       /* без localStorage — по умолчанию */
     }
     this.oePref = oeq !== null ? oeq !== '0' : oeSaved === '1';
-    this.geoPref = new URLSearchParams(location.search).get('geo') === '1';
+    // 🌋 живая планета: ?geo=1 / ?geo=0, иначе — выбор из меню ▾ (по умолчанию выключена)
+    const geoq = new URLSearchParams(location.search).get('geo');
+    let geoSaved: string | null = null;
+    try {
+      geoSaved = localStorage.getItem('ecosim.livePlanet');
+    } catch {
+      /* без localStorage — по умолчанию */
+    }
+    this.geoPref = geoq !== null ? geoq !== '0' : geoSaved === '1';
     if (this.oePref !== this.world.settings.openEvo || this.geoPref !== this.world.lp) {
       this.world.settings.openEvo = this.oePref;
       setLivePlanet(this.world, this.geoPref);
@@ -386,6 +408,11 @@ export class SurfaceView {
       toast: (t) => this.toast(t),
     });
     if (DEV) Object.assign(window, { __surface: this }); // проверки машины времени из браузера (только dev-сборка)
+    this.geoSheet = new GeoSheet($(root, '.s-geosheet'), {
+      world: this.world,
+      act: (a) => this.act(a),
+      showFact: (id) => this.showFact(id),
+    });
     this.bindUi();
     this.bindInput();
     new ResizeObserver(() => this.resize()).observe($(root, '.s-stage'));
@@ -520,6 +547,7 @@ export class SurfaceView {
       this.openTab('micro');
     };
     $(r, '[data-act=lens]').onclick = () => this.cycleLens();
+    $(r, '[data-act=geo]').onclick = () => this.toggleGeoSheet();
     $(r, '.s-lenslegend').addEventListener('click', (e) => {
       const t = e.target as HTMLElement;
       if (t.closest('[data-a=lensoff]')) this.setLens('off');
@@ -529,6 +557,7 @@ export class SurfaceView {
     // HUD перерисовывается 4 раза в секунду — ловим нажатие, а не click
     $(r, '.s-time').addEventListener('pointerdown', (e) => {
       if ((e.target as HTMLElement).closest('.s-disc')) return this.openTab('discover', '.s-tab[data-tab=discover]');
+      if ((e.target as HTMLElement).closest('.s-geo')) return this.toggleGeoSheet();
       if (!(e.target as HTMLElement).closest('.s-sick')) return;
       this.setLens('disease');
       this.openTab('micro');
@@ -901,9 +930,17 @@ export class SurfaceView {
 
   // ---------------- линзы 🔬 ----------------
 
+  /** 🌋 «🛠 Стихии»: открыть или закрыть (кнопка инструментов и чип HUD). */
+  private toggleGeoSheet(): void {
+    if (!this.world.lp) return;
+    this.geoSheet.toggle();
+    $(this.root, '[data-act=geo]').classList.toggle('active', this.geoSheet.open);
+  }
+
   private cycleLens(): void {
-    const i = LENS_ORDER.indexOf(this.renderer.lens);
-    this.setLens(LENS_ORDER[(i + 1) % LENS_ORDER.length]);
+    const L = lensesOf(this.world);
+    const i = L.indexOf(this.renderer.lens);
+    this.setLens(L[(i + 1) % L.length]);
   }
 
   private setLens(l: Lens): void {
@@ -915,8 +952,9 @@ export class SurfaceView {
     el.hidden = l === 'off';
     if (l === 'off') return;
     const info = LENS_INFO[l];
-    const k = LENS_ORDER.indexOf(l);
-    el.innerHTML = `<div class="row"><b>${info.title}</b><span class="muted small">${k}/4</span><button data-a="lensoff" class="x" title="Выключить линзу">✕</button></div>${
+    const L = lensesOf(this.world);
+    const k = L.indexOf(l);
+    el.innerHTML = `<div class="row"><b>${info.title}</b><span class="muted small">${k}/${L.length - 1}</span><button data-a="lensoff" class="x" title="Выключить линзу">✕</button></div>${
       info.grad ? `<div class="lg-bar" style="background:${info.grad}"></div><div class="lg-ends"><span>${info.lo}</span><span>${info.hi}</span></div>` : ''
     }<p>${info.caption} <a data-fact="${info.fact}">?</a></p><div class="lg-cursor"></div>`;
     this.renderLensCursor();
@@ -948,6 +986,9 @@ export class SurfaceView {
         else if (c.immune > 0) imm++;
       }
       txt = n ? `Рядом: ${n} ${plural(n, 'зверь', 'зверя', 'зверей')} · болеют ${sick} · защищены ${imm}` : 'Рядом никого нет';
+    } else if (l === 'depth') {
+      const m = this.renderer.depthAt(i);
+      txt = m < 0 ? `Глубина ${-m} м${m >= -50 ? ' — осушится первой' : m >= -120 ? ' — суша в пик ледниковья' : m < -180 ? ' — глубоко: не осохнет' : ''}` : `Суша: ${m} м над нынешним морем`;
     } else if (b.water) txt = `🌊 Планктон ${pct(this.planktonAt(i))} · питательных веществ ×${w.soil[i].toFixed(2)}`;
     else txt = `Почва ×${w.nut[i].toFixed(2)} · микробы ${pct(w.mic[i])} · азотфиксаторы ${pct(w.fix[i])}`;
     el.textContent = txt + (water ? ` · 〰 ${water}` : '');
@@ -1348,6 +1389,16 @@ export class SurfaceView {
 
   private renderHud(): void {
     const w = this.world;
+    if (this.lpShown !== w.lp) {
+      this.lpShown = w.lp;
+      this.root.querySelectorAll<HTMLElement>('[data-lp]').forEach((b) => (b.hidden = !w.lp));
+      if (!w.lp) {
+        this.geoSheet.close();
+        if (this.renderer.lens === 'depth') this.setLens('off');
+      }
+    }
+    this.geoSheet.update();
+    if (w.lp) $(this.root, '[data-act=geo]').classList.toggle('active', this.geoSheet.open);
     if (this.oeShown !== w.oe) {
       this.oeShown = w.oe;
       this.root.querySelectorAll<HTMLElement>('[data-oe]').forEach((b) => (b.hidden = !w.oe));
@@ -1369,7 +1420,7 @@ export class SurfaceView {
     }${w.micro.sick > 0 ? `<span class="s-sick" title="Открыть «Микромир» и линзу болезней">🤒 больных ${w.micro.sick}</span>` : ''}${
       this.tl.branches.length > 1 ? `<span class="s-chip" style="border-color:${this.tl.active.color}">🌿 ветка ${this.tl.active.letter}</span>` : ''
     }${this.tl.visiting || this.tl.replaying ? '<span class="s-chip past">⏳ прошлое</span>' : ''}${
-      Math.round(w.climate.shift * CLIMATE_C) !== 0 || w.climate.target !== 0 ? `<span class="s-chip">${w.climate.target < 0 ? '❄️' : '🌡'} ${w.climate.shift >= 0 ? '+' : '−'}${Math.abs(Math.round(w.climate.shift * CLIMATE_C))} °C</span>` : ''
+      w.lp ? geoChip(w) : Math.round(w.climate.shift * CLIMATE_C) !== 0 || w.climate.target !== 0 ? `<span class="s-chip">${w.climate.target < 0 ? '❄️' : '🌡'} ${w.climate.shift >= 0 ? '+' : '−'}${Math.abs(Math.round(w.climate.shift * CLIMATE_C))} °C</span>` : ''
     }`;
     const at = this.cursor ?? [this.cam.x, this.cam.y];
     const reg = w.terrain.regionAt(at[0], at[1]);
@@ -2206,6 +2257,9 @@ export class SurfaceView {
       ${this.classicWorld
         ? `<button data-sd="oe" disabled>♾️ Открытая эволюция: <b>выкл</b> <em>опыты и справочник идут в классическом мире; вернитесь к обычной Земле, чтобы включить</em></button>`
         : `<button data-sd="oe">♾️ Открытая эволюция: <b>${this.world.oe ? 'вкл' : 'выкл'}</b> <em>${this.world.oe ? 'выключить' : 'включить'} — новые органы и открытия; начнётся этот же мир с начала</em></button>`}
+      ${this.classicWorld
+        ? `<button data-sd="geo" disabled>🌋 Живая планета: <b>${this.world.lp ? 'вкл' : 'выкл'}</b> <em>мир урока или справочника устроен, как нужно опыту; вернитесь к обычной Земле, чтобы выбрать</em></button>`
+        : `<button data-sd="geo">🌋 Живая планета: <b>${this.world.lp ? 'вкл' : 'выкл'}</b> <em>${this.world.lp ? 'выключить' : 'включить'} — ледниковья, уровень моря, перешейки; начнётся этот же мир с начала</em></button>`}
       <div class="sd-form" hidden><input class="sd-in" placeholder="например 42 или 42-7" inputmode="numeric" maxlength="23" aria-label="Сид мира"><button data-sd="go">Создать</button></div>
       <div class="sd-err small" hidden></div>`;
     const st = $(this.root, '.s-stage').getBoundingClientRect(), bt = $(this.root, '.s-seedbtn').getBoundingClientRect();
@@ -2232,6 +2286,7 @@ export class SurfaceView {
       $(this.root, '.s-reset').click();
     } else if (k === 'same') this.newBySeed(this.world.seed, this.world.salt);
     else if (k === 'oe') this.toggleOE();
+    else if (k === 'geo') this.toggleGeo();
     else if (k === 'form') {
       $(el, '.sd-form').hidden = false;
       $<HTMLInputElement>(el, '.sd-in').focus();
@@ -2268,6 +2323,22 @@ export class SurfaceView {
     this.afterReset();
     this.toast(this.oePref ? '♾️ Открытая эволюция включена: у зверей могут появиться новые органы — следите за вкладкой «🌟 Открытия»' : '♾️ Открытая эволюция выключена — классический мир');
     if (this.oePref) this.queueFact('openevo', true);
+  }
+
+  /** 🌋 Включить или выключить живую планету: тот же сид и те же условия, мир с начала (мир не меняет правила на ходу). */
+  private toggleGeo(): void {
+    if (this.classicWorld || !this.confirmReset()) return;
+    this.geoPref = !this.world.lp;
+    try {
+      localStorage.setItem('ecosim.livePlanet', this.geoPref ? '1' : '0');
+    } catch {
+      /* выбор живёт до перезагрузки */
+    }
+    setLivePlanet(this.world, this.geoPref);
+    this.world.reset(this.world.brainMode, this.world.seed, this.world.env, this.world.salt);
+    this.afterReset();
+    this.toast(this.geoPref ? '🌋 Живая планета включена: ледниковья приходят и уходят, море опускается и поднимается — «🛠 Стихии» слева' : '🌋 Живая планета выключена — рельеф и климат постоянны');
+    if (this.geoPref) this.queueFact('geo_iceage', true);
   }
 
   private newBySeed(seed: number, salt: number): void {
@@ -2847,11 +2918,14 @@ export class SurfaceView {
     this.root.querySelector<HTMLButtonElement>(`.s-tabs [data-tab=${tab}]`)?.click();
   }
 
-  /** Уроки: свежий мир в режиме «Правила» — без открытой эволюции (опыты уроков проверены на классическом мире). */
-  newWorld(env: SurfaceEnv, seed: number): void {
+  /**
+   * Уроки: свежий мир в режиме «Правила» — без открытой эволюции (опыты уроков проверены на классическом мире);
+   * живая планета — только если её просит урок (выбор игрока для его миров не меняется).
+   */
+  newWorld(env: SurfaceEnv, seed: number, geo = false): void {
     $<HTMLSelectElement>(this.root, '.s-mode').value = 'rules';
     this.world.brainMode = 'rules';
-    this.setEnv(env, seed, false, false, false);
+    this.setEnv(env, seed, false, false, geo);
     this.classicWorld = true;
     // мир урока или справочника не спущен с планеты — «↩ К планете» здесь только уводит из опыта;
     // вместо неё — путь назад к обычной Земле («↻ Новый мир» повторяет условия опыта)

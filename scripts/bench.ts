@@ -46,9 +46,12 @@ const applyFlags = (w: InstanceType<typeof World>) => {
   }
 };
 // ручки открытой эволюции (и будущих таблиц: открытия, наследство) — по имени, в том же духе, что SOIL/DIS
-const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV, HM.PAL, HM.HER] as unknown as Record<string, unknown>[];
+const KNOBS: Record<string, unknown>[] = [MM.EVO, BM.BEST, BM.CONV, HM.PAL, HM.HER, GM.GEO] as unknown as Record<string, unknown>[];
 for (const mod of KNOBS) for (const k in flags) if (k in mod) mod[k] = typeof mod[k] === 'boolean' ? flags[k] !== '0' : Number(flags[k]);
 if (flags.convdiag) BM.CONV_DIAG.on = true;
+// 🌋 --sill=0 — без порогов и пролива (контроль G5)
+if (flags.sill !== undefined) (GM.GEO as any).SILL_ON = flags.sill !== '0' ? 1 : 0;
+GM.GEO_PERF.on = flags.geo !== undefined && flags.geo !== '0';
 if (flags.benthic !== undefined) MM.EVO.BENTHIC = flags.benthic !== '0';
 // --kit=random — уровни нейтрального набора основателей случайно ×0.6…1.4 (ворота O9)
 if (flags.kit !== undefined) HM.HER.kitRandom = flags.kit === 'random';
@@ -63,6 +66,20 @@ const HER: Record<string, Record<string, unknown>> = {
 };
 if (flags.her && !HER[flags.her]) throw new Error(`--her=${flags.her}: есть ${Object.keys(HER).join(', ')}`);
 const herEnv = flags.her ? ({ ...WM.EARTH_ENV, light: 1, murk: 0, pressure: 1, magField: true, ...HER[flags.her] } as WM.SurfaceEnv) : undefined;
+/** 🌋 Флаги климата живой планеты — действиями мира (как кнопки вкладки «Климат»), на такте 0. */
+export function applyGeoFlags(w: InstanceType<typeof World>, f: Record<string, string>): void {
+  const g = (w as any).geo;
+  if (f.cool !== undefined) {
+    w.apply({ t: w.tick, k: 'iceAge', mode: 'off' });
+    w.apply({ t: w.tick, k: 'co2', ppm: 280 });
+    g.fPin = Number(f.cool);
+  }
+  if (f.orbit === '0') w.apply({ t: w.tick, k: 'iceAge', mode: 'off' });
+  if (f.co2 !== undefined) w.apply({ t: w.tick, k: 'co2', ppm: Number(f.co2) });
+  if (f.geoSpeed !== undefined) w.apply({ t: w.tick, k: 'geoSpeed', v: f.geoSpeed === '4' ? 4 : 1 });
+  if (f.seaPin !== undefined) w.apply({ t: w.tick, k: 'sea', dm: Number(f.seaPin) });
+  if (f.iceAge !== undefined) w.apply({ t: w.tick, k: 'iceAge', mode: f.iceAge as any });
+}
 /** Новый мир (конструктор вызывает reset() со случайным зерном — ловушку ставим только после него). */
 const mkWorld = () => {
   Math.random = lcg;
@@ -87,6 +104,8 @@ if (flags.tm) {
   process.exit();
 }
 w.reset(mode, seed, herEnv, salt);
+// 🌋 климат живой планеты: --cool=X (без орбиты, CO₂ 280, постоянный сдвиг X), --co2=ppm, --orbit=0, --geoSpeed=4, --seaPin=м
+if (W.lp) applyGeoFlags(w, flags);
 // ♾️ только при открытой эволюции: счётчики строк журнала, первые такты событий, смерти хищников
 const OE = !!W.oe;
 const chron0 = OE ? w.events.filter((e) => e.kind === 'evo').map((e) => e.fact).join(',') || '-' : '';
@@ -159,16 +178,39 @@ const shg = { on: OE || !!flags.shg, sum: 0, k: 0, ben: 0, benSh: 0 };
 const crab = OE && flags.crabdiag ? { peak: new Array(11).fill(0), last: [] as number[], full: 0, k: 0 } : null;
 // 🌋 P1: лесенка моря с пересчётом рельефа (как будет делать геопроход), время каждого пересчёта
 const seaStep = Number(flags.seaStep ?? 0);
-const geoMs: number[] = [];
+const geoMs = GM.GEO_PERF.ms;
+// 🌋 стражи стадии 1a: размах сдвига, моря и льда; пороги (сох ли мелкий, глубок ли Уоллес); переходы пеших через порог
+const gt = { sMin: 9, sMax: -9, seaMin: 9, seaMax: -9, iceMax: 0, vMin: 9, vMax: -9, sillOpenT: 0, sillOpens: 0, wasOpen: false, wallaceDeep: true, wallaceSplit: true, side: new Map<number, number>(), cross: 0, crossers: new Set<number>(), sillY: [0, 0], lgm: [] as number[] };
+if (W.lp) { const lg0 = W.log; W.log = function (this: any, text: string, kind: string, x?: number, y?: number, fact?: string) { if (fact === 'geo_lgm') gt.lgm.push(this.tick); return lg0.call(this, text, kind, x, y, fact); }; }
+if (W.lp) { const s0 = W.geo.sills.find((s: any) => s.kind === 'sill'); if (s0) gt.sillY = [s0.y0 * W.cell, s0.y1 * W.cell]; }
+const geoTrack = (t: number) => {
+  const g = W.geo, sh = g.geoShift + w.climate.shift;
+  gt.sMin = Math.min(gt.sMin, sh); gt.sMax = Math.max(gt.sMax, sh);
+  gt.seaMin = Math.min(gt.seaMin, g.seaQ); gt.seaMax = Math.max(gt.seaMax, g.seaQ);
+  gt.vMin = Math.min(gt.vMin, g.Vg); gt.vMax = Math.max(gt.vMax, g.Vg);
+  gt.iceMax = Math.max(gt.iceMax, g.iceLand);
+  for (const s of g.sills) {
+    if (s.kind === 'sill') { if (s.open) gt.sillOpenT += 60; if (s.open && !gt.wasOpen) gt.sillOpens++; gt.wasOpen = s.open; }
+    if (s.kind === 'wallace') { if (s.open) gt.wallaceSplit = false; for (const i of s.cells) if (t1b[i] !== TB.Deep) { gt.wallaceDeep = false; break; } }
+  }
+  // пешие (swim ≤ 0.15, не летуны): кого видели по обе стороны порога
+  if (t % 200 === 0 && gt.sillY[1] > 0) for (const c of w.creatures) {
+    if (!c.alive || c.g.swim > 0.15 || (OE && (c.g.ph as Float32Array)[MM.P.FLY] >= 1)) continue;
+    const sd = c.y < gt.sillY[0] ? 0 : c.y >= gt.sillY[1] ? 1 : -1;
+    if (sd < 0) continue;
+    const was = gt.side.get(c.id);
+    if (was === undefined) gt.side.set(c.id, sd);
+    else if (was !== sd && !gt.crossers.has(c.id)) { gt.crossers.add(c.id); gt.cross++; }
+  }
+};
 for (let t = 1; t <= T; t++) {
   if (seaStep > 0 && W.lp && t % seaStep === 0) {
     const k = (t / seaStep) % 20, q = k <= 10 ? k : 20 - k;
     W.geo.seaQ = -GM.GEO.SEA_STEP * q;
-    const t0g = performance.now();
     GM.deriveTerrain(w, true);
-    geoMs.push(performance.now() - t0g);
   }
   w.step();
+  if (W.lp && t % 60 === 0) geoTrack(t);
   if (OE) {
     oe.creSum += w.creatures.length;
     // O11: наибольшее число носителей каждого модуля за прогон (раз в 500 тактов)
@@ -271,6 +313,7 @@ for (let t = 1; t <= T; t++) {
     }
     const msK = OE ? ` msK=${((performance.now() - t0) / Math.max(1, (oe.creSum - oe.cre0) / 1000)).toFixed(3)}` : '';
     if (OE) { oe.msSum += performance.now() - t0; oe.cre0 = oe.creSum; }
+    if (W.lp) { const g = W.geo; extra += ` | Vg=${g.Vg.toFixed(3)} sea=${GM.metres(g.seaQ)} ice%=${(100 * g.iceLand).toFixed(1)} co2=${g.co2.toFixed(0)} dT=${((g.geoShift + w.climate.shift) * 100 / 3).toFixed(1)} sill=${g.sills.find((x: any) => x.kind === 'sill')?.open ? 1 : 0} lands=${g.lands.n}`; }
     lines.push(`t=${t} n=${w.creatures.length} H${g.herb} O${g.omni} C${g.carn} S${g.swim} | herbSize p10/50/90=${q(herbs, .1)}/${q(herbs, .5)}/${q(herbs, .9)} carnSize=${q(carn, .1)}/${q(carn, .5)}/${q(carn, .9)} | sp=${w.species.living().length}/${w.species.all.size} ms=${ms.toFixed(2)}${sp0 ? ` soilMs=${((soilMs - soil0) / EV).toFixed(3)}` : ''}${msK}${extra}`);
     t0 = performance.now(); soil0 = soilMs; gN = gW = gNw = gWw = clSum = clN = rawSum = 0;
   }
@@ -351,5 +394,7 @@ console.log(`seed ${seed} ${mode} ${JSON.stringify(flags)}\n` + lines.join('\n')
     const a = [...geoMs].sort((x, y) => x - y), q = (p: number) => (a.length ? a[Math.min(a.length - 1, Math.floor(p * a.length))].toFixed(2) : '-');
     let land = 0; for (let i = 0; i < t1.biome.length; i++) if (!BIOMES[t1.biome[i]].water) land++;
     if (flags.geoMs) console.log(geoMs.map((x) => x.toFixed(1)).join(" "));
-    return `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
+    const C = 100 / 3;
+    const geoLine = `\n GEO: glacials=${W.geo.stats.glacials} bridges=${W.geo.stats.bridges} sillOpens=${gt.sillOpens} sillOpenYears=${(gt.sillOpenT / 6000).toFixed(2)} wallaceDeep=${gt.wallaceDeep ? 1 : 0} wallaceSplit=${gt.wallaceSplit ? 1 : 0} shift=${gt.sMin.toFixed(3)}..${gt.sMax.toFixed(3)} (${(gt.sMin * C).toFixed(1)}..${(gt.sMax * C).toFixed(1)} °C) Vg=${gt.vMin.toFixed(2)}..${gt.vMax.toFixed(2)} sea=${GM.metres(gt.seaMin)}..${GM.metres(gt.seaMax)} м iceMax%=${(100 * gt.iceMax).toFixed(1)} crossers=${gt.cross} tracked=${gt.side.size} kyr=${GM.geoKyr(W.geo).toFixed(0)} lgmAt=${gt.lgm.join(',') || '-'}`;
+    return geoLine + `\n GEO perf: derives=${W.geo.stats.derives} timed=${a.length} ms p50=${q(0.5)} p99=${q(0.99)} max=${a.length ? a[a.length - 1].toFixed(2) : '-'} rev=${t1.rev} seaQ=${W.geo.seaQ} land=${land}/${landN} lands=${W.geo.lands.n} pend=${W.geo.pend.length}`;
   })() : ''));

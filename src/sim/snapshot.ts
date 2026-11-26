@@ -26,7 +26,8 @@ export interface WorldSnap {
   /** Копии клеточных полей SNAP_CELLS. */
   cells: Record<string, Float32Array>;
   /** 🌋 Клеточные поля живой планеты (только у миров с ней; без неё ключа нет — снимок прежний). */
-  geoCells?: { ice: Float32Array; iceMax: Uint8Array; elevD: Int16Array; fx8: Uint8Array };
+  /** 🌋 Поля живой планеты; iceMax и fx8 — null, если в них одни нули (межледниковье, без катастроф): снимок легче. */
+  geoCells?: { ice: Float32Array; iceMax: Uint8Array | null; elevD: Int16Array; fx8: Uint8Array | null };
   /** Только записи с claimTick ≥ tick − 1 (остальные симуляция не читает — кодирование точное). */
   claim: { idx: Int32Array; val: Float32Array; t: Int32Array };
   cre: { n: number; f64cols: string[]; i32cols: string[]; f64: Float64Array; i32: Int32Array; cause: (string | null)[]; ghost: 0 | 1 };
@@ -133,6 +134,16 @@ export function recycleSnap(s: WorldSnap): void {
     s.geoCells = undefined;
   }
 }
+/** Копия, или null, если в массиве одни нули (🌋 iceMax, fx8). */
+function nonZero(a: Uint8Array): Uint8Array | null {
+  const u32 = a.byteLength % 4 === 0 && a.byteOffset % 4 === 0 ? new Uint32Array(a.buffer, a.byteOffset, a.byteLength / 4) : null;
+  if (u32) {
+    for (let i = 0; i < u32.length; i++) if (u32[i] !== 0) return a.slice();
+  } else for (let i = 0; i < a.length; i++) if (a[i] !== 0) return a.slice();
+  return null;
+}
+/** Метка «одни нули» в отпечатке. */
+const NONE = new Uint8Array([0x6e, 0x6f, 0x6e, 0x65]);
 function copyCells(src: Float32Array): Float32Array {
   for (let i = pool.length - 1; i >= 0; i--) {
     if (pool[i].length === src.length) {
@@ -153,7 +164,7 @@ export function snapBuffers(s: WorldSnap): ArrayBuffer[] {
   for (const k in s.cells) add(s.cells[k]);
   for (const a of [s.claim.idx, s.claim.val, s.claim.t, s.cre.f64, s.cre.i32, s.gen.f64, s.gen.brain, s.gen.brains, s.anc, s.corpses]) add(a);
   for (const a of [s.gen.body, s.gen.bkm, s.gen.blvl, s.gen.bshape]) if (a) add(a);
-  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) add(a);
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) if (a) add(a);
   return [...out];
 }
 
@@ -191,7 +202,7 @@ export function snapDigest(s: WorldSnap): number {
   h = fnv(h, s.anc);
   h = fnv(h, s.corpses);
   for (const k of SNAP_CELLS) if (s.cells[k]) h = fnv(h, s.cells[k]);
-  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) h = fnv(h, a);
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) h = a ? fnv(h, a) : fnv(h, NONE);
   h = fnv(h, s.claim.idx);
   h = fnv(h, s.claim.val);
   h = fnv(h, s.claim.t);
@@ -347,13 +358,13 @@ export function captureWorld(w: WorldInternals): WorldSnap {
     anc, corpses, ext, actN: 0, inN: 0, digest: 0, bytes: 0,
   };
   if (w.lp && w.ice && w.iceMax && w.elevD && w.fx8)
-    s.geoCells = { ice: copyCells(w.ice), iceMax: w.iceMax.slice(), elevD: w.elevD.slice(), fx8: w.fx8.slice() };
+    s.geoCells = { ice: copyCells(w.ice), iceMax: nonZero(w.iceMax), elevD: w.elevD.slice(), fx8: nonZero(w.fx8) };
   s.digest = snapDigest(s);
   let bytes = 30_000 + 600 * w.species.all.size;
   for (const sp of w.species.all.values()) bytes += (sp.formHist?.byteLength ?? 0) + (sp.formT?.byteLength ?? 0) + (sp.mph?.byteLength ?? 0); // ♾️ история облика
   for (const a of [f64, i32, gf, gb, brains, anc, corpses, claim.idx, claim.val, claim.t, gbody, bkm, blvl, bshape]) bytes += a.byteLength;
   for (const k in cells) bytes += cells[k].byteLength;
-  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) bytes += a.byteLength;
+  if (s.geoCells) for (const a of [s.geoCells.ice, s.geoCells.iceMax, s.geoCells.elevD, s.geoCells.fx8]) bytes += a ? a.byteLength : 0;
   s.bytes = bytes;
   return s;
 }
@@ -478,9 +489,11 @@ export function loadWorld(w: WorldInternals, s: WorldSnap, history: Sample[] = [
     const gc = s.geoCells!;
     if (!w.ice || w.ice.length !== n0) allocGeoCells(w as unknown as World, n0);
     w.ice!.set(gc.ice);
-    w.iceMax!.set(gc.iceMax);
+    if (gc.iceMax) w.iceMax!.set(gc.iceMax);
+    else w.iceMax!.fill(0);
     w.elevD!.set(gc.elevD);
-    w.fx8!.set(gc.fx8);
+    if (gc.fx8) w.fx8!.set(gc.fx8);
+    else w.fx8!.fill(0);
   } else w.ice = w.iceMax = w.elevD = w.fx8 = null;
   const want = w.lp ? geoInputsHash(w as unknown as World) : 0;
   if (want !== w.terrain.rev) deriveTerrain(w as unknown as World, false);

@@ -6,8 +6,10 @@ import { mulberry32 } from '../src/lib/random';
 import { FACTS, WORLD_FACTS } from '../src/planet/facts';
 import {
   addTwin, CAP8, decomposerSwitch, diseaseModel, emptyTwin, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD,
-  outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld,
+  outbreakById, outbreakSick, PLANET_LINKS, soilFields, startLessonEpidemic, twinWorld, iceNow, iceBridgeOk, icePeakOk,
 } from '../src/learn/scenarios';
+import { LESSONS } from '../src/learn/lessons';
+import { allCards } from '../src/learn/catalog';
 
 const args = process.argv.slice(2);
 let failed = 0;
@@ -209,6 +211,35 @@ if (!args.includes('--planet')) {
     if (P) console.log(`    переболели ${((P.cases / e.n0) * 100).toFixed(0)}% вида — в уроке ${P.cases >= e.n0 * 0.5 ? 'коллективный иммунитет' : 'R < 1 без коллективного иммунитета'}`);
     ok(passed && !!P, `Эпидемия, зерно ${seed}: «${e.hostName}» (${e.n0}), заразили ${i0}, пик ${P?.peak}, всего ${P?.cases}, погибли ${P?.deaths}, выздоровели ${P?.recovered}, вирулентность ${P?.vir0} → ${P?.virMean.toFixed(2)}, спала за ${tk}`);
     lap('эпидемия', t);
+  }
+  // «❄️ Ледниковый период»: живая планета, 3000 тактов, «❄️ сейчас» + геология ×4 → перешеек, потом пик (как в уроке)
+  {
+    const L = LESSONS.find((x) => x.id === 'ice');
+    const ids = new Set(allCards().map((c) => c.id));
+    ok(!!L && L.cards.every((id) => ids.has(id)), `Ледниковый период: урок есть, карточки на месте (${L?.cards.filter((id) => !ids.has(id)).join(', ') || 'все'})`);
+  }
+  for (const seed of seeds) {
+    const t = Date.now();
+    Math.random = mulberry32(seed * 7919 + 1);
+    const w = new World(3200, 2000);
+    w.settings.livePlanet = true;
+    w.reset('rules', seed, { ...EARTH_ENV });
+    steps(w, 3000);
+    const s0 = iceNow(w);
+    const sp0 = w.species.living().length;
+    w.apply({ t: w.tick, k: 'iceAge', mode: 'now' });
+    w.apply({ t: w.tick, k: 'geoSpeed', v: 4 });
+    let tk = 0, tb = -1;
+    while (tk < 30000 && !icePeakOk(iceNow(w))) {
+      steps(w, 60);
+      tk += 60;
+      if (tb < 0 && iceBridgeOk(iceNow(w))) tb = tk;
+    }
+    const s = iceNow(w);
+    ok(!!s0 && s0.ice < 0.06 && Math.abs(s0.sea) <= 12, `Ледниковый период, зерно ${seed}: в начале межледниковье (море ${s0?.sea} м, лёд ${s0 ? (s0.ice * 100).toFixed(1) : '-'}%)`);
+    ok(tb > 0 && tb < 30000, `Ледниковый период, зерно ${seed}: перешеек открылся за ${tb} тактов`);
+    ok(!!s && icePeakOk(s) && s.wallace, `Ледниковый период, зерно ${seed}: пик за ${tk} тактов — море ${s?.sea} м, лёд ${s ? (s.ice * 100).toFixed(0) : '-'}%, ${s?.dT.toFixed(1)} °C, CO₂ ${s?.co2.toFixed(0)}, южный пролив глубок: ${s?.wallace}; видов ${sp0} → ${w.species.living().length}, зверей ${w.creatures.length}`);
+    lap('ледниковый период', t);
   }
 }
 console.log(`\n${failed ? `✗ Провалено проверок: ${failed}` : '✓ Все проверки пройдены'} · ${((Date.now() - t0) / 1000).toFixed(0)} с`);

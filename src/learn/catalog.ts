@@ -9,7 +9,7 @@ import { EXTRA_FACTS } from './extraFacts';
 import { LESSONS } from './lessons';
 import { PLANET_LINKS } from './scenarios';
 
-export type CardSource = 'planet' | 'compare' | 'surface' | 'microbes' | 'island' | 'stats';
+export type CardSource = 'planet' | 'compare' | 'surface' | 'microbes' | 'island' | 'geo' | 'stats';
 
 export const SOURCE_LABEL: Record<CardSource, string> = {
   planet: '🪐 Планета',
@@ -17,6 +17,7 @@ export const SOURCE_LABEL: Record<CardSource, string> = {
   surface: '🦊 Жизнь на поверхности',
   microbes: '🦠 Микромир',
   island: '🗺️ Устройство мира',
+  geo: '🌋 Живая планета',
   stats: '🎲 Методы науки',
 };
 
@@ -51,6 +52,8 @@ export interface Card extends Fact {
 const GENES = ['size', 'speed', 'sense', 'diet', 'tempPref', 'swim', 'social', 'generosity'];
 
 function surfaceLink(key: string, source: CardSource): SimLink | undefined {
+  // 🌋 карточки живой планеты — к уроку о ледниках
+  if (source === 'geo') return { view: 'lesson', id: 'ice', label: '❄️ Урок «Ледниковый период»' };
   if (source !== 'surface') {
     if (key === 'o2decay') return { view: 'eco', env: { o2: 0.08 }, envName: 'Мир с O₂ 8%', tab: 'micro', label: '▶ Новый мир: O₂ 8%' };
     if (key === 'stromatolites') return { view: 'eco', env: { landLife: false }, envName: 'Мир до выхода на сушу', tab: 'micro', label: '▶ Новый мир: до выхода на сушу' };
@@ -110,7 +113,7 @@ export function allCards(): Card[] {
     for (const [k, f] of Object.entries(t)) add(k, f, 'compare', { view: 'compare', label: '▶ Открыть в «Сравнении миров»' });
   for (const t of factTables(surfaceFacts as unknown as Record<string, unknown>))
     for (const [k, f] of Object.entries(t)) {
-      const src: CardSource = MICRO_KEYS.includes(k) ? 'microbes' : ISLAND_KEYS.includes(k) ? 'island' : 'surface';
+      const src: CardSource = MICRO_KEYS.includes(k) ? 'microbes' : ISLAND_KEYS.includes(k) ? 'island' : k.startsWith('geo_') ? 'geo' : 'surface';
       add(k, f, src, surfaceLink(k, src));
     }
   for (const [k, f] of Object.entries(EXTRA_FACTS)) add(k, f, 'stats', STATS_LINKS[k]);
@@ -133,6 +136,6 @@ export function cardFor(source: 'planet' | 'surface' | 'compare', key: string): 
   return allCards().find(
     (c) =>
       c.key === key &&
-      (source === 'planet' ? c.source === 'planet' : source === 'compare' ? c.source === 'compare' || c.source === 'planet' : c.source === 'surface' || c.source === 'microbes' || c.source === 'island'),
+      (source === 'planet' ? c.source === 'planet' : source === 'compare' ? c.source === 'compare' || c.source === 'planet' : c.source === 'surface' || c.source === 'microbes' || c.source === 'island' || c.source === 'geo'),
   );
 }

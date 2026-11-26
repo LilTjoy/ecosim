@@ -404,3 +404,38 @@
 .sp-ic { font-size: 11px; letter-spacing: 1px; }
 i.dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; vertical-align: middle; }
 .s-hud .s-disc { pointer-events: auto; cursor: pointer; color: #ffd56b; border-color: #6b5a22; }
+
+/* ---- 🌋 живая планета: чип HUD, «🛠 Стихии», линза глубин ---- */
+.s-hud .s-geo { pointer-events: auto; cursor: pointer; color: #cfe8ff; border-color: #2f4a63; }
+.s-hud .s-geo:hover { border-color: #6fb2ff; }
+.s-geo i { font-style: normal; }
+.s-geo .g-short { display: none; }
+.s-lenslegend b.yel { color: #ffd65a; }
+.s-geosheet { position: absolute; top: 12px; left: 62px; width: 320px; max-height: calc(100% - 100px); overflow-y: auto; z-index: 3; box-sizing: border-box;
+  background: rgba(16,19,24,0.96); backdrop-filter: blur(8px); border: 1px solid #34404f; border-radius: 12px; padding: 10px 12px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.6); font-size: 13px; }
+.s-geosheet[hidden] { display: none; }
+.gs-head { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.gs-tabs { display: flex; gap: 4px; flex: 1; }
+.gs-tabs button { font-size: 12.5px; padding: 3px 10px; }
+.gs-tabs button.active { border-color: var(--accent); background: #333a24; color: var(--accent); }
+.gs-body { display: flex; flex-direction: column; gap: 5px; }
+.gs-row { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; margin-top: 4px; }
+.gs-row a { cursor: pointer; color: #9ecbff; margin-left: auto; }
+.gs-row em { font-style: normal; color: var(--muted); font-size: 11.5px; }
+.gs-body input[type=range] { width: 100%; margin: 0; accent-color: #6fb2ff; }
+.gs-ticks { position: relative; height: 14px; font-size: 10px; line-height: 1.15; color: var(--muted); }
+.gs-ticks span { position: absolute; transform: translateX(-50%); text-align: center; white-space: nowrap; }
+.gs-legend { font-size: 10.5px; margin-top: -2px; }
+.gs-btns { display: flex; flex-wrap: wrap; gap: 4px; }
+.gs-btns button { font-size: 12.5px; padding: 4px 8px; }
+.gs-btns button.active { border-color: #6fb2ff; background: #1d3247; color: #d6ecff; }
+.gs-now { color: #c4c9bb; line-height: 1.4; margin-top: 4px; border-top: 1px solid #2a2f37; padding-top: 6px; }
+@media (max-width: 900px) { .s-geosheet { top: 112px; left: 60px; } }
+@media (max-width: 600px) {
+  .s-geo .g-full { display: none; }
+  .s-geo .g-short { display: inline; }
+  /* шторка снизу, над тостом и шкалой */
+  .s-geosheet { top: auto; left: 8px; right: 8px; width: auto; bottom: 68px; max-height: 62%; }
+  .s-stage.tm-past .s-geosheet { bottom: 154px; max-height: calc(100% - 174px); }
+}

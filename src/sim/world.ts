@@ -9,7 +9,7 @@ import { BEST, newBestiary, trackBottleneck, updateBestiary, type BestiaryState 
 import { chronicle, founderPlan, heritageOf, worldPalette, type Founder, type Heritage } from './heritage';
 import { captureWorld, loadWorld, type WorldInternals, type WorldSnap } from './snapshot';
 import type { Action } from './timeline';
-import { allocGeoCells, deriveTerrain, GEO, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
+import { allocGeoCells, carveSills, deriveTerrain, GEO, geoAction, geoHabitat, geoPass, labelLands, newGeo, terraBrush, type GeoState } from './geo';
 
 /**
  * Активность микробов от температуры (Q10 = 2): удвоение каждые 0.125 ед. (= 10 °C при 80 °C/ед.),
@@ -186,9 +186,12 @@ export interface Sample {
   fix: number;
   myc: number;
   plankton: number;
-  /** Больных во всём мире; индекс CO₂ (зарезервировано, пока 0). */
+  /** Больных во всём мире; CO₂, ppm (🌋 только у живой планеты, иначе 0). */
   sick: number;
   co2: number;
+  /** 🌋 Уровень моря от исходного (м) и доля суши подо льдом — только у живой планеты. */
+  sea?: number;
+  ice?: number;
 }
 
 export type BrainMode = 'rules' | 'neural';
@@ -459,6 +462,7 @@ export class World {
     if (this.lp) {
       allocGeoCells(this, this.terrain.cols * this.terrain.rows);
       this.geo = newGeo(seed);
+      carveSills(this);
       deriveTerrain(this, false);
       this.geo.lands = labelLands(this);
       this.iceList = new Int32Array(0);
@@ -807,6 +811,7 @@ export class World {
   }
 
   temp(idx: number): number {
+    if (this.lp) return this.terrain.baseTemp[idx] + this.shiftNow - GEO.ICE_COOL * Math.min(1, this.ice![idx]);
     return this.terrain.baseTemp[idx] + this.shiftNow;
   }
 
@@ -1866,6 +1871,7 @@ export class World {
     else if (BIOMES[b].water) mul = 0.25 + 0.75 * c.g.swim;
     // плавники на суше мешают
     else mul *= 1 - 0.55 * Math.max(0, c.g.swim - 0.3);
+    if (this.lp) mul *= 1 - GEO.ICE_MOVE * Math.min(1, this.ice![idx]); // 🌋 по льду идти тяжело
     const v = c.g.speed * throttle * mul;
     c.v = v;
     if (v === 0) return 0;
@@ -2371,6 +2377,12 @@ export class World {
       case 'restoreRes':
         this.restoreResource(a.kind);
         break;
+      case 'co2':
+      case 'iceAge':
+      case 'sea':
+      case 'geoSpeed':
+        geoAction(this, a);
+        break;
       case 'climate': {
         const cl = this.climate;
         cl.target = a.target;
@@ -2667,7 +2679,8 @@ export class World {
       myc: nm ? my / nm : 0,
       plankton: nw ? pl / nw : 0,
       sick: sickAll,
-      co2: 0,
+      co2: this.lp ? this.geo!.co2 : 0,
+      ...(this.lp ? { sea: this.geo!.seaQ * GEO.M_PER_E, ice: this.geo!.iceLand } : {}),
     });
     if (this.history.length > 900) this.history.shift();
     if (this.oe) {

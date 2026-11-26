@@ -17,7 +17,7 @@ interface Particle {
 }
 
 /** Линзы «микромира»: что раскрашивает слой клеток. */
-export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease';
+export type Lens = 'off' | 'fert' | 'microbes' | 'plankton' | 'disease' | 'depth';
 
 /** Что игрок уже успел увидеть на экране (для карточек фактов; читает view). */
 export interface Seen {
@@ -46,6 +46,8 @@ const TILE_PX = 512;
 /** 🌋 Блок перепекания рельефа — 8×8 клеток (64 px при клетке 16); не больше BLK_FRAME блоков за кадр. */
 const BLK = 8;
 const BLK_FRAME = 12;
+/** …и не дольше стольких мс за кадр. */
+const BLK_MS = 4;
 /** Во сколько раз слой травы детальнее сетки клеток (сглаживание). */
 const OV = 3;
 
@@ -104,6 +106,8 @@ const SPRING_RINGS = ['#8a4a2a', '#e88a2a', '#e8d24a', '#3fb07a', '#2a7fbf'];
 
 const MIC_RAMP = [[20, 26, 51], [107, 63, 160], [255, 122, 217]];
 const PLANKTON_RAMP = [[11, 31, 77], [27, 143, 191], [127, 224, 122]];
+/** 🌊 Линза глубин: мелко — светло-бирюзовое, глубоко — тёмно-синее. */
+const DEPTH_RAMP = [[150, 235, 230], [40, 120, 200], [8, 22, 70]];
 
 interface Deco {
   kind: 'tree' | 'acacia' | 'bush' | 'reed' | 'cactus' | 'rock' | 'snowrock' | 'flower' | 'pebble' | 'spring' | 'stromatolite' | 'mat';
@@ -149,6 +153,8 @@ export class SurfaceRenderer {
   // ---- 🌋 перепекание рельефа после пересчёта (живая планета) ----
   /** Биомы, с которыми запечён рельеф; отпечаток рельефа (Terrain.rev) и сам рельеф на момент запекания. */
   private bakedBiome = new Uint8Array(0);
+  /** Вода ли клетка на запечённой картинке (блок ещё в очереди — картинка отстаёт от биома). */
+  private pixWater = new Uint8Array(0);
   private bakedRev = 0;
   private bakedTerrain: World['terrain'] | null = null;
   /** Очередь грязных блоков (номера) и отметки «уже в очереди». */
@@ -209,6 +215,7 @@ export class SurfaceRenderer {
     this.bakedTerrain = t;
     this.bakedRev = t.rev;
     this.bakedBiome = t.biome.slice();
+    this.pixWater = t.biome.map((b) => (BIOMES[b].water ? 1 : 0));
     const bw = Math.ceil(t.cols / BLK), bh = Math.ceil(t.rows / BLK);
     this.blkMark = new Uint8Array(bw * bh);
     this.blkQueue = [];
@@ -289,6 +296,11 @@ export class SurfaceRenderer {
     const x1 = Math.min(W, Math.round((bx + 1) * span)), y1 = Math.min(H, Math.round((by + 1) * span));
     const w = x1 - x0, h = y1 - y0;
     if (w <= 0 || h <= 0) return;
+    for (let cy = by * BLK; cy < Math.min(t.rows, (by + 1) * BLK); cy++)
+      for (let cx = bx * BLK; cx < Math.min(t.cols, (bx + 1) * BLK); cx++) {
+        const i = cy * t.cols + cx;
+        this.pixWater[i] = BIOMES[t.biome[i]].water ? 1 : 0;
+      }
     // высоты с полем в 1 пиксель — для освещения склонов на краях блока
     const ew = w + 2;
     const elev = new Float32Array(ew * (h + 2));
@@ -393,11 +405,14 @@ export class SurfaceRenderer {
     }
     if (this.blkQueue.length) {
       const g = this.bake.getContext('2d')!;
-      const n = Math.min(BLK_FRAME, this.blkQueue.length);
-      for (let k = 0; k < n; k++) {
+      // не больше BLK_FRAME блоков и BLK_MS мс за кадр (на медленном устройстве блок дороже — очередь длиннее)
+      const t0 = performance.now();
+      let n = 0;
+      while (n < BLK_FRAME && this.blkQueue.length && (n === 0 || performance.now() - t0 < BLK_MS)) {
         const b = this.blkQueue.shift()!;
         this.blkMark[b] = 0;
         this.bakeBlock(g, b, true);
+        n++;
       }
       this.rebakedLast = n;
       if (this.blkQueue.length) return;
@@ -960,6 +975,7 @@ export class SurfaceRenderer {
     const temp = t.baseTemp[i] + w.tempShift;
     const snow = clamp((0.1 - temp) / 0.08, 0, 1);
     const soilOn = w.settings.soil;
+    if (w.lp && this.geoColor(i, b.water, out, o)) return;
     if (b.water) {
       // лёд зимой; летом у устьев и берегов — зелёное цветение планктона (вода богаче среднего)
       const ice = clamp((0.04 - temp) / 0.05, 0, 1);
@@ -1020,7 +1036,34 @@ export class SurfaceRenderer {
     out[o + 3] = a * 255;
   }
 
-  /** Раскраска клетки линзой: плодородие, микробы, планктон, болезни. */
+  /**
+   * 🌋 Живая планета поверх травы: лёд ледников (непрозрачнее с толщиной: min(0,9; 3H), трещины — шум) и клетки, чей
+   * блок рельефа ещё не перепечён (берег сдвинулся: была вода — стала суша и наоборот). true — цвет уже записан.
+   */
+  private geoColor(i: number, water: boolean, out: Float32Array, o: number): boolean {
+    const w = this.world;
+    const H = w.ice ? w.ice[i] : 0;
+    const pw = this.pixWater[i] === 1;
+    if (pw !== water) {
+      // картинка отстаёт от рельефа: море ушло — сухое дно, пришло — вода
+      if (water) {
+        out[o] = 38; out[o + 1] = 78; out[o + 2] = 118; out[o + 3] = 0.85 * 255;
+      } else {
+        out[o] = 170; out[o + 1] = 160; out[o + 2] = 118; out[o + 3] = 0.8 * 255;
+      }
+      if (H <= 0.02) return true;
+    } else if (H <= 0.02 || water) return false;
+    const t = w.terrain;
+    const k = Math.min(0.9, 3 * H);
+    const n = (hash2((i % t.cols) * 0.9, Math.floor(i / t.cols) * 0.9) - 0.5) * 22 * Math.min(1, H * 2);
+    out[o] = 222 + n;
+    out[o + 1] = 236 + n;
+    out[o + 2] = 250;
+    out[o + 3] = Math.max(pw !== water ? out[o + 3] / 255 : 0, k) * 255;
+    return true;
+  }
+
+  /** Раскраска клетки линзой: плодородие, микробы, планктон, болезни, глубины. */
   private lensColor(i: number, out: Float32Array, o: number): void {
     const w = this.world;
     const t = w.terrain;
@@ -1070,12 +1113,44 @@ export class SurfaceRenderer {
         out[o + 3] = 0.85 * 255;
         return;
       }
+      case 'depth': {
+        // 🌋 глубины от нынешнего (межледникового) берега: изобаты −50 и −120 м — что осушится и когда
+        const m = this.depthAt(i);
+        const cols = t.cols;
+        const x = i % cols;
+        let line = 0;
+        for (const j of [x > 0 ? i - 1 : i, x < cols - 1 ? i + 1 : i, i >= cols ? i - cols : i, i + cols < t.biome.length ? i + cols : i]) {
+          const mj = this.depthAt(j);
+          if ((m >= -120) !== (mj >= -120)) line = 2;
+          else if (!line && (m >= -50) !== (mj >= -50)) line = 1;
+        }
+        if (line) {
+          const [r, g, bb] = line === 2 ? [255, 255, 255] : [255, 214, 90];
+          out[o] = r; out[o + 1] = g; out[o + 2] = bb; out[o + 3] = 0.95 * 255;
+          return;
+        }
+        if (m >= 0) {
+          out[o] = out[o + 1] = out[o + 2] = 40;
+          out[o + 3] = 0.45 * 255;
+          return;
+        }
+        ramp(DEPTH_RAMP, clamp(-m / 400, 0, 1), out, o);
+        out[o + 3] = 0.85 * 255;
+        return;
+      }
       default:
         out[o] = 10;
         out[o + 1] = 12;
         out[o + 2] = 20;
         out[o + 3] = 0.5 * 255;
     }
+  }
+
+  /** 🌋 Высота клетки от исходного (межледникового) уровня моря, м: −50 — мелководье, ниже −180 — глубина. */
+  depthAt(i: number): number {
+    const w = this.world, t = w.terrain;
+    const sea0 = t.seaLevel - (w.lp && w.geo ? w.geo.seaQ : 0);
+    return Math.round((t.elev[i] - sea0) * 3000);
   }
 
   /** Трава, снег и лёд — меняются с сезонами. Сглаживаем между клетками, чтобы не было «шашечек». */

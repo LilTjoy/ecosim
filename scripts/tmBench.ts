@@ -194,7 +194,7 @@ function det({ seed, T, mode, mk }: Ctx): void {
   const snapKB = S.bytes / 1024;
   const slack = loadavg()[0] > cpus().length ? 2 : 1;
   // 🌋 живая планета: + её клеточные поля (лёд, максимум льда, правки высоты, пепел/гарь/соль/морена — ≈ 275 КБ, P3)
-  const geoKB = S.geoCells ? (S.geoCells.ice.byteLength + S.geoCells.iceMax.byteLength + S.geoCells.elevD.byteLength + S.geoCells.fx8.byteLength) / 1024 : 0;
+  const geoKB = S.geoCells ? (S.geoCells.ice.byteLength + (S.geoCells.iceMax?.byteLength ?? 0) + S.geoCells.elevD.byteLength + (S.geoCells.fx8?.byteLength ?? 0)) / 1024 : 0;
   const kbLim = 1150 + (mode === 'neural' ? 1.3 : 0.45) * n + geoKB;
   const capP50 = med(caps), resMs = Math.max(resFresh, resSame), stepRatio = msB / msA;
   const warn: string[] = [];

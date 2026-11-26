@@ -49,7 +49,7 @@ function strokes(T: number, seed: number, w: World): Op[] {
 }
 
 /** Точка снимка: перед операцией j такта t (j = ops.length — перед шагом). */
-type Cap = { t: number; j: number; snap: WorldSnap; cursor: number; pend: number };
+type Cap = { t: number; j: number; snap: WorldSnap; cursor: number; pend: number; sea: number };
 
 const geoWorld = (mk: () => World, mode: BrainMode, seed: number, salt: number, on = true) => {
   const w = mk();
@@ -84,11 +84,13 @@ function sameStatics(a: World, b: World): string | null {
   return null;
 }
 
-export function geo({ seed, T, mode, salt, mk }: Ctx): void {
+export function geo({ seed, T, mode, salt, mk, flags }: Ctx): void {
   SNAP_DEV.strict = true;
   console.log(`seed ${seed} ${mode} tm=geo T=${T}`);
   // ---------------- D1 ----------------
   const A = geoWorld(mk, mode, seed, salt);
+  // этап 1a: --geoSpeed=4 — ледниковые циклы вчетверо чаще (точки снимков попадают и посреди наступления моря)
+  if (flags.geoSpeed === '4') A.apply({ k: 'geoSpeed', t: A.tick, v: 4 });
   const ops = strokes(T, seed, A);
   const R = mulberry32(seed * 7 + 99);
   // 10 точек: 4 посреди мазка (перед второй/третьей точкой такта), остальные — случайные такты перед шагом
@@ -107,12 +109,12 @@ export function geo({ seed, T, mode, salt, mk }: Ctx): void {
   let evac = 0;
   while (A.tick < T) {
     if (capAt.has(`${A.tick}:-1`)) {
-      caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length });
+      caps.push({ t: A.tick, j: -1, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
       open = null;
     }
     while (j < ops.length && ops[j].t === A.tick) {
       if (capAt.has(`${A.tick}:${j}`)) {
-        caps.push({ t: A.tick, j, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length });
+        caps.push({ t: A.tick, j, snap: A.captureState(), cursor: merged.length, pend: A.geo!.pend.length, sea: Math.round(A.geo!.seaQ * GEO.M_PER_E) });
         open = null; // конец мазка вошёл в снимок — дальше новое действие (как Timeline.grassOpen)
       }
       const o = ops[j++];
@@ -169,7 +171,7 @@ export function geo({ seed, T, mode, salt, mk }: Ctx): void {
   const midN = caps.filter((c) => c.pend > 0).length;
   const d1 = okN === caps.length && workerOk && cover.length === 0 && midN >= 3 && A.terrain.rev !== 0;
   console.log(`TM D1: ${d1 ? 'ok' : 'FAIL'} restores=${okN}/${caps.length} midStroke(pend>0)=${midN} worker=${workerOk ? 'same' : `DIFF ${hex(done?.digest[0] ?? 0)}≠${hex(dEnd)}${done?.error ? ' ' + done.error : ''}`} cover=${cover.length}${cover.length ? `(${cover.join(',')})` : ''} ops=${ops.length} acts=${merged.length} derives=${A.geo!.stats.derives} evacLogs=${evac} rev=${hex(A.terrain.rev)} elevD≠0=${A.elevD!.reduce((s, v) => s + (v !== 0 ? 1 : 0), 0)} end=${hex(dEnd)} ${(liveMs / T).toFixed(2)} ms/tick${fails.length ? ' | fails: ' + fails.join(' ') : ''}`);
-  console.log(` caps: ${caps.map((c) => `${c.t}${c.j >= 0 ? `/${c.j}` : ''}(pend ${c.pend})`).join(' ')}`);
+  console.log(` caps: ${caps.map((c) => `${c.t}${c.j >= 0 ? `/${c.j}` : ''}(pend ${c.pend}, sea ${c.sea} м)`).join(' ')} | glacials=${A.geo!.stats.glacials} bridges=${A.geo!.stats.bridges} Vg=${A.geo!.Vg.toFixed(2)}`);
 
   // ---------------- D2 ----------------
   const F = geoWorld(mk, mode, seed, salt); // будет затоплен и перекопан
@@ -186,12 +188,15 @@ export function geo({ seed, T, mode, salt, mk }: Ctx): void {
   };
   const fresh = new Terrain(F.width, F.height, F.cell, seed, F.env.sea, F.env.tempOffset, F.env.volcanism ?? 1);
   const freshW = geoWorld(mk, mode, seed, salt, false);
+  // свой исходный рельеф живой планеты — с порогами, вырезанными при reset (этап 1a), а не голый new Terrain
+  const freshLp = geoWorld(mk, mode, seed, salt);
   const d2: string[] = [];
   for (const [name, s] of [['!lp', sNo], ['old', sOld], ['lp@base', sLpBase]] as const) {
     flood(F);
     const before = F.terrain;
     F.loadState(s);
-    const e = (F.terrain !== before ? 'identity ' : '') + (sameTerrain(F.terrain, fresh) ?? '') + ' ' + (sameStatics(F, freshW) ?? '');
+    const [rt, rw] = F.lp ? [freshLp.terrain, freshLp] : [fresh, freshW];
+    const e = (F.terrain !== before ? 'identity ' : '') + (sameTerrain(F.terrain, rt) ?? '') + ' ' + (sameStatics(F, rw) ?? '');
     d2.push(`${name}:${e.trim() || 'same'}${F.lp ? '(lp)' : ''}`);
     if (!F.lp) {
       // вернуть миру живую планету для следующей проверки
@@ -209,8 +214,9 @@ export function geo({ seed, T, mode, salt, mk }: Ctx): void {
   const br = (sign: number) => {
     const w = geoWorld(mk, mode, seed, salt, false);
     w.loadState(s0);
-    w.apply({ k: 'terra', t: w.tick, pts: [900, 700], r: 150, dz: 1000 * sign });
-    w.apply({ k: 'terra', t: w.tick, pts: [2300, 1300], r: 150, dz: -1000 * sign });
+    // вдали от порогов reset (y 0,38…0,62 и 0,70…0,85 высоты): там elevD уже за пределом кисти, и мазки не симметричны
+    w.apply({ k: 'terra', t: w.tick, pts: [900, 400], r: 100, dz: 1000 * sign });
+    w.apply({ k: 'terra', t: w.tick, pts: [2308, 1856], r: 100, dz: -1000 * sign });
     for (let i = 0; i < 50; i++) w.step();
     return w;
   };
@@ -227,19 +233,26 @@ export function geo({ seed, T, mode, salt, mk }: Ctx): void {
   X.loadState(S1);
   d3.push('2→1:' + (sameTerrain(X.terrain, B1.terrain) ?? 'same') + '/' + (sameStatics(X, B1) ?? 'same'));
   X.loadState(s0);
-  d3.push('→base:' + (sameTerrain(X.terrain, fresh) ?? 'same'));
+  d3.push('→base:' + (sameTerrain(X.terrain, freshLp.terrain) ?? 'same'));
   const d3ok = sum1 === sum2 && B1.terrain.rev !== B2.terrain.rev && d3.every((x) => !/byte|rev|length|rivers|springs|sea|regions|\[/.test(x));
   console.log(`TM D3: ${d3ok ? 'ok' : 'FAIL'} sums ${sum1}/${sum2} rev ${hex(B1.terrain.rev)}/${hex(B2.terrain.rev)} ${d3.join(' ')}`);
 
   // ---------------- P1 ----------------
-  // тот же мир с lp и без (поведение на этапе 0 одинаково): попеременно 12 × 200 тактов
+  // этап 1a: lp и без него — уже разные миры (лёд, пороги), поэтому сравниваем один и тот же мир: каждый кусок
+  // 200 тактов идёт из одного снимка дважды — с живой планетой и с выключенными её хуками (lp = false; рельеф тот же)
   const L = geoWorld(mk, mode, seed, salt);
-  const N = geoWorld(mk, mode, seed, salt, false);
-  for (let i = 0; i < 2000; i++) { L.step(); N.step(); }
+  if (flags.geoSpeed === '4') L.apply({ k: 'geoSpeed', t: L.tick, v: 4 });
+  const N = geoWorld(mk, mode, seed, salt);
+  for (let i = 0; i < 2000; i++) L.step();
   let msL = 0, msN = 0;
   for (let k = 0; k < 12; k++) {
-    let t1 = now(); for (let i = 0; i < 200; i++) N.step(); msN += now() - t1;
-    t1 = now(); for (let i = 0; i < 200; i++) L.step(); msL += now() - t1;
+    const S = L.captureState();
+    N.loadState(S);
+    (N as { lp: boolean }).lp = false;
+    L.loadState(S); // обоим — свежие массивы из одного снимка (иначе живой мир проигрывает в памяти, а не в работе)
+    const runN = () => { const t1 = now(); for (let i = 0; i < 200; i++) N.step(); msN += now() - t1; };
+    const runL = () => { const t1 = now(); for (let i = 0; i < 200; i++) L.step(); msL += now() - t1; };
+    if (k % 2) { runL(); runN(); } else { runN(); runL(); }
   }
   // пересчёт при шаге моря: лесенка 0…−0.04…0, 3 прохода (первые 3 — разогрев JIT, отдельно)
   const dms: number[] = [];

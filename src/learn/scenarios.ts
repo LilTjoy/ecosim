@@ -175,3 +175,45 @@ export function addTwin(s: TwinStats, r: SimResult): void {
 export function twinWorld(base: PlanetParams, variant: Partial<PlanetParams>, seed: number, preset: keyof typeof PRESETS): SimResult {
   return simulate({ ...base, ...variant, seed }, PRESETS[preset].a, false);
 }
+
+// ---------------- 🌋 урок «Ледниковый период» ----------------
+
+/** Ледники и море живой планеты сейчас (null — мир без неё). */
+export interface IceNow {
+  /** Море от исходного уровня, м. */
+  sea: number;
+  /** Доля суши подо льдом. */
+  ice: number;
+  /** Сдвиг температуры острова (климат + геология), °C. */
+  dT: number;
+  co2: number;
+  Vg: number;
+  /** Мелкий порог посреди острова осушен — север и юг соединены. */
+  bridge: boolean;
+  /** Пролив Уоллеса на юге всё ещё разделяет (глубокий). */
+  wallace: boolean;
+  /** Самый южный ряд клеток суши со льдом толще 0,15 (−1 — льда нет). */
+  iceRow: number;
+}
+export function iceNow(w: World): IceNow | null {
+  const g = w.geo;
+  if (!w.lp || !g || !w.ice) return null;
+  const t = w.terrain, H = w.ice;
+  let iceRow = -1;
+  for (let i = H.length - 1; i >= 0; i--) if (H[i] > 0.15 && !BIOMES[t.biome[i]].water) { iceRow = Math.floor(i / t.cols); break; }
+  return {
+    sea: Math.round(g.seaQ * 3000),
+    ice: g.iceLand,
+    dT: ((g.geoShift + w.climate.shift) * 100) / 3,
+    co2: g.co2,
+    Vg: g.Vg,
+    bridge: g.sills.some((s) => s.kind === 'sill' && s.open),
+    wallace: g.sills.some((s) => s.kind === 'wallace' && !s.open),
+    iceRow,
+  };
+}
+/** Цели урока: перешеек открыт и Vg ≥ 0,4; пик — Vg ≥ 0,85 и льдом покрыто ≥ 15 % суши. */
+export const iceBridgeOk = (s: IceNow | null) => !!s && s.Vg >= 0.4 && s.bridge;
+export const icePeakOk = (s: IceNow | null) => !!s && s.Vg >= 0.85 && s.ice >= 0.15;
+/** Клетка карты ≈ 16 км (1 единица мира ≈ 1 км). */
+export const KM_PER_ROW = 16;

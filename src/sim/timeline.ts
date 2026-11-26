@@ -38,6 +38,11 @@ export type Action = { t: number } & (
   | { k: 'restoreRes'; kind: 'browse' | 'forage' }
   /** Климат: сдвиг температуры к target (единицы модели, 0,05 ≈ 4 °C) за ramp тактов. */
   | { k: 'climate'; target: number; ramp: number }
+  /** 🌋 Климат живой планеты: CO₂ (null — «как у природы»), ледниковья, море (м, 0 — «как у природы»), скорость геологии. */
+  | { k: 'co2'; ppm: number | null }
+  | { k: 'iceAge'; mode: 'cycle' | 'now' | 'end' | 'off' }
+  | { k: 'sea'; dm: number }
+  | { k: 'geoSpeed'; v: 1 | 4 }
   /** Только подпись на шкале, не применяется. */
   | { k: 'undo'; ref: number }
 );
@@ -219,10 +224,14 @@ export function rowOf(w: World): SeriesRow {
 const EMOJI = /^(?:\p{Extended_Pictographic}|\p{Regional_Indicator}{2})️?(?:‍\p{Extended_Pictographic}️?)*/u;
 export const iconOf = (text: string): string => EMOJI.exec(text)?.[0] ?? '•';
 
-/** Отметка шкалы по записи летописи. Крупные: стихии, поступки игрока, вымирание вида с пиком ≥ 30. */
+/** 🌋 Крупные события живой планеты (по карточке): перешеек открылся, пик ледниковья. */
+export const GEO_MAJOR: ReadonlySet<string> = new Set(['geo_landbridge', 'geo_lgm']);
+
+/** Отметка шкалы по записи летописи. Крупные: стихии, поступки игрока, вымирание вида с пиком ≥ 30, крупное у живой планеты. */
 export function eventMark(e: WorldEvent, act?: number): Mark {
   const peak = e.kind === 'extinct' ? Number(/на пике было (\d+)/.exec(e.text)?.[1] ?? 0) : 0;
-  return { t: e.tick, text: e.text, kind: e.kind, x: e.x, y: e.y, icon: iconOf(e.text), major: e.kind === 'disaster' || e.kind === 'player' || peak >= 30, act };
+  const major = e.kind === 'disaster' || e.kind === 'player' || peak >= 30 || (e.fact !== undefined && GEO_MAJOR.has(e.fact));
+  return { t: e.tick, text: e.text, kind: e.kind, x: e.x, y: e.y, icon: iconOf(e.text), major, act };
 }
 
 /** Сколько последних записей летописи сделано в такт t. */
@@ -306,6 +315,10 @@ export function actionText(a: Action): string {
     case 'resource': return '🍂 корм убран';
     case 'restoreRes': return '🌿 корм возвращён';
     case 'climate': return a.target > 0 ? '🌡 потепление' : a.target < 0 ? '❄️ похолодание' : '🌡 климат как был';
+    case 'co2': return a.ppm === null ? '🏭 CO₂ как у природы' : `🏭 CO₂ ${a.ppm} ppm`;
+    case 'iceAge': return { cycle: '🔁 ледниковья по орбите', now: '❄️ ледниковье', end: '💧 конец ледниковья', off: '⏹ без ледниковий' }[a.mode];
+    case 'sea': return a.dm === 0 ? '🌊 море как у природы' : `🌊 море ${a.dm > 0 ? '+' : '−'}${Math.abs(a.dm)} м`;
+    case 'geoSpeed': return `⏩ геология ×${a.v}`;
     case 'undo': return '↶ отмена';
   }
 }

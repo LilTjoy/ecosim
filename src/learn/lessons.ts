@@ -5,7 +5,7 @@ import { wilson } from '../planet/stats';
 import { EARTH_ENV, YEAR, type SurfaceEnv } from '../sim/world';
 import type { Lesson, LessonCtx, Step } from './engine';
 import {
-  CAP8, decomposerSwitch, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
+  CAP8, decomposerSwitch, iceBridgeOk, iceNow, icePeakOk, KM_PER_ROW, diseaseModel, fluxOrbit, gauseGoal, guilds, herbsOver, landMean, MARS, MARS_RD, outbreakById, outbreakSick, sickNow, soilFields,
   startLessonEpidemic,
 } from './scenarios';
 
@@ -37,9 +37,9 @@ const startPlanet = (c: LessonCtx, p: PlanetParams, speed: 0.1 | 0.3 | 1 = 0.3) 
   c.mem.gen = S(c).gen;
   c.show('planet');
 };
-const startEco = (c: LessonCtx, env: Partial<SurfaceEnv>, name: string) => {
+const startEco = (c: LessonCtx, env: Partial<SurfaceEnv>, name: string, geo = false) => {
   c.show('eco');
-  c.surface.newWorld({ ...EARTH_ENV, ...env, name }, 42);
+  c.surface.newWorld({ ...EARTH_ENV, ...env, name }, 42, geo);
   c.surface.changeSpeed(12);
   c.mem.rg = c.world.resetGen;
   c.mem.t0 = c.world.tick;
@@ -71,6 +71,13 @@ const soilNow = (c: LessonCtx) => {
     G: h ? h.grass : 0,
     K: c.world.corpses.length,
   };
+};
+
+/** 🌋 Море в метрах со знаком. */
+const sea = (m: number) => `${m > 0 ? '+' : m < 0 ? '−' : ''}${Math.abs(m)} м`;
+const iceReadout = (c: LessonCtx) => {
+  const s = iceNow(c.world);
+  return s ? `🌊 ${sea(s.sea)} · 🧊 ${Math.round(s.ice * 100)}% · ${s.dT < 0 ? '❄️' : '🌡'} ${s.dT >= 0 ? '+' : '−'}${Math.abs(Math.round(s.dT))} °C · CO₂ ${Math.round(s.co2)}` : '';
 };
 
 const microLock = (c: LessonCtx) => (decomposerSwitch(c.world) && soilFields(c.world) ? null : '🔒 Появится вместе с микробами в почве');
@@ -889,5 +896,102 @@ export const LESSONS: Lesson[] = [
         },
       },
     ],
+  },
+  {
+    id: 'ice',
+    icon: '❄️',
+    title: 'Ледниковый период',
+    teaser: 'Охладим планету и посмотрим, как уходит море и растут ледники.',
+    minutes: 6,
+    cards: ['geo.geo_iceage', 'geo.geo_lgm', 'geo.geo_sealevel', 'geo.geo_landbridge', 'geo.geo_timescale'],
+    readout: (c) => iceReadout(c),
+    steps: [
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Этот остров — на «живой планете»: орбита раскачивает климат, на холодном севере копится лёд, а уровень моря следует за льдом всей Земли. Посреди острова — мелкий пролив, на юге — глубокий. Создадим мир и дадим ему устояться.',
+        action: { label: '🌋 Новый мир: живая планета', run: (c) => startEco(c, {}, 'Ледниковый период', true) },
+        watch: {
+          hint: (c) => `Мир устраивается… ${Math.min(ticks(c), 3000)}/3000`,
+          test: (c) => ticks(c) >= 3000 && !!iceNow(c.world),
+          giveUp: { ticks: 6000, text: 'Мир без живой планеты — нажмите «↻ Ещё раз».' },
+          onPass: (c) => {
+            const s = iceNow(c.world)!;
+            Object.assign(c.mem, { row0: s.iceRow, sp0: c.world.species.living().length });
+          },
+          done: (c) => {
+            const s = iceNow(c.world)!;
+            return `Сейчас межледниковье, как у нас: море ${sea(s.sea)}, льдом покрыто ${Math.round(s.ice * 100)}% суши — только горы и крайний север. Видов на острове: ${c.world.species.living().length}.`;
+          },
+        },
+      },
+      {
+        text: 'Сначала предсказание. Линза 🔬 «🌊 Глубины» покажет, где мелко: светлое — меньше 50 м, линия — глубина 120 м.',
+        quiz: {
+          q: 'Океан опустится на 120 метров. Что станет с мелким проливом посреди острова?',
+          options: ['Ничего — море есть море', 'Он станет сушей — перешейком между севером и югом', 'Он станет глубже'],
+          correct: 1,
+          explain: 'Дно пролива — всего 30–50 м: когда воду забирают ледники, оно выходит на сушу. А глубокий пролив на юге (−390 м) не осушится никогда — это «линия Уоллеса» острова.',
+        },
+      },
+      {
+        view: 'eco',
+        checkpoint: true,
+        text: 'Начнём ледниковье. Чтобы не ждать 8 лет острова, включим «Геология ×4»: орбита и ледники пойдут вчетверо быстрее, эволюция — нет.',
+        action: {
+          label: '❄️ Начать ледниковье',
+          run: (c) => {
+            c.show('eco');
+            c.surface.act({ k: 'iceAge', mode: 'now' });
+            c.surface.act({ k: 'geoSpeed', v: 4 });
+            c.surface.changeSpeed(12);
+            c.mem.t0 = c.world.tick;
+          },
+        },
+        watch: {
+          hint: (c) => {
+            const s = iceNow(c.world);
+            return s ? `Ждём, пока перешеек выйдет из воды: море ${sea(s.sea)} (нужно ниже −51 м)` : 'Мир без живой планеты';
+          },
+          test: (c) => iceBridgeOk(iceNow(c.world)),
+          giveUp: { ticks: 30000 },
+          onPass: (c) => (c.mem.seaB = iceNow(c.world)!.sea),
+          done: (c) => `🌉 Перешеек открылся на ${sea(num(c, 'seaB'))}: север и юг соединились, звери суши могут перейти. А южный пролив по-прежнему глубокий — его не перейти пешком.`,
+        },
+      },
+      {
+        view: 'eco',
+        text: 'Ледники растут дальше. Смотрите, как белые языки льда ползут на юг, а трава под ними исчезает.',
+        watch: {
+          hint: (c) => {
+            const s = iceNow(c.world);
+            return s ? `Ждём пика: лёд ${Math.round(s.ice * 100)}% суши (нужно ≥ 15%), глобальный лёд ${Math.round(s.Vg * 100)}% от ледникового максимума (нужно ≥ 85%)` : 'Мир без живой планеты';
+          },
+          test: (c) => icePeakOk(iceNow(c.world)),
+          giveUp: { ticks: 30000 },
+          done: (c) => {
+            const s = iceNow(c.world)!;
+            const row0 = num(c, 'row0');
+            const km = s.iceRow >= 0 && row0 >= 0 && s.iceRow > row0 ? ` Край ледника сдвинулся на юг на ${(s.iceRow - row0) * KM_PER_ROW} км.` : '';
+            return `🧊 Пик ледниковья: море ${sea(s.sea)}, льдом покрыто ${Math.round(s.ice * 100)}% суши, остров холоднее на ${Math.abs(Math.round(s.dT))} °C, CO₂ упал до ${Math.round(s.co2)} ppm — океан забирает его в холод.${km} Видов на острове: ${c.world.species.living().length} (было ${num(c, 'sp0')}).`;
+          },
+        },
+      },
+      {
+        text: 'И главный вопрос.',
+        quiz: {
+          q: 'Кому ледниковье опаснее всего?',
+          options: ['Тем, кто живёт только на севере и не может уйти на юг', 'Морским животным', 'Хищникам на юге'],
+          correct: 0,
+          explain: 'Лёд наступает с севера: кто живёт только там, теряет свою землю. Выживают те, кто успевает отступить в тёплые убежища — рефугиумы. Нажмите «💧 Конец ледниковья» во вкладке «🛠 Стихии → Климат», чтобы посмотреть, как быстро тает лёд.',
+        },
+      },
+    ],
+    onExit: (c) => {
+      // только в мире урока: свой мир игрока не трогаем
+      if (!c.world.lp || c.world.resetGen !== num(c, 'rg')) return;
+      c.surface.act({ k: 'iceAge', mode: 'cycle' });
+      c.surface.act({ k: 'geoSpeed', v: 1 });
+    },
   },
 ];

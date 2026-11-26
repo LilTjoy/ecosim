@@ -227,6 +227,8 @@ export function load({ seed, T, mode, mk }: Ctx): void {
 // ---------------- thin ----------------
 
 /** Ненастоящий мир для прореживания: такты, записи истории каждые 20, «снимки» по 1.6 МБ. */
+/** --snapKB=N — размер снимка подставного мира (по умолчанию 1,6 МБ; 🌋 P3: размер снимка мира с живой планетой). */
+let FAKE_BYTES = 1.6 * 1048576;
 function fakeWorld() {
   const counts = new Map<number, number>();
   for (let k = 1; k <= 10; k++) counts.set(k, 50);
@@ -247,7 +249,7 @@ function fakeWorld() {
       }
     },
     captureState(): WorldSnap {
-      return { tick: this.tick, bytes: 1.6 * 1048576, digest: this.tick, cells: {}, actN: 0, inN: 0 } as unknown as WorldSnap;
+      return { tick: this.tick, bytes: FAKE_BYTES, digest: this.tick, cells: {}, actN: 0, inN: 0 } as unknown as WorldSnap;
     },
     loadState(s: WorldSnap, h: World['history'] = []) {
       this.tick = s.tick;
@@ -263,6 +265,7 @@ function fakeWorld() {
 export function thin({ flags }: Ctx): void {
   const N = Number(flags.ticks ?? 200_000);
   const small = flags.small === '1';
+  if (flags.snapKB) FAKE_BYTES = Number(flags.snapKB) * 1024;
   const w = fakeWorld();
   const W = w as unknown as World;
   const tl = new Timeline();
